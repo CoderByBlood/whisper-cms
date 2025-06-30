@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/whisper-cms-core",
+    "plugins/whisper-cms-plugin-api",
+    "plugins/whisper-cms-plugin-admin",
+    "themes/whisper-cms-theme-api",
+    "themes/whisper-cms-theme-wisp"
+]
