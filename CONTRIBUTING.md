@@ -1,9 +1,9 @@
-# Contributing to Whisper CMS
+# Contributing to WhisperCMS
 
 :balloon: Thanks for your help improving the project! We are so happy to have
 you!
 
-There are opportunities to contribute to Whisper CMS at any level. It doesn't
+There are opportunities to contribute to WhisperCMS at any level. It doesn't
 matter if you are just getting started with Rust or are the most weathered
 expert, we can use your help.
 
@@ -14,7 +14,7 @@ It should be considered a map to help you navigate the process.
 
 ## Conduct
 
-The Whisper CMS project adheres to the [Rust Code of Conduct][coc]. This
+The WhisperCMS project adheres to the [Rust Code of Conduct][coc]. This
 describes the _minimum_ behavior expected from all contributors. Instances of
 violations of the Code of Conduct can be reported by contacting the project team
 at [moderation@whispercms.com](mailto:moderation@whispercms.com).
@@ -26,8 +26,8 @@ at [moderation@whispercms.com](mailto:moderation@whispercms.com).
 For any issue, there are fundamentally three ways an individual can contribute:
 
 1. By opening the issue for discussion: For instance, if you believe that you
-   have discovered a bug in Whisper CMS, creating a new issue in [the
-   whisper-cms issue tracker][issue] is the way to report it.
+   have discovered a bug in WhisperCMS, creating a new issue in [the whisper-cms
+   issue tracker][issue] is the way to report it.
 
 2. By helping to triage the issue: This can be done by providing supporting
    details (a test case that demonstrates a bug), providing suggestions on how
@@ -36,7 +36,7 @@ For any issue, there are fundamentally three ways an individual can contribute:
 3. By helping to resolve the issue: Typically this is done either in the form of
    demonstrating that the issue reported is not a problem after all, or more
    often, by opening a Pull Request that changes some bit of something in
-   Whisper CMS in a concrete and reviewable manner.
+   WhisperCMS in a concrete and reviewable manner.
 
 [issue]: https://github.com/CoderByBlood/whisper-cms/issues
 
@@ -55,7 +55,7 @@ PR that helps others avoid the problems that you encountered.
 
 ### Submitting a Bug Report
 
-When opening a new issue in the Whisper CMS issue tracker, you will be presented
+When opening a new issue in the WhisperCMS issue tracker, you will be presented
 with a basic template that should be filled in. If you believe that you have
 uncovered a bug, please fill out this form, following the template to the best
 of your ability. Do not worry if you cannot answer every detail, just fill in
@@ -66,8 +66,8 @@ evaluate the report is a description of the behavior you are seeing and a simple
 test case we can use to recreate the problem on our own. If we cannot recreate
 the issue, it becomes impossible for us to fix.
 
-In order to rule out the possibility of bugs introduced by userland code, test
-cases should be limited, as much as possible, to using only Whisper CMS APIs.
+In order to rule out the possibility of bugs introduced by user land code, test
+cases should be limited, as much as possible, to using only WhisperCMS APIs.
 
 See [How to create a Minimal, Complete, and Verifiable example][mcve].
 
@@ -98,12 +98,12 @@ In the majority of cases, issues are resolved by opening a Pull Request. The
 process for opening and reviewing a Pull Request is similar to that of opening
 and triaging issues, but carries with it a necessary review and approval
 workflow that ensures that the proposed changes meet the minimal quality and
-functional guidelines of the Whisper CMS project.
+functional guidelines of the WhisperCMS project.
 
 ## Pull Requests
 
 Pull Requests are the way concrete changes are made to the code, documentation,
-and dependencies in the Whisper CMS repository.
+and dependencies in the WhisperCMS repository.
 
 Even tiny pull requests (e.g., one character pull request fixing a typo in API
 documentation) are greatly appreciated. Before making a large change, it is
@@ -120,7 +120,7 @@ likely be accepted.
 ## I want to support
 
 Awesome! The best way to support us is to recommend it to your
-classmates/colleagues/friends, write blog posts and tutorials on Whisper CMS
+classmates/colleagues/friends, write blog posts and tutorials on WhisperCMS
 projects and help out other users in the community. It is difficult enough to
 keep an open source afloat, so every little help matters, especially if it can
 directly/indirectly lighten the core team's mental load.
@@ -128,7 +128,7 @@ directly/indirectly lighten the core team's mental load.
 ## I want to join
 
 We are always looking for long-term contributors. If you want to commit
-longer-term to Whisper CMS's open source effort, definitely talk with us! There
+longer-term to WhisperCMS's open source effort, definitely talk with us! There
 may be various forms of "grant" to compensate for your devotion. Although at
 this stage we are not resourceful enough to offer a stable stream of income to
 contributors.
