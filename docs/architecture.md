@@ -66,7 +66,7 @@ contributors—to understand how WhisperCMS works and how to extend it.
 - Roles are lowercase
 - Systems, contains, and components are capitalized
 - Relationship should be verbs and lowercase
-- Use `*Interface` suffixes for system, containers, and components that specify
+- Use `*SPI` suffixes for system, containers, and components that specify
   interfaces that 3rd parties must implement
 - Use `*API` suffixes for systems, containers, and components that implement
   contracts
@@ -140,7 +140,7 @@ WhisperCMS is composed of several **containers**, each with a clear role:
 
 - Implemented as an SPA (Single-Page Application) in JavaScript.
 - Interacts with the Kernel via the AdminAPI.
-- Implements the shared ThemeInterface.
+- Implements the shared ThemeSPI.
 
 **Responsibilities:**
 
@@ -175,7 +175,7 @@ The _Kernel_ is the heart of WhisperCMS. It includes:
 
 ![Kernel Component Overview Key](./diagrams/structurizr-WhisperCMS-Component-Kernel-key.svg)
 
-- **ThemeInterface** _(interface)_
+- **ThemeSPI** _(interface)_
 
   - Contract that all themes must implement.
 
@@ -241,7 +241,7 @@ Represents the **Admin UI** for site management.
 
 **Relationships:**
 
-- AdminTheme → ThemeInterface (implements)
+- AdminTheme → ThemeSPI (implements)
 - AdminTheme → AdminAPI (calls for data)
 - StaticService → AdminSPA (serves static assets)
 - ThemeManager → AdminTheme (installs themes)
@@ -282,7 +282,7 @@ External reverse proxy used to secure and route traffic.
 
 - Core CMS logic.
 - Static file serving, plugin/theme management.
-- Extensible via interfaces (ThemeInterface).
+- Extensible via interfaces (ThemeSPI).
 
 ✅ **Git Integration:**
 
