@@ -6,8 +6,8 @@ workspace {
         WhisperCMS = softwareSystem WhisperCMS "Multi-site Rust CMS with plugin/theme system" {
 
             Kernel = container Kernel "The core" "Rust" "internal" {
-                // PluginInterface = component PluginInterface "The spec all plugins must implement" "Rust" "interface"
-                ThemeInterface = component ThemeInterface "The spec all themes must implement" "Rust" "interface"
+                // PluginSPI = component PluginSPI "The spec all plugins must implement" "Rust" "interface"
+                ThemeSPI = component ThemeSPI "The spec all themes must implement" "Rust" "interface"
                 AdminAPI = component AdminAPI "The API for Admin UI" "Rust" "api"
 
                 StaticService = component StaticService "Serve static content" "Rust" "service"
@@ -32,7 +32,7 @@ workspace {
             AdminTheme = container AdminTheme "Admin User Experience" "SPA" "ui, external" {
                 AdminSPA = component AdminSPA "The Admin UI" "Javascript" "ui, external"
 
-                this -> ThemeInterface "implements"
+                this -> ThemeSPI "implements"
                 this -> AdminAPI "calls"
 
                 StaticService -> AdminSPA "serves"
