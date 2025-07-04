@@ -1,5 +1,5 @@
 [package]
-name = "whisper-cms-theme-api"
+name = "whisper-cms-theme-spi"
 version = "0.1.0"
 edition = "2021"
 
