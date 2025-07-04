@@ -1,5 +1,5 @@
 [package]
-name = "whisper-cms-plugin-api"
+name = "whisper-cms-plugin-spi"
 version = "0.1.0"
 edition = "2021"
 
