@@ -1,0 +1,38 @@
+# Load .env file automatically
+env_files = [".env"]
+
+[env]
+# Default output folder (customizable per project)
+PLANTUML_OUTPUT = "docs/diagrams"
+PLANTUML_INTERMEDIATE = "docs/diagrams/plantuml"
+
+[tasks.generate-diagrams]
+workspace = false
+description = "Export Structurizr DSL to PlantUML, then render SVG diagrams"
+script = [
+    "echo '🔹 Exporting Structurizr workspace to PlantUML...'",
+    "mkdir -p ${PLANTUML_INTERMEDIATE}",
+    "${STRUCTURIZR_CLI} export -workspace docs/workspace.dsl -format plantuml -output ${PLANTUML_INTERMEDIATE}",
+
+    "echo '🔹 Rendering PlantUML diagrams to SVG...'",
+    "mkdir -p ${PLANTUML_OUTPUT}",
+    "java -jar ${PLANTUML_JAR} -tsvg ${PLANTUML_INTERMEDIATE}/*.puml -o ../"
+]
+
+[tasks.validate-diagrams]
+workspace = false
+description = "Validate Structurizr DSL workspace"
+script = [
+    "echo '🔹 Validating Structurizr workspace.dsl...'",
+    "${STRUCTURIZR_CLI} validate -workspace docs/workspace.dsl"
+]
+
+[tasks.clean-diagrams]
+workspace = false
+description = "Remove all generated diagram files"
+script = [
+    "echo '🔹 Cleaning generated diagrams...'",
+    "rm -rf ${PLANTUML_INTERMEDIATE}",
+    "rm -f ${PLANTUML_OUTPUT}/*.png",
+    "rm -f ${PLANTUML_OUTPUT}/*.svg"
+]
