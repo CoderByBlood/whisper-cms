@@ -1,32 +1,42 @@
 workspace {
 
     model {
-        admin = person Admin "Manages content, sites, users, plugins, themes"
+        admin = person admin "Manages content, sites, users, plugins, themes"
 
         WhisperCMS = softwareSystem WhisperCMS "Multi-site Rust CMS with plugin/theme system" {
 
             Kernel = container Kernel "The core" "Rust" "internal" {
+                Core = component Core "The OS level process" "Rust" "application"
                 // PluginSPI = component PluginSPI "The spec all plugins must implement" "Rust" "interface"
                 ThemeSPI = component ThemeSPI "The spec all themes must implement" "Rust" "interface"
                 AdminAPI = component AdminAPI "The API for Admin UI" "Rust" "api"
 
                 StaticService = component StaticService "Serve static content" "Rust" "service"
-                SettingsService = component SettingsService "Configuration not stored in the content database" "Rust" "service"
-                // OptionsService = component OptionsService "Configuration stored in the content database" "Rust" "service"
-                SetupService = component SetupService "Initial set up for Whisper CMS" "Rust" "service"
+                // ConfigService = component ConfigService "Configuration stored in the content database" "Rust" "service"
+                ContentService = component ContentService "Serves dynamic content" "Rust" "service"
+                DataService = component DataService "Processes SQL and DDL" "Rust" "service"
+                StartupManager = component StartupManager "Verifies WhisperCMS correctly starts" "Rust" "service"
                 RequestManager = component RequestManager "Manages all content requests" "Rust" "service, router"
                 ThemeManager = component ThemeManager "CRUDs themes from git" "Rust" "service"
 
-                Pingora = component Pingora "Reverse Proxy" "Rust" "library"
+                Pingora = component Pingora "For Statics" "Rust" "library"
                 Git2 = component Git2 "In process git" "Rust" "library"
+                Axum = component Axum "Content routing" "Rust" "library"
+                Argon2 = component Argon2 "File encryption" "Rust" "library"
 
-                SetupService -> ThemeManager "loads"
-                RequestManager -> SettingsService "checks for settings"
-                RequestManager -> SetupService "starts"
+                Core -> StartupManager "checks with"
+                StartupManager -> DataService "starts"
+                StartupManager -> Argon2 "uses"
+                //Core -> RequestManager "binds"
+
+                AdminAPI -> ThemeManager "loads"
                 RequestManager -> StaticService "forwards"
-                // AdminAPI -> OptionsService "uses"
+                RequestManager -> ContentService "forwards"
+                RequestManager -> Core "bound by"
+                // AdminAPI -> ConfigService "uses"
                 StaticService -> Pingora "uses"
                 ThemeManager -> Git2 "uses"
+                ContentService -> Axum "uses"
             }
 
             AdminTheme = container AdminTheme "Admin User Experience" "SPA" "ui, external" {
@@ -43,6 +53,10 @@ workspace {
                 admin -> this "uses console securely" "https"
                 this -> RequestManager "requests"
                 RequestManager -> this "responds"
+            }
+
+            PostgreSQL = container PostgreSQL "PostgreSQL Database Server" "C" "external" {
+                DataService -> PostgreSQL "calls"
             }
         }
     }
@@ -76,6 +90,7 @@ workspace {
             element "Person" {
               background #08427b
               color #ffffff
+              shape Person
             }
 
             # Software Systems
@@ -94,6 +109,11 @@ workspace {
             element "Component" {
               background #85bbf0
               color #000000
+            }
+
+            # Applications
+            element "application" {
+                shape Diamond
             }
 
             # Interfaces
