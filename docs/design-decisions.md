@@ -135,25 +135,23 @@ configuration
 
 ## Multi-Site
 
-### Decision: Multi-site will be built-in not bolted-on through a plugin
+### Decision: Multi-site will be provided through a plugin
 
-**Rationale:** Given the prevalence of the Cloud and the desire to optimize
-resources, this is a very common use-case as should be part of the core
+**Rationale:** This is a very narrow use case as less than 5% of Wordpress
+installations use multi-site - if a higher-level management plane is needed,
+that can be built on top
 
 #### Alternatives Considered
 
-- Single-site default: One site is automatically accommodated in a multi-site
-  configuration
+- Built-in Multi-site: Adds database complexity, admin complexity, and developer
+  complexity and violates Performance, User Experience, and Developer Experience
+  priorities.
 
 #### Tradeoffs
 
-- Database complexity: Need additional table(s) and foreign keys
-- Performance: The additional table and foreign keys will impact queries that
-  require joins when in a single-site configuration
-- Admin user experience: Need additional level of permissions for site admins vs
-  platform (super) admins
-- Developer experience: To avoid compromising the user experience, the admin
-  console must detect single- vs multi-site configuration
+- Multiple multi-site plugins which may handle multi-site in different ways
+- Some plugins may not support a multi-set configuration - cross plugin
+  compatibility
 
 ---
 
@@ -241,20 +239,24 @@ should not support headless crawling
 
 ## Internationalization (i18n) and Localization (l10n)
 
-### Decision: I18n and l10n will be built-in not bolted-on through a plugin
+### Decision: Basic I18n and l10n will be provided through an official plugin
 
 **Rationale:** Serving content in multiple languages is required for many
-applications and is a basic function of a CMS
+applications and is a basic (but optional) function of a CMS - this approach
+balances the availability of out of the box functionality through a official
+plugin with the ability for other developers to provide a different
+implementation.
 
 #### Alternatives Considered
 
-- Plugin: Given how tied translations are to the content a plugin would require
-  unnecessary overhead for multilingual applications
+- Built-in: Would compromise the admins' User Experience and possibly
+  Performance priorities should an alternative way to manage i18n be supplied
+  via a plugin.
 
 #### Tradeoffs
 
-- Performance: Translation resolution is not free and will need a solution that
-  minimizes the performance impact for single language applications
+- Admins' User Experience: For the sites that need i18n, the admin must load the
+  official plugin
 
 <!-- TODO: Revisit when necessary
 ## Caching Strategy
