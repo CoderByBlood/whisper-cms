@@ -1,175 +1,90 @@
-use clap::{Parser, Subcommand};
+mod args;
+mod settings;
+mod ui;
 
-#[derive(Parser)]
-#[command(name = "WhisperCMS", version, about)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+use args::WhisperCmsArgs;
+use clap::Parser;
 
-#[derive(Subcommand)]
-enum Commands {
-    Install {
-        #[arg(short, long, env = "WHISPER_CONFIG_PASSWORD")]
-        password: Option<String>,
+use crate::settings::Settings;
 
-        #[arg(short, long, env = "WHISPER_CONFIG_FILE")]
-        output: Option<String>,
-
-        #[arg(short = 'H', long, env = "PGHOST")]
-        pghost: Option<String>,
-
-        #[arg(short = 'P', long, env = "PGPORT")]
-        pgport: Option<String>,
-
-        #[arg(short = 'U', long, env = "PGUSER")]
-        pguser: Option<String>,
-
-        #[arg(short = 'W', long, env = "PGPASSWORD")]
-        pgpassword: Option<String>,
-
-        #[arg(short = 'D', long, env = "PGDATABASE")]
-        pgdatabase: Option<String>,
-    },
-    Start {
-        #[arg(short, long, env = "WHISPER_CONFIG_PASSWORD")]
-        password: Option<String>,
-
-        #[arg(short, long, env = "WHISPER_CONFIG_FILE")]
-        input: Option<String>,
-    },
-    Rotate {
-        #[arg(short, long)]
-        old: String,
-
-        #[arg(short, long)]
-        new: String,
-
-        #[arg(short, long)]
-        config: String,
-    },
-}
 fn main() {
-    let cli = Cli::parse();
+    let args = WhisperCmsArgs::parse();
 
-    match &cli.command {
-        Commands::Install {
-            password: _,
-            output: _,
-            pghost: _,
-            pgport: _,
-            pguser: _,
-            pgpassword: _,
-            pgdatabase: _,
+    match &args.command {
+        args::Commands::Install {
+            password,
+            output,
+            pghost,
+            pgport,
+            pguser,
+            pgpassword,
+            pgdatabase,
         } => {
-            //
-        }
-        Commands::Start {
-            password: _,
-            input: _,
-        } => {
-            //
-        }
-        Commands::Rotate {
-            old: _,
-            new: _,
-            config: _,
-        } => {}
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
+            match ui::prompt_for_install(
+                password, output, pghost, pgport, pguser, pgpassword, pgdatabase,
+            ) {
+                Ok(ui::Commands::Install {
+                    password,
+                    output,
+                    pghost,
+                    pgport,
+                    pguser,
+                    pgpassword,
+                    pgdatabase,
+                }) => {
+                    let settings = Settings {
+                        output: output,
+                        pghost: pghost,
+                        pgport: pgport,
+                        pguser: pguser,
+                        pgpassword: pgpassword,
+                        pgdatabase: pgdatabase,
+                    };
 
-    #[test]
-    fn parse_install_subcommand_with_all_args() {
-        let cli = Cli::parse_from([
-            "whispercms",
-            "install",
-            "--password",
-            "supersecret",
-            "--output",
-            "config.enc",
-            "-H",
-            "localhost",
-            "-P",
-            "5432",
-            "-U",
-            "admin",
-            "-W",
-            "password123",
-            "-D",
-            "whisper_db",
-        ]);
-
-        match cli.command {
-            Commands::Install {
-                password,
-                output,
-                pghost,
-                pgport,
-                pguser,
-                pgpassword,
-                pgdatabase,
-            } => {
-                assert_eq!(password.unwrap(), "supersecret");
-                assert_eq!(output.unwrap(), "config.enc");
-                assert_eq!(pghost.unwrap(), "localhost");
-                assert_eq!(pgport.unwrap(), "5432");
-                assert_eq!(pguser.unwrap(), "admin");
-                assert_eq!(pgpassword.unwrap(), "password123");
-                assert_eq!(pgdatabase.unwrap(), "whisper_db");
+                    match settings.write_encrypted(&password) {
+                        Ok(()) => println!("{:?} was successfully encrypted", settings.output),
+                        Err(err) => eprintln!("{:?}", err),
+                    }
+                }
+                Ok(ui::Commands::Start { .. }) => eprintln!("Start is a bad command"),
+                Ok(ui::Commands::Rotate { .. }) => eprintln!("Rotate is a bad command"),
+                Err(err) => eprintln!("{:?}", err),
             }
-            _ => panic!("Expected Install command"),
         }
-    }
-
-    #[test]
-    fn parse_start_subcommand_with_args() {
-        let cli = Cli::parse_from([
-            "whispercms",
-            "start",
-            "--password",
-            "startsecret",
-            "--input",
-            "config.enc",
-        ]);
-
-        match cli.command {
-            Commands::Start { password, input } => {
-                assert_eq!(password.unwrap(), "startsecret");
-                assert_eq!(input.unwrap(), "config.enc");
+        args::Commands::Start { password, input } => match ui::prompt_for_start(password, input) {
+            Ok(ui::Commands::Start { password, input }) => {
+                match Settings::read_encrypted(&password, &input) {
+                    Ok(settings) => println!("{:?} was successfully decrypted", settings.output),
+                    Err(err) => eprintln!("{:?}", err),
+                }
             }
-            _ => panic!("Expected Start command"),
-        }
-    }
+            Ok(ui::Commands::Install { .. }) => eprintln!("Install is a bad command"),
+            Ok(ui::Commands::Rotate { .. }) => eprintln!("Rotate is a bad command"),
+            Err(err) => eprintln!("{:?}", err),
+        },
+        args::Commands::Rotate { old, new, config } => {
+            match ui::prompt_for_rotate(old, new, config) {
+                Ok(ui::Commands::Rotate { old, new, config }) => {
+                    match Settings::read_encrypted(&old, &config) {
+                        Ok(settings) => {
+                            println!("{:?} was successfully decrypted", settings.output);
+                            let mut settings = settings;
+                            settings.output = config;
 
-    #[test]
-    fn parse_rotate_subcommand() {
-        let cli = Cli::parse_from([
-            "whispercms",
-            "rotate",
-            "--old",
-            "oldpassword",
-            "--new",
-            "newpassword",
-            "--config",
-            "new-config.enc",
-        ]);
-
-        match cli.command {
-            Commands::Rotate { old, new, config } => {
-                assert_eq!(old, "oldpassword");
-                assert_eq!(new, "newpassword");
-                assert_eq!(config, "new-config.enc");
+                            match settings.write_encrypted(&new) {
+                                Ok(()) => {
+                                    println!("{:?} was successfully encrypted", settings.output)
+                                }
+                                Err(err) => eprintln!("{:?}", err),
+                            }
+                        }
+                        Err(err) => eprintln!("{:?}", err),
+                    }
+                }
+                Ok(ui::Commands::Install { .. }) => eprintln!("Install is a bad command"),
+                Ok(ui::Commands::Start { .. }) => eprintln!("Start is a bad command"),
+                Err(err) => eprintln!("{:?}", err),
             }
-            _ => panic!("Expected Rotate command"),
         }
-    }
-
-    #[test]
-    fn fails_without_subcommand() {
-        let result = Cli::try_parse_from(["whispercms"]);
-        assert!(result.is_err());
     }
 }
