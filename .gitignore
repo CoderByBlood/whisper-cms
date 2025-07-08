@@ -10,8 +10,12 @@ target
 .env
 .env.*
 
+# Ignore encrypted files
+*.enc
+
 # But don't ignore example files
 !.env.example
+!*.enc.example
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
