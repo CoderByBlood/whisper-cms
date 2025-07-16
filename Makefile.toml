@@ -1,21 +1,28 @@
-# Load .env file automatically
 env_files = [".env"]
 
 [env]
-# Default output folder (customizable per project)
 PLANTUML_OUTPUT = "docs/diagrams"
 PLANTUML_INTERMEDIATE = "docs/diagrams/plantuml"
 
 [tasks.generate-diagrams]
 workspace = false
-description = "Export Structurizr DSL to PlantUML, then render SVG diagrams"
+description = "Export Structurizr DSL to PlantUML C4 and UML Sequence Diagrams"
 script = [
-    "echo '🔹 Exporting Structurizr workspace to PlantUML...'",
+    "echo '🔹 Ensure output folders exist...'",
     "mkdir -p ${PLANTUML_INTERMEDIATE}",
+    "mkdir -p ${PLANTUML_OUTPUT}",
+
+    "echo '🔹 Export Structurizr workspace to PlantUML (C4)...'",
     "${STRUCTURIZR_CLI} export -workspace docs/workspace.dsl -format plantuml -output ${PLANTUML_INTERMEDIATE}",
 
+    "echo '🔹 Export Structurizr workspace to JSON...'",
+    "${STRUCTURIZR_CLI} export -workspace docs/workspace.dsl -format json -output ${PLANTUML_INTERMEDIATE}",
+    "mv -f ${PLANTUML_INTERMEDIATE}/workspace.json docs/workspace.json",
+
+    "echo '🔹 Generating UML Sequence Diagrams from Dynamic Views...'",
+    "python scripts/generate-sequence-diagrams.py docs/workspace.json ${PLANTUML_INTERMEDIATE}",
+
     "echo '🔹 Rendering PlantUML diagrams to SVG...'",
-    "mkdir -p ${PLANTUML_OUTPUT}",
     "java -jar ${PLANTUML_JAR} -tsvg ${PLANTUML_INTERMEDIATE}/*.puml -o ../"
 ]
 
@@ -34,5 +41,6 @@ script = [
     "echo '🔹 Cleaning generated diagrams...'",
     "rm -rf ${PLANTUML_INTERMEDIATE}",
     "rm -f ${PLANTUML_OUTPUT}/*.png",
-    "rm -f ${PLANTUML_OUTPUT}/*.svg"
+    "rm -f ${PLANTUML_OUTPUT}/*.svg",
+    "rm -f docs/workspace.json"
 ]

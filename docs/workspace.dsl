@@ -2,6 +2,7 @@ workspace {
 
     model {
         admin = person admin "Manages content, sites, users, plugins, themes"
+        su = person su "starts the system"
 
         WhisperCMS = softwareSystem WhisperCMS "Multi-site Rust CMS with plugin/theme system" {
 
@@ -14,7 +15,7 @@ workspace {
                 StaticService = component StaticService "Serve static content" "Rust" "service"
                 // ConfigService = component ConfigService "Configuration stored in the content database" "Rust" "service"
                 ContentService = component ContentService "Serves dynamic content" "Rust" "service"
-                DataService = component DataService "Processes SQL and DDL" "Rust" "service"
+                DataService = component DataService "Processes SQL, DML, & DDL" "Rust" "service"
                 StartupManager = component StartupManager "Verifies WhisperCMS correctly starts" "Rust" "service"
                 RequestManager = component RequestManager "Manages all content requests" "Rust" "service, router"
                 ThemeManager = component ThemeManager "CRUDs themes from git" "Rust" "service"
@@ -23,6 +24,8 @@ workspace {
                 Git2 = component Git2 "In process git" "Rust" "library"
                 Axum = component Axum "Content routing" "Rust" "library"
                 Argon2 = component Argon2 "File encryption" "Rust" "library"
+
+                su -> Core "starts"
 
                 Core -> StartupManager "checks with"
                 StartupManager -> DataService "starts"
@@ -50,12 +53,14 @@ workspace {
             }
 
             Nginx = container Nginx "Nginx" "Reverse Proxy" "router, external" {
+                su -> this "starts"
                 admin -> this "uses console securely" "https"
                 this -> RequestManager "requests"
                 RequestManager -> this "responds"
             }
 
             PostgreSQL = container PostgreSQL "PostgreSQL Database Server" "C" "external" {
+                su -> this "starts"
                 DataService -> PostgreSQL "calls"
             }
         }
@@ -82,6 +87,61 @@ workspace {
             include *
             autolayout lr
             title "WhisperCMS - AdminTheme - Component Diagram"
+        }
+
+        dynamic Kernel WhisperCMS-Installation-Sequence {
+            su -> Core "starts with configuration password"
+            Core -> StartupManager "check for configuration"
+            Core -> StartupManager "create password hash"
+            StartupManager -> Argon2 "write hash"
+            Core -> RequestManager "state change - Not Configured"
+            Core -> su "successfully started"
+            admin -> Nginx "GET /"
+            Nginx -> RequestManager "request index.html"
+            RequestManager -> Core "load index.html"
+            RequestManager -> Nginx "send response - configuration.vue"
+            Nginx -> admin "proxy response"
+            admin -> Nginx "/POST /login {password}"
+            Nginx -> RequestManager "do login"
+            RequestManager -> Core "validate password"
+            Core -> StartupManager "compare password with hash"
+            Core -> RequestManager "success"
+            RequestManager -> Nginx "send response"
+            Nginx -> admin "proxy response {json}"
+            admin -> Nginx "POST /configure {json - database info}"
+            Nginx -> RequestManager "do configuration"
+            RequestManager -> Core "save configuration"
+            Core -> StartupManager "validate configuration"
+            StartupManager -> DataService "test configuration"
+            DataService -> PostgreSQL "test connection"
+            StartupManager -> Argon2 "write configuration"
+            StartupManager -> Core "configuration stored"
+            Core -> RequestManager "state change - Configured"
+            RequestManager -> Nginx "send response - installation.vue"
+            Nginx -> admin "proxy response {json}"
+            admin -> Nginx "POST /install {json - site options}"
+            Nginx -> RequestManager "do installation"
+            RequestManager -> Core "install"
+            Core -> StartupManager "validate site options"
+            StartupManager -> DataService "store site options"
+            DataService -> PostgreSQL "write site options"
+            StartupManager -> Core "installed"
+            Core -> RequestManager "state change - Ready"
+            RequestManager -> Nginx "send response"
+            Nginx -> admin "proxy response {json}"
+        }
+
+        dynamic Kernel WhisperCMS-Startup-Sequence {
+            su -> Core "starts with configuration password"
+            Core -> StartupManager "check for configuration"
+            StartupManager -> Argon2 "read configuration"
+            Core -> StartupManager "validate configuration"
+            StartupManager -> DataService "test configuration"
+            DataService -> PostgreSQL "test connection"
+            DataService -> PostgreSQL "read site options"
+            Core -> StartupManager "validate site options"
+            Core -> RequestManager "state change - Ready"
+            Core -> su "successfully started"
         }
     
         styles {
