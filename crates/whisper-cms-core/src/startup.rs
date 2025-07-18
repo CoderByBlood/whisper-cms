@@ -7,15 +7,12 @@ use std::{
 };
 
 use data_encoding::BASE32_NOPAD;
-use thiserror::Error;
-
-use config::{ConfigSerializer, Encrypted, JsonCodec};
 use secrecy::{ExposeSecret, SecretString};
+use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
+use thiserror::Error;
 use validator::ValidationErrors;
 
-use config::ValidatedPassword;
-
-use crate::startup::config::ConfigError;
+use config::{ConfigError, ConfigSerializer, Encrypted, JsonCodec, ValidatedPassword};
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -30,6 +27,8 @@ pub enum StartupError {
 
     #[error("Could not load configuration error: {0}")]
     Config(#[from] ConfigError),
+    //#[error("Database access error: {0}")]
+    //Database(#[from] sqlx::Error),
 }
 
 pub struct Startup {
@@ -64,6 +63,7 @@ impl Startup {
 }
 
 pub trait DatabaseConfig {
+    async fn test_connection(&self) -> Result<bool, ConfigError>;
     fn to_connect_string(&self) -> String;
 }
 
@@ -85,6 +85,14 @@ pub struct PostgresConfig {
 }
 
 impl DatabaseConfig for PostgresConfig {
+    async fn test_connection(&self) -> Result<bool, ConfigError> {
+        let mut conn = PgConnection::connect(&self.to_connect_string()).await?;
+
+        // Test the connection using ping (available in sqlx 0.8.6)
+        conn.ping().await?;
+        Ok(true)
+    }
+
     fn to_connect_string(&self) -> String {
         format!(
             "postgresql://{}:{}@{}:{}/{}",
@@ -130,17 +138,17 @@ impl Configuration for Startup {
                 .get("port")
                 .ok_or(ConfigError::Format("missing `port` key".to_string()))?
                 .parse()?;
-            
+
             let user = de_ser
                 .get("user")
                 .ok_or(ConfigError::Format("missing `user` key".to_string()))?
                 .to_owned();
-            
+
             let password = de_ser
                 .get("password")
                 .ok_or(ConfigError::Format("missing `password` key".to_string()))?
                 .to_owned();
-            
+
             let database = de_ser
                 .get("database")
                 .ok_or(ConfigError::Format("missing `database` key".to_string()))?
@@ -168,7 +176,7 @@ mod tests {
     #[test]
     fn test_startup_get_configuration_none() -> Result<(), StartupError> {
         let password = "125anc$$DD".to_string();
-        let salt = "12345678910111213".to_string();
+        let salt = "123456789101112135".to_string();
         let port = 34;
         let address = "0.0.0.0".to_string();
 
@@ -192,5 +200,19 @@ mod tests {
             "postgresql://user:pass@localhost:123/db",
             config.to_connect_string()
         )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires database"]
+    async fn test_postgres_connection() {
+        let config = PostgresConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "myuser".to_string(),
+            password: "mypassword".to_string(),
+            database: "mydatabase".to_string(),
+        };
+
+        assert!(config.test_connection().await.unwrap());
     }
 }

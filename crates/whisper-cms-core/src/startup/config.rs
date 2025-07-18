@@ -33,7 +33,10 @@ pub enum ConfigError {
     Transformation(String),
 
     #[error("Serde error: {0}")]
-    Serde(#[from] serde_json::Error), // You might generalize this
+    Serde(#[from] serde_json::Error),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
 }
 
 pub trait FormatCodec: Send + Sync {

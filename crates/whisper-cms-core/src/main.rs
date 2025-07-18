@@ -7,13 +7,21 @@ use tracing_subscriber;
 
 use cli::Args;
 
-use crate::startup::{Configuration, Startup, StartupError};
+use crate::startup::{Configuration, DatabaseConfig, Startup, StartupError};
 
-fn main() -> Result<(), StartupError>{
+#[tokio::main]
+async fn main() -> Result<(), StartupError>{
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
     let startup = Startup::build(args.password, args.salt, args.port, args.address)?;
-    let _config = startup.get_configuration()?;
-    Ok(())
+    let config = startup.get_configuration()?;
+
+    return match config {
+        None => Ok(()),
+        Some(config) => {
+            config.test_connection().await?;
+            Ok(())
+        },
+    }
 }
