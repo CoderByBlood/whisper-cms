@@ -1,7 +1,10 @@
 mod config;
 
 use std::{
-    cell::RefCell, fmt::Debug, net::{AddrParseError, IpAddr}, num::ParseIntError, path::Path, rc::Rc
+    collections::HashMap,
+    fmt::Debug,
+    net::{AddrParseError, IpAddr},
+    num::ParseIntError,
 };
 
 use data_encoding::BASE32_NOPAD;
@@ -49,7 +52,7 @@ impl Startup {
     ) -> Result<Self, StartupError> {
         let ip: IpAddr = address.parse()?;
         let password = ValidatedPassword::build(password, salt)?;
-        let hashed = SecretString::new(password.as_hashed().to_string().into_boxed_str());
+        let hashed = SecretString::from(password.as_hashed());
 
         let hash = hashed.expose_secret();
         // Step 1: Reverse the string
@@ -94,6 +97,7 @@ pub enum DatabaseConfigState {
 
 pub trait DatabaseConfiguration: Debug {
     fn state(&self) -> DatabaseConfigState;
+    fn save(&mut self, confg: HashMap<String, String>) -> Result<(), StartupError>;
     fn connect(&self) -> Result<impl DatabaseConnection, StartupError>;
     fn validate(&mut self) -> Result<(), StartupError>;
 }
@@ -114,7 +118,7 @@ pub struct PostgresConn {
     user: String,
 
     /// The password to the PostgreSQL database
-    password: String,
+    password: SecretString,
 
     /// The name of the PostgreSQL database
     database: String,
@@ -127,16 +131,18 @@ pub struct PostgresConfig {
 
 impl DatabaseConnection for PostgresConn {
     async fn test_connection(&self) -> Result<bool, ConfigError> {
-        let mut conn = PgConnection::connect(&self.to_connect_string()).await?;
+        let conn_str = self
+            .to_connect_string()
+            .replace(&format!("{:?}", self.password), self.password.expose_secret());
 
         // Test the connection using ping (available in sqlx 0.8.6)
-        conn.ping().await?;
+        PgConnection::connect(&conn_str).await?.ping().await?;
         Ok(true)
     }
 
     fn to_connect_string(&self) -> String {
         format!(
-            "postgresql://{}:{}@{}:{}/{}",
+            "postgresql://{}:{:?}@{}:{}/{}",
             self.user, self.password, self.host, self.port, self.database
         )
     }
@@ -155,15 +161,18 @@ impl DatabaseConfiguration for PostgresConfig {
         }
     }
 
+    fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError> {
+        self.file.save(config)?;
+        Ok(())
+    }
+
     fn validate(&mut self) -> Result<(), StartupError> {
         match self.state() {
             DatabaseConfigState::Missing | DatabaseConfigState::Failed => {
                 Err(StartupError::Mapping("Nothing to validate"))
             }
             DatabaseConfigState::Exists => {
-                let contents = self
-                    .file
-                    .load()?;
+                let contents = self.file.load()?;
 
                 let host = contents
                     .get("host")
@@ -194,7 +203,7 @@ impl DatabaseConfiguration for PostgresConfig {
                     host,
                     port,
                     user,
-                    password,
+                    password: SecretString::from(password),
                     database,
                 });
 

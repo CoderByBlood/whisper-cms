@@ -50,18 +50,29 @@ impl ConfigurationFile {
     }
 
     pub fn load(&mut self) -> Result<ConfigMap, ConfigError> {
-        let result = self.ser.load_from_path(&*self.path);
-
-        match &result {
-            Err(_) => self.tried = Some(false),
-            Ok(_) => self.tried = Some(true),
-        };
-
-        result
+        match self.ser.load_from_path(&*self.path) {
+            Ok(result) => {
+                self.tried = Some(true);
+                Ok(result)
+            }
+            Err(err) => {
+                self.tried = Some(false);
+                Err(err)
+            }
+        }
     }
 
-    pub fn save(&self, config: ConfigMap) -> Result<(), ConfigError> {
-        self.ser.save_to_path(&config, &*self.path)
+    pub fn save(&mut self, config: ConfigMap) -> Result<(), ConfigError> {
+        match self.ser.save_to_path(&config, &*self.path){
+            Ok(result) => {
+                self.tried = Some(true);
+                Ok(result)
+            }
+            Err(err) => {
+                self.tried = Some(false);
+                Err(err)
+            }
+        }
     }
 }
 
@@ -72,7 +83,6 @@ pub enum ConfigError {
 
     //#[error("Format error: {0}")]
     //Format(&'static str),
-
     #[error("Transformation error: {0}")]
     Transformation(String),
 
@@ -245,7 +255,7 @@ where
 }
 
 /// Intermediate struct for validation only
-#[derive(Debug, Validate)]
+#[derive(Validate)]
 struct RawPasswordInput {
     #[validate(length(min = 8))]
     #[validate(custom(function = "validate_password_strength"))]
@@ -253,6 +263,13 @@ struct RawPasswordInput {
 
     #[validate(length(min = 16))]
     salt: String,
+}
+
+/// Prevent secret leakage through `Debug`
+impl core::fmt::Debug for RawPasswordInput {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "RawPasswordInput(**REDACTED**)")
+    }
 }
 
 /// Password strength validation rule
