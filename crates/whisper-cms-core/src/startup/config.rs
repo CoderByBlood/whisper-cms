@@ -14,20 +14,63 @@ use validator::{Validate, ValidationError, ValidationErrors};
 use zeroize::Zeroize;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
 pub type ConfigMap = HashMap<String, String>;
+#[derive(Debug)]
+pub struct ConfigurationFile {
+    ser: Serializers,
+    path: Box<Path>,
+    tried: Option<bool>,
+}
+
+impl ConfigurationFile {
+    pub fn new(password: ValidatedPassword, path: String) -> ConfigurationFile {
+        ConfigurationFile {
+            ser: Serializers::JsonEncrypted(ConfigSerializer::new(
+                JsonCodec {},
+                Encrypted::new(password),
+            )),
+            path: Path::new(path.as_str()).to_path_buf().into_boxed_path(),
+            tried: None,
+        }
+    }
+
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
+    pub fn tried(&self) -> Option<bool> {
+        self.tried
+    }
+
+    pub fn load(&mut self) -> Result<ConfigMap, ConfigError> {
+        let result = self.ser.load_from_path(&*self.path);
+
+        match &result {
+            Err(_) => self.tried = Some(false),
+            Ok(_) => self.tried = Some(true),
+        };
+
+        result
+    }
+
+    pub fn save(&self, config: ConfigMap) -> Result<(), ConfigError> {
+        self.ser.save_to_path(&config, &*self.path)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Format error: {0}")]
-    Format(String),
+    //#[error("Format error: {0}")]
+    //Format(&'static str),
 
     #[error("Transformation error: {0}")]
     Transformation(String),
@@ -43,6 +86,7 @@ pub trait FormatCodec: Send + Sync {
     fn encode(&self, map: &ConfigMap) -> Result<Vec<u8>, ConfigError>;
     fn decode(&self, data: &[u8]) -> Result<ConfigMap, ConfigError>;
 }
+#[derive(Debug)]
 pub struct JsonCodec;
 
 impl FormatCodec for JsonCodec {
@@ -59,7 +103,7 @@ pub trait Transformation: Send + Sync {
     fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
     fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
 }
-
+#[derive(Debug)]
 pub struct Encrypted {
     password: ValidatedPassword,
     argon2: Argon2<'static>,
@@ -139,6 +183,30 @@ impl Transformation for Encrypted {
     }
 }
 
+pub trait Serializer {
+    fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError>;
+    fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError>;
+}
+
+#[derive(Debug)]
+enum Serializers {
+    JsonEncrypted(ConfigSerializer<JsonCodec, Encrypted>),
+}
+
+impl Serializer for Serializers {
+    fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError> {
+        match self {
+            Serializers::JsonEncrypted(ser) => ser.load_from_path(path),
+        }
+    }
+
+    fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
+        match self {
+            Serializers::JsonEncrypted(ser) => ser.save_to_path(map, path),
+        }
+    }
+}
+#[derive(Debug)]
 pub struct ConfigSerializer<F, T>
 where
     F: FormatCodec,
@@ -160,14 +228,14 @@ where
         }
     }
 
-    pub fn save_to_path(&self, map: &ConfigMap, path: &std::path::Path) -> Result<(), ConfigError> {
+    pub fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
         let encoded = self.format.encode(map)?;
         let packed = self.transformation.pack(&encoded)?;
         std::fs::write(path, packed)?;
         Ok(())
     }
 
-    pub fn load_from_path(&self, path: &std::path::Path) -> Result<ConfigMap, ConfigError> {
+    pub fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError> {
         let data = std::fs::read(path)?;
         let unpacked = self.transformation.unpack(&data)?;
         let map = self.format.decode(&unpacked)?;

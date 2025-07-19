@@ -251,12 +251,33 @@ implementation.
 
 - Built-in: Would compromise the admins' User Experience and possibly
   Performance priorities should an alternative way to manage i18n be supplied
-  via a plugin.
+  via a plugin
 
 #### Tradeoffs
 
 - Admins' User Experience: For the sites that need i18n, the admin must load the
   official plugin
+
+---
+
+## Static vs Dynamic Dispatch
+
+### Decision: Static Dispatch is _strongly_ encouraged over dynamic
+
+**Rationale:** There is a 20-30% penalty for dynamically dispatching function
+and method calls. Rust has a robust type system that accommodates the vast
+majority of traditionally dynamic dispatch calls to be redesigned as static.
+
+#### Alternatives Considered
+
+- Allow Dynamic Dispatch: Would trade-off Performance priority for the Developer
+  Experience priority
+
+#### Tradeoffs
+
+- Developer Experience: Developers must work harder to design static call but at
+  the same time shield callers from concrete types when that level of
+  abstraction is warranted
 
 <!-- TODO: Revisit when necessary
 ## Caching Strategy
