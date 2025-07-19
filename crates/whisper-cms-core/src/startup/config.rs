@@ -63,7 +63,7 @@ impl ConfigurationFile {
     }
 
     pub fn save(&mut self, config: ConfigMap) -> Result<(), ConfigError> {
-        match self.ser.save_to_path(&config, &*self.path){
+        match self.ser.save_to_path(&config, &*self.path) {
             Ok(result) => {
                 self.tried = Some(true);
                 Ok(result)
@@ -522,5 +522,88 @@ mod tests {
         let json = "\"irrelevant\"";
         let result: Result<ValidatedPassword, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_configuration_file_save_and_load_updates_tried() {
+        let password = ValidatedPassword::build(
+            "StrongPass1$".to_string(),
+            "longsufficientlysalt".to_string(),
+        )
+        .unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config_file.enc");
+        let path_str = path.to_str().unwrap();
+
+        let mut file = ConfigurationFile::new(password.clone(), path_str);
+
+        let mut map = ConfigMap::new();
+        map.insert("theme".to_string(), "dark".to_string());
+
+        assert_eq!(file.tried(), None);
+
+        file.save(map.clone()).unwrap();
+        assert_eq!(file.tried(), Some(true));
+
+        let loaded = file.load().unwrap();
+        assert_eq!(file.tried(), Some(true));
+        assert_eq!(loaded, map);
+    }
+
+    #[test]
+    fn test_configuration_file_load_fails_sets_tried_false() {
+        let password = ValidatedPassword::build(
+            "StrongPass1$".to_string(),
+            "longsufficientlysalt".to_string(),
+        )
+        .unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.enc");
+        let path_str = path.to_str().unwrap();
+
+        let mut file = ConfigurationFile::new(password, path_str);
+        let result = file.load();
+
+        assert!(result.is_err());
+        assert_eq!(file.tried(), Some(false));
+    }
+
+    #[test]
+    fn test_unpack_fails_with_wrong_password() {
+        let password = ValidatedPassword::build(
+            "StrongPass1$".to_string(),
+            "longsufficientlysalt".to_string(),
+        )
+        .unwrap();
+        let enc = Encrypted::new(password);
+
+        let original = b"super secret";
+        let packed = enc.pack(original).unwrap();
+
+        let wrong_password = ValidatedPassword::build(
+            "WrongPass2$".to_string(),
+            "longsufficientlysalt".to_string(),
+        )
+        .unwrap();
+        let wrong_enc = Encrypted::new(wrong_password);
+
+        let result = wrong_enc.unpack(&packed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_derive_key_length() {
+        let password = ValidatedPassword::build(
+            "StrongPass1$".to_string(),
+            "a_really_long_salt_val".to_string(),
+        )
+        .unwrap();
+        let enc = Encrypted::new(password);
+        let salt = vec![1u8; SALT_LEN];
+        let key = enc.derive_key(&salt).unwrap();
+
+        assert_eq!(key.len(), KEY_LEN);
     }
 }
