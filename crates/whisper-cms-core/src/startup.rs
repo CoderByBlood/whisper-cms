@@ -242,10 +242,10 @@ mod tests {
     #[test]
     fn test_startup_build_filename_generation() {
         let startup = Startup::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
             5432,
-            "127.0.0.1".to_string(),
+            "127.0.0.1".into(),
         )
         .unwrap();
 
@@ -256,10 +256,10 @@ mod tests {
     #[test]
     fn test_startup_invalid_ip_fails() {
         let result = Startup::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
             5432,
-            "invalid_ip".to_string(),
+            "invalid_ip".into(),
         );
         assert!(matches!(result, Err(StartupError::IpParse(_))));
     }
@@ -267,10 +267,10 @@ mod tests {
     #[test]
     fn test_startup_invalid_password_fails() {
         let result = Startup::build(
-            "weak".to_string(),
-            "saltislongenough".to_string(),
+            "weak".into(),
+            "saltislongenough".into(),
             5432,
-            "127.0.0.1".to_string(),
+            "127.0.0.1".into(),
         );
         assert!(matches!(result, Err(StartupError::Password(_))));
     }
@@ -278,8 +278,8 @@ mod tests {
     #[test]
     fn test_postgres_config_state_transitions() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
 
@@ -299,11 +299,11 @@ mod tests {
     #[tokio::test]
     async fn test_to_connect_string_format() {
         let conn = PostgresConn {
-            host: "localhost".to_string(),
+            host: "localhost".into(),
             port: 5432,
-            user: "admin".to_string(),
+            user: "admin".into(),
             password: SecretString::from("supersecret"),
-            database: "mydb".to_string(),
+            database: "mydb".into(),
         };
 
         let conn_str = conn.to_connect_string();
@@ -316,8 +316,8 @@ mod tests {
     #[test]
     fn test_validate_missing_file() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
 
@@ -337,8 +337,8 @@ mod tests {
     #[test]
     fn test_validate_missing_keys() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
 
@@ -352,7 +352,7 @@ mod tests {
         };
 
         let mut map = HashMap::new();
-        map.insert("host".to_string(), "localhost".to_string());
+        map.insert("host".into(), "localhost".into());
         config.file.save(map).unwrap();
 
         let result = config.validate();
@@ -362,8 +362,8 @@ mod tests {
     #[test]
     fn test_validate_and_connect_successful_path() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
 
@@ -377,11 +377,11 @@ mod tests {
         };
 
         let mut map = HashMap::new();
-        map.insert("host".to_string(), "localhost".to_string());
-        map.insert("port".to_string(), "5432".to_string());
-        map.insert("user".to_string(), "myuser".to_string());
-        map.insert("password".to_string(), "mypassword".to_string());
-        map.insert("database".to_string(), "mydatabase".to_string());
+        map.insert("host".into(), "localhost".into());
+        map.insert("port".into(), "5432".into());
+        map.insert("user".into(), "myuser".into());
+        map.insert("password".into(), "mypassword".into());
+        map.insert("database".into(), "mydatabase".into());
 
         config.save(map).unwrap();
         assert!(config.validate().is_ok());

@@ -21,12 +21,12 @@ async fn main() -> Result<(), StartupError> {
     let startup = Startup::build(args.password, args.salt, args.port, args.address)?;
     let mut config = startup.get_configuration();
     let map = HashMap::from([
-        ("host".to_owned(), "localhost".to_owned()),
-        ("port".to_owned(), "5432".to_owned()),
-        ("user".to_owned(), "myuser".to_owned()),
-        ("password".to_owned(), "mypassword".to_owned()),
-        ("database".to_owned(), "mydatabase".to_owned()),
-        ("pool".to_owned(), "15".to_owned()),
+        ("host".into(), "localhost".into()),
+        ("port".into(), "5432".into()),
+        ("user".into(), "myuser".into()),
+        ("password".into(), "mypassword".into()),
+        ("database".into(), "mydatabase".into()),
+        ("pool".into(), "15".into()),
     ]);
 
     dbg!(&config);

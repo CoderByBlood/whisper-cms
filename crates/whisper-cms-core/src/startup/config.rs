@@ -417,8 +417,8 @@ mod tests {
 
     #[test]
     fn test_validated_password_build_verify() {
-        let password = "StrongPass1$".to_string();
-        let salt = "longsufficientlysalt".to_string();
+        let password = String::from("StrongPass1$");
+        let salt = "longsufficientlysalt".into();
 
         let validated = ValidatedPassword::build(password.clone(), salt).unwrap();
         assert!(validated.verify(&password));
@@ -428,10 +428,10 @@ mod tests {
     #[test]
     fn test_validated_password_eq_secure_false_for_different_hashes() {
         let pw1 =
-            ValidatedPassword::build("StrongPass1$".to_string(), "salt123456789012".to_string())
+            ValidatedPassword::build("StrongPass1$".into(), "salt123456789012".into())
                 .unwrap();
         let pw2 =
-            ValidatedPassword::build("StrongPass1$".to_string(), "salt999999999999".to_string())
+            ValidatedPassword::build("StrongPass1$".into(), "salt999999999999".into())
                 .unwrap();
         assert!(!pw1.eq_secure(&pw2)); // different salts → different hashes
     }
@@ -439,8 +439,8 @@ mod tests {
     #[test]
     fn test_encrypted_pack_unpack_roundtrip() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let enc = Encrypted::new(password);
@@ -455,8 +455,8 @@ mod tests {
     #[test]
     fn test_config_serializer_save_and_load() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let codec = JsonCodec;
@@ -464,7 +464,7 @@ mod tests {
         let serializer = ConfigSerializer::new(codec, enc);
 
         let mut map = ConfigMap::new();
-        map.insert("api_key".to_string(), "1234567890".to_string());
+        map.insert("api_key".into(), "1234567890".into());
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.enc");
@@ -477,8 +477,8 @@ mod tests {
 
     #[test]
     fn test_validation_fails_on_weak_password() {
-        let weak_password = "password".to_string(); // No uppercase, digit, or symbol
-        let salt = "longsufficientlysalt".to_string();
+        let weak_password = "password".into(); // No uppercase, digit, or symbol
+        let salt = "longsufficientlysalt".into();
 
         let result = ValidatedPassword::build(weak_password, salt);
         assert!(result.is_err());
@@ -487,8 +487,8 @@ mod tests {
     #[test]
     fn test_unpack_fails_on_short_input() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let enc = Encrypted::new(password);
@@ -501,8 +501,8 @@ mod tests {
     #[test]
     fn test_validated_password_debug_does_not_expose_secret() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let debug_str = format!("{:?}", password);
@@ -512,8 +512,8 @@ mod tests {
     #[test]
     fn test_validated_password_serde_protected() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let serialized = serde_json::to_string(&password).unwrap();
@@ -527,8 +527,8 @@ mod tests {
     #[test]
     fn test_configuration_file_save_and_load_updates_tried() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
 
@@ -539,7 +539,7 @@ mod tests {
         let mut file = ConfigurationFile::new(password.clone(), path_str);
 
         let mut map = ConfigMap::new();
-        map.insert("theme".to_string(), "dark".to_string());
+        map.insert("theme".into(), "dark".into());
 
         assert_eq!(file.tried(), None);
 
@@ -554,8 +554,8 @@ mod tests {
     #[test]
     fn test_configuration_file_load_fails_sets_tried_false() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
 
@@ -573,8 +573,8 @@ mod tests {
     #[test]
     fn test_unpack_fails_with_wrong_password() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "StrongPass1$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let enc = Encrypted::new(password);
@@ -583,8 +583,8 @@ mod tests {
         let packed = enc.pack(original).unwrap();
 
         let wrong_password = ValidatedPassword::build(
-            "WrongPass2$".to_string(),
-            "longsufficientlysalt".to_string(),
+            "WrongPass2$".into(),
+            "longsufficientlysalt".into(),
         )
         .unwrap();
         let wrong_enc = Encrypted::new(wrong_password);
@@ -596,8 +596,8 @@ mod tests {
     #[test]
     fn test_derive_key_length() {
         let password = ValidatedPassword::build(
-            "StrongPass1$".to_string(),
-            "a_really_long_salt_val".to_string(),
+            "StrongPass1$".into(),
+            "a_really_long_salt_val".into(),
         )
         .unwrap();
         let enc = Encrypted::new(password);
