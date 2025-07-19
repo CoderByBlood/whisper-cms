@@ -1,7 +1,7 @@
 mod config;
 
 use std::{
-    cell::RefCell, net::{AddrParseError, IpAddr}, num::ParseIntError, path::Path, rc::Rc
+    cell::RefCell, fmt::Debug, net::{AddrParseError, IpAddr}, num::ParseIntError, path::Path, rc::Rc
 };
 
 use data_encoding::BASE32_NOPAD;
@@ -33,10 +33,11 @@ pub enum StartupError {
 }
 #[derive(Debug)]
 pub struct Startup {
+    password: ValidatedPassword,
     hashed: SecretString,
     port: u16,
     ip: IpAddr,
-    config: Rc<RefCell<PostgresConfig>>,
+    filename: String,
 }
 
 impl Startup {
@@ -66,21 +67,20 @@ impl Startup {
         // Step 5: Add the extension
         filename.push_str(".enc");
 
-        let config = Rc::new(RefCell::new(PostgresConfig {
-            file: ConfigurationFile::new(password, filename),
-            conn: None,
-        }));
-
         Ok(Self {
+            password,
             hashed,
             port,
             ip,
-            config,
+            filename,
         })
     }
 
-    pub fn get_configuration(&self) -> Rc<RefCell<impl DatabaseConfiguration>> {
-        self.config.clone()
+    pub fn get_configuration(&self) -> impl DatabaseConfiguration {
+        PostgresConfig {
+            file: ConfigurationFile::new(self.password.to_owned(), &self.filename),
+            conn: None,
+        }
     }
 }
 
@@ -92,13 +92,13 @@ pub enum DatabaseConfigState {
     Failed,
 }
 
-pub trait DatabaseConfiguration {
+pub trait DatabaseConfiguration: Debug {
     fn state(&self) -> DatabaseConfigState;
     fn connect(&self) -> Result<impl DatabaseConnection, StartupError>;
     fn validate(&mut self) -> Result<(), StartupError>;
 }
 
-pub trait DatabaseConnection {
+pub trait DatabaseConnection: Debug {
     async fn test_connection(&self) -> Result<bool, ConfigError>;
     fn to_connect_string(&self) -> String;
 }

@@ -7,7 +7,7 @@ use tracing_subscriber;
 
 use cli::Args;
 
-use startup::{Startup, StartupError, DatabaseConfiguration, DatabaseConnection};
+use startup::{Startup, StartupError, DatabaseConfiguration, DatabaseConnection, DatabaseConfigState};
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError>{
@@ -15,15 +15,15 @@ async fn main() -> Result<(), StartupError>{
 
     let args = Args::parse();
     let startup = Startup::build(args.password, args.salt, args.port, args.address)?;
-    let config = startup.get_configuration();
-    //dbg!(config.borrow());
-    dbg!(config.borrow().state());
-    dbg!(config.borrow_mut().validate()?);
-    dbg!(config.borrow().state());
-    //dbg!(config.borrow().connect());
-    dbg!(config.borrow().state());
-    dbg!(config.borrow().connect()?.to_connect_string());
-    dbg!(config.borrow().state());
-    dbg!(config.borrow().connect()?.test_connection().await?);
+    let mut config = startup.get_configuration();
+    dbg!(&config);
+    dbg!(config.state());
+    dbg!(config.validate()?);
+    dbg!(config.state());
+    dbg!(config.connect()?);
+    dbg!(config.state());
+    dbg!(config.connect()?.to_connect_string());
+    dbg!(config.state());
+    dbg!(config.connect()?.test_connection().await?);
     Ok(())
 }

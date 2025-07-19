@@ -1,4 +1,5 @@
 use aes_gcm::aead::{Aead, KeyInit};
+//use aes_gcm::aes::cipher::StreamCipher;
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{
     password_hash::{PasswordHash, PasswordVerifier, SaltString},
@@ -29,13 +30,13 @@ pub struct ConfigurationFile {
 }
 
 impl ConfigurationFile {
-    pub fn new(password: ValidatedPassword, path: String) -> ConfigurationFile {
+    pub fn new(password: ValidatedPassword, path: &str) -> ConfigurationFile {
         ConfigurationFile {
             ser: Serializers::JsonEncrypted(ConfigSerializer::new(
                 JsonCodec {},
                 Encrypted::new(password),
             )),
-            path: Path::new(path.as_str()).to_path_buf().into_boxed_path(),
+            path: Path::new(path).to_path_buf().into_boxed_path(),
             tried: None,
         }
     }
@@ -285,7 +286,7 @@ fn validate_password_strength(p: &str) -> Result<(), ValidationError> {
 }
 
 /// Securely validated and hashed password
-#[derive(Zeroize)]
+#[derive(Zeroize, Clone)]
 #[zeroize(drop)]
 pub struct ValidatedPassword {
     raw: SecretString,
