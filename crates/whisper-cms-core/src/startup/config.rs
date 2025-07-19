@@ -15,7 +15,7 @@ use validator::{Validate, ValidationError, ValidationErrors};
 use zeroize::Zeroize;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -25,7 +25,7 @@ pub type ConfigMap = HashMap<String, String>;
 #[derive(Debug)]
 pub struct ConfigurationFile {
     ser: Serializers,
-    path: Box<Path>,
+    path: PathBuf,
     tried: Option<bool>,
 }
 
@@ -36,7 +36,7 @@ impl ConfigurationFile {
                 JsonCodec {},
                 Encrypted::new(password),
             )),
-            path: Path::new(path).to_path_buf().into_boxed_path(),
+            path: PathBuf::from(path),
             tried: None,
         }
     }
@@ -50,29 +50,29 @@ impl ConfigurationFile {
     }
 
     pub fn load(&mut self) -> Result<ConfigMap, ConfigError> {
-        match self.ser.load_from_path(&*self.path) {
-            Ok(result) => {
+        self.ser
+            .load_from_path(&*self.path)
+            .map(|result| {
                 self.tried = Some(true);
-                Ok(result)
-            }
-            Err(err) => {
+                result
+            })
+            .map_err(|err| {
                 self.tried = Some(false);
-                Err(err)
-            }
-        }
+                err
+            })
     }
 
     pub fn save(&mut self, config: ConfigMap) -> Result<(), ConfigError> {
-        match self.ser.save_to_path(&config, &*self.path) {
-            Ok(result) => {
+        self.ser
+            .save_to_path(&config, &*self.path)
+            .map(|result| {
                 self.tried = Some(true);
-                Ok(result)
-            }
-            Err(err) => {
+                result
+            })
+            .map_err(|err| {
                 self.tried = Some(false);
-                Err(err)
-            }
-        }
+                err
+            })
     }
 }
 
@@ -428,21 +428,16 @@ mod tests {
     #[test]
     fn test_validated_password_eq_secure_false_for_different_hashes() {
         let pw1 =
-            ValidatedPassword::build("StrongPass1$".into(), "salt123456789012".into())
-                .unwrap();
+            ValidatedPassword::build("StrongPass1$".into(), "salt123456789012".into()).unwrap();
         let pw2 =
-            ValidatedPassword::build("StrongPass1$".into(), "salt999999999999".into())
-                .unwrap();
+            ValidatedPassword::build("StrongPass1$".into(), "salt999999999999".into()).unwrap();
         assert!(!pw1.eq_secure(&pw2)); // different salts → different hashes
     }
 
     #[test]
     fn test_encrypted_pack_unpack_roundtrip() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let enc = Encrypted::new(password);
 
         let original = b"my super secret data";
@@ -454,11 +449,8 @@ mod tests {
 
     #[test]
     fn test_config_serializer_save_and_load() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let codec = JsonCodec;
         let enc = Encrypted::new(password);
         let serializer = ConfigSerializer::new(codec, enc);
@@ -486,11 +478,8 @@ mod tests {
 
     #[test]
     fn test_unpack_fails_on_short_input() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let enc = Encrypted::new(password);
 
         let short_input = vec![0u8; 10]; // too short for salt + nonce
@@ -500,22 +489,16 @@ mod tests {
 
     #[test]
     fn test_validated_password_debug_does_not_expose_secret() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let debug_str = format!("{:?}", password);
         assert!(debug_str.contains("**REDACTED**"));
     }
 
     #[test]
     fn test_validated_password_serde_protected() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let serialized = serde_json::to_string(&password).unwrap();
         assert_eq!(serialized, "\"**REDACTED**\"");
 
@@ -526,11 +509,8 @@ mod tests {
 
     #[test]
     fn test_configuration_file_save_and_load_updates_tried() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("config_file.enc");
@@ -553,11 +533,8 @@ mod tests {
 
     #[test]
     fn test_configuration_file_load_fails_sets_tried_false() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("missing.enc");
@@ -572,21 +549,15 @@ mod tests {
 
     #[test]
     fn test_unpack_fails_with_wrong_password() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let enc = Encrypted::new(password);
 
         let original = b"super secret";
         let packed = enc.pack(original).unwrap();
 
-        let wrong_password = ValidatedPassword::build(
-            "WrongPass2$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
+        let wrong_password =
+            ValidatedPassword::build("WrongPass2$".into(), "longsufficientlysalt".into()).unwrap();
         let wrong_enc = Encrypted::new(wrong_password);
 
         let result = wrong_enc.unpack(&packed);
@@ -595,11 +566,9 @@ mod tests {
 
     #[test]
     fn test_derive_key_length() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "a_really_long_salt_val".into(),
-        )
-        .unwrap();
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "a_really_long_salt_val".into())
+                .unwrap();
         let enc = Encrypted::new(password);
         let salt = vec![1u8; SALT_LEN];
         let key = enc.derive_key(&salt).unwrap();
