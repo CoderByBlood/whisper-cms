@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     net::{AddrParseError, IpAddr},
-    num::ParseIntError,
+    num::ParseIntError, net::SocketAddr,
 };
 
 use data_encoding::BASE32_NOPAD;
@@ -88,6 +88,12 @@ impl Startup {
             file: ConfigurationFile::new(self.password.to_owned(), &self.filename),
             conn: None,
         }
+    }
+
+
+    #[tracing::instrument(skip_all)]
+    pub fn get_socket_address(&self) -> SocketAddr {
+        SocketAddr::from((self.ip, self.port))
     }
 }
 

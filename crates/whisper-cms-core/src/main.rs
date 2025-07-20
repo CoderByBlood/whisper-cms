@@ -1,5 +1,6 @@
 mod cli;
 mod startup;
+mod request;
 
 use std::{collections::HashMap, fs::File};
 
@@ -11,6 +12,7 @@ use tracing_subscriber::{self, layer::SubscriberExt, Registry};
 use cli::Args;
 
 use startup::{DatabaseConfiguration, DatabaseConnection, Startup, StartupError};
+use request::Manager;
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
@@ -59,5 +61,9 @@ async fn main() -> Result<(), StartupError> {
     debug!("{:?}", config.connect()?.to_connect_string());
     debug!("{:?}", config.state());
     debug!("{:?}", config.connect()?.test_connection().await?);
+
+    let mgr = Manager::build().map_err(|_| StartupError::Mapping("Building Failed"))?;
+    mgr.start(startup.get_socket_address()).await.map_err(|_| StartupError::Mapping("Building Failed"))?;
+
     Ok(())
 }
