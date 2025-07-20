@@ -30,6 +30,7 @@ pub struct ConfigurationFile {
 }
 
 impl ConfigurationFile {
+    #[tracing::instrument(skip_all)]
     pub fn new(password: ValidatedPassword, path: &str) -> ConfigurationFile {
         ConfigurationFile {
             ser: Serializers::JsonEncrypted(ConfigSerializer::new(
@@ -41,14 +42,17 @@ impl ConfigurationFile {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn exists(&self) -> bool {
         self.path.exists()
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn tried(&self) -> Option<bool> {
         self.tried
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn load(&mut self) -> Result<ConfigMap, ConfigError> {
         self.ser
             .load_from_path(&*self.path)
@@ -62,6 +66,7 @@ impl ConfigurationFile {
             })
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn save(&mut self, config: ConfigMap) -> Result<(), ConfigError> {
         self.ser
             .save_to_path(&config, &*self.path)
@@ -93,7 +98,7 @@ pub enum ConfigError {
     Database(#[from] sqlx::Error),
 }
 
-pub trait FormatCodec: Send + Sync {
+pub trait FormatCodec: Send + Sync + std::fmt::Debug {
     fn encode(&self, map: &ConfigMap) -> Result<Vec<u8>, ConfigError>;
     fn decode(&self, data: &[u8]) -> Result<ConfigMap, ConfigError>;
 }
@@ -101,26 +106,29 @@ pub trait FormatCodec: Send + Sync {
 pub struct JsonCodec;
 
 impl FormatCodec for JsonCodec {
+    #[tracing::instrument(skip_all)]
     fn encode(&self, map: &ConfigMap) -> Result<Vec<u8>, ConfigError> {
         Ok(serde_json::to_vec(map)?)
     }
 
+    #[tracing::instrument(skip_all)]
     fn decode(&self, data: &[u8]) -> Result<ConfigMap, ConfigError> {
         Ok(serde_json::from_slice(data)?)
     }
 }
 
-pub trait Transformation: Send + Sync {
+pub trait Transformation: Send + Sync + std::fmt::Debug {
     fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
     fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
 }
-#[derive(Debug)]
+
 pub struct Encrypted {
     password: ValidatedPassword,
     argon2: Argon2<'static>,
 }
 
 impl Encrypted {
+    #[tracing::instrument(skip_all)]
     pub fn new(password: ValidatedPassword) -> Self {
         let params = Params::new(65536, 3, 1, Some(KEY_LEN)).expect("Invalid Argon2 parameters");
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -128,6 +136,7 @@ impl Encrypted {
         Self { password, argon2 }
     }
 
+    #[tracing::instrument(skip_all)]
     fn derive_key(&self, salt: &[u8]) -> Result<[u8; KEY_LEN], ConfigError> {
         let mut key = [0u8; KEY_LEN];
         self.argon2
@@ -138,6 +147,7 @@ impl Encrypted {
 }
 
 impl Transformation for Encrypted {
+    #[tracing::instrument(skip_all)]
     fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError> {
         let mut rng = OsRng;
 
@@ -169,6 +179,7 @@ impl Transformation for Encrypted {
         Ok(result)
     }
 
+    #[tracing::instrument(skip_all)]
     fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError> {
         if input.len() < SALT_LEN + NONCE_LEN {
             return Err(ConfigError::Transformation("Input too short".into()));
@@ -232,6 +243,7 @@ where
     F: FormatCodec,
     T: Transformation,
 {
+    #[tracing::instrument(skip_all)]
     pub fn new(format: F, transformation: T) -> Self {
         Self {
             format,
@@ -239,6 +251,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
         let encoded = self.format.encode(map)?;
         let packed = self.transformation.pack(&encoded)?;
@@ -246,6 +259,7 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError> {
         let data = std::fs::read(path)?;
         let unpacked = self.transformation.unpack(&data)?;
@@ -273,6 +287,7 @@ impl core::fmt::Debug for RawPasswordInput {
 }
 
 /// Password strength validation rule
+#[tracing::instrument(skip_all)]
 fn validate_password_strength(p: &str) -> Result<(), ValidationError> {
     let symbols = "!@#$%^&*()_+-=";
     let has_upper = p.chars().any(|c| c.is_uppercase());
@@ -312,6 +327,7 @@ pub struct ValidatedPassword {
 
 impl ValidatedPassword {
     /// Create a new validated and hashed password
+    #[tracing::instrument(skip_all)]
     pub fn build(raw: String, salt: String) -> Result<Self, ValidationErrors> {
         let input = RawPasswordInput {
             password: raw,
@@ -346,6 +362,7 @@ impl ValidatedPassword {
     }
 
     /// Verify a raw password against the stored Argon2 hash
+    #[tracing::instrument(skip_all)]
     pub fn verify(&self, attempt: &str) -> bool {
         match PasswordHash::new(self.hashed.expose_secret()) {
             Ok(parsed) => Argon2::default()
@@ -356,6 +373,7 @@ impl ValidatedPassword {
     }
 
     /// Constant-time equality (not usually needed for Argon2 but useful for testing)
+    #[tracing::instrument(skip_all)]
     pub fn eq_secure(&self, other: &ValidatedPassword) -> bool {
         self.hashed
             .expose_secret()
@@ -374,6 +392,13 @@ impl ValidatedPassword {
 impl core::fmt::Debug for ValidatedPassword {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "ValidatedPassword(**REDACTED**)")
+    }
+}
+
+/// Prevent secret leakage through `Debug`
+impl core::fmt::Debug for Encrypted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Encrypted(**REDACTED**)")
     }
 }
 

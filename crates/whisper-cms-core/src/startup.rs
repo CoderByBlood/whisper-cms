@@ -46,6 +46,7 @@ pub struct Startup {
 }
 
 impl Startup {
+    #[tracing::instrument(skip_all)]
     pub fn build(
         password: String,
         salt: String,
@@ -81,6 +82,7 @@ impl Startup {
         })
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn get_configuration(&self) -> impl DatabaseConfiguration {
         PostgresConfig {
             file: ConfigurationFile::new(self.password.to_owned(), &self.filename),
@@ -132,6 +134,7 @@ pub struct PostgresConfig {
 }
 
 impl DatabaseConnection for PostgresConn {
+    #[tracing::instrument(skip_all)]
     async fn test_connection(&self) -> Result<bool, ConfigError> {
         let conn_str = self.to_connect_string().replace(
             &format!("{:?}", self.password),
@@ -143,6 +146,7 @@ impl DatabaseConnection for PostgresConn {
         Ok(true)
     }
 
+    #[tracing::instrument(skip_all)]
     fn to_connect_string(&self) -> String {
         format!(
             "postgresql://{}:{:?}@{}:{}/{}",
@@ -152,6 +156,7 @@ impl DatabaseConnection for PostgresConn {
 }
 
 impl PostgresConfig {
+    #[tracing::instrument(skip_all)]
     fn build_connection(contents: &ConfigMap) -> Result<PostgresConn, StartupError> {
         let host = contents
             .get("host")
@@ -189,6 +194,7 @@ impl PostgresConfig {
 }
 
 impl DatabaseConfiguration for PostgresConfig {
+    #[tracing::instrument(skip_all)]
     fn state(&self) -> DatabaseConfigState {
         if !self.file.exists() {
             DatabaseConfigState::Missing
@@ -204,12 +210,14 @@ impl DatabaseConfiguration for PostgresConfig {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError> {
         self.conn = Some(Self::build_connection(&config)?);
         self.file.save(config)?;
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     fn validate(&mut self) -> Result<(), StartupError> {
         match self.state() {
             DatabaseConfigState::Missing | DatabaseConfigState::Failed => {
@@ -223,6 +231,7 @@ impl DatabaseConfiguration for PostgresConfig {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn connect(&self) -> Result<impl DatabaseConnection, StartupError> {
         match self.state() {
             DatabaseConfigState::Valid => self
