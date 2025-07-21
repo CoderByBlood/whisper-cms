@@ -22,6 +22,9 @@ script = [
     "echo '🔹 Generating UML Sequence Diagrams from Dynamic Views...'",
     "python scripts/generate-sequence-diagrams.py docs/workspace.json ${PLANTUML_INTERMEDIATE}",
 
+    "echo '🔹 Copying UML Diagrams to Intermediate Folder...'",
+    "cp docs/*.puml ${PLANTUML_INTERMEDIATE}",
+
     "echo '🔹 Rendering PlantUML diagrams to SVG...'",
     "java -jar ${PLANTUML_JAR} -tsvg ${PLANTUML_INTERMEDIATE}/*.puml -o ../"
 ]
