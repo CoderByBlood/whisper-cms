@@ -31,7 +31,12 @@ async fn main() -> Result<(), StartupError> {
     tracing::subscriber::set_global_default(subscriber).expect("set global subscriber");
 
     let args = Args::parse();
-    let _startup = Startup::build(args.password, args.salt, args.port, args.address)?;
+    let mut startup = Startup::build(args.password, args.salt)?;
+    match &startup.execute() {
+        Ok(_) => debug!("Successfully Executed: {:?}", startup.checkpoint()),
+        Err(e) => debug!("Failed At: {:?}: {}",startup.checkpoint() ,e),
+    }
+
     let _map: HashMap<String, String> = HashMap::from([
         ("host".into(), "localhost".into()),
         ("port".into(), "5432".into()),

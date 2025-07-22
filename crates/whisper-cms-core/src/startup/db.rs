@@ -4,12 +4,10 @@ use secrecy::{ExposeSecret, SecretString};
 use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
 use thiserror::Error;
 
-use crate::startup::{
-    config::{ConfigError, ConfigFile},
-    StartupError,
-};
-
+use crate::startup::config::ConfigError;
+use crate::startup::config::ConfigFile;
 use crate::startup::config::ConfigMap;
+use crate::startup::StartupError;
 
 pub trait DatabaseConfiguration: Debug {
     fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError>;
@@ -112,6 +110,14 @@ impl DatabaseConnection for PostgresConn {
 }
 
 impl PostgresConfig {
+    #[tracing::instrument(skip_all)]
+    pub fn new(file: ConfigFile) -> Self {
+        Self {
+            file,
+            conn: None,
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     fn build_connection(contents: &ConfigMap) -> Result<PostgresConn, StartupError> {
         let host = contents

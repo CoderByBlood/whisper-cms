@@ -2,20 +2,17 @@ mod config;
 pub mod db;
 mod settings;
 
-use std::{
-    f64::consts::E, fmt::Debug, net::{AddrParseError, IpAddr, SocketAddr}, num::ParseIntError
-};
+use std::{net::AddrParseError, num::ParseIntError};
 
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
 use thiserror::Error;
 use validator::ValidationErrors;
 
 use config::{ConfigError, ConfigFile, ValidatedPassword};
 
 use crate::startup::{
-    db::{DatabaseConfiguration, DbConfig, DbConn, PostgresConfig},
+    db::{DatabaseConfiguration, DatabaseConnection, DbConfig, DbConn, PostgresConfig},
     settings::Settings,
 };
 
@@ -39,24 +36,11 @@ pub enum StartupError {
     //Database(#[from] sqlx::Error),
 }
 #[derive(Debug)]
-pub struct Startup {
-    password: ValidatedPassword,
-    hashed: SecretString,
-    port: u16,
-    ip: IpAddr,
-    filename: String,
-    process: Process,
-}
+pub struct Startup {}
 
 impl Startup {
     #[tracing::instrument(skip_all)]
-    pub fn build(
-        password: String,
-        salt: String,
-        port: u16,
-        address: String,
-    ) -> Result<Self, StartupError> {
-        let ip: IpAddr = address.parse()?;
+    pub fn build(password: String, salt: String) -> Result<Process, StartupError> {
         let password = ValidatedPassword::build(password, salt)?;
         let hashed = SecretString::from(password.as_hashed());
 
@@ -76,14 +60,7 @@ impl Startup {
         // Step 5: Add the extension
         filename.push_str(".enc");
 
-        Ok(Self {
-            password: password.clone(),
-            hashed,
-            port,
-            ip,
-            filename: filename.to_owned(),
-            process: Process::new(ConfigFile::new(password.clone(), filename.to_owned())),
-        })
+        Ok(Process::new(ConfigFile::new(password, filename)))
     }
 }
 
@@ -114,6 +91,7 @@ pub struct Process {
 }
 
 impl Process {
+    #[tracing::instrument(skip_all)]
     pub fn new(file: ConfigFile) -> Self {
         Self {
             checkpoint: Checkpoint::Start,
@@ -124,44 +102,110 @@ impl Process {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn execute(&mut self) -> Result<(), StartupError> {
-        self.validate_settings()  //start at the end and wherever it stops (errors out) is where we are
+        match self.validate_settings() {
+            //start at the end and wherever it stops (errors out) is where we are
+            Ok(_) => {
+                self.checkpoint = Checkpoint::Ready;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn checkpoint(&self) -> Checkpoint {
         self.checkpoint.clone()
     }
 
+    #[tracing::instrument(skip_all)]
     fn config_exists(&mut self) -> Result<bool, StartupError> {
         let file_ref = self.file.as_ref();
-        Ok(file_ref.is_some() && file_ref.unwrap().as_ref().is_ok() && file_ref.unwrap().as_ref().unwrap().exists())
+        if file_ref.is_some()
+            && file_ref.unwrap().as_ref().is_ok()
+            && file_ref.unwrap().as_ref().unwrap().exists()
+        {
+            Ok(true)
+        } else {
+            self.checkpoint = Checkpoint::Missing;
+            Ok(false)
+        }
     }
 
+    #[tracing::instrument(skip_all)]
     fn load_config(&mut self) -> Result<(), StartupError> {
         match self.config_exists() {
-            Ok(true) => todo!("load it, populate field and checkpoint"),
-            Ok(false) => todo!("return error"),
-            Err(_e) => todo!("re throw"),
+            Ok(true) => {
+                let pg = PostgresConfig::new(self.file.as_ref().unwrap().as_ref().unwrap().clone());
+
+                self.config = Some(Ok(DbConfig::Postgres(pg)));
+                self.checkpoint = Checkpoint::Loaded;
+                Ok(())
+            }
+            Ok(false) => Err(StartupError::Mapping("Configuration file does not exist")),
+            Err(e) => Err(e),
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn apply_config(&mut self) -> Result<(), StartupError> {
         match self.load_config() {
-            Ok(_) => todo!("apply the mapping, populate field and checkpoint"),
-            Err(_e) => todo!("re throw"),
+            Ok(_) => {
+                let db = self.config.as_mut().unwrap().as_mut().unwrap();
+
+                match db.validate() {
+                    Ok(_) => {
+                        self.checkpoint = Checkpoint::Applied;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn connect_db(&mut self) -> Result<(), StartupError> {
         match self.apply_config() {
-            Ok(_) => todo!("get the database connection and try to connect,and populate field and checkpoint"),
+            Ok(_) => {
+                let db = self.config.as_mut().unwrap().as_mut().unwrap();
+
+                // Used only if *not* in a tokio runtime
+                //let rt = Runtime::new().unwrap();
+                //let result = rt.block_on(db.connect()?.test_connection());
+
+                let result: Result<bool, StartupError> =
+                    tokio::task::block_in_place(|| match db.connect() {
+                        Ok(conn) => {
+                            let test = tokio::runtime::Handle::current()
+                                .block_on(conn.test_connection())?;
+                            Ok(test)
+                        }
+                        Err(e) => Err(e),
+                    });
+
+                match result? {
+                    true => {
+                        self.checkpoint = Checkpoint::Connected;
+                        Ok(())
+                    }
+                    false => Err(StartupError::Mapping("Connection to Database failed")),
+                }
+            }
             Err(_e) => todo!("re throw"),
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn validate_settings(&mut self) -> Result<(), StartupError> {
         match self.connect_db() {
-            Ok(_) => todo!("query the database for setting and validate, and populate field and checkpoint"),
+            Ok(_) => {
+                self.checkpoint = Checkpoint::Validated;
+
+                Err(StartupError::Mapping("Code Path Not Implemented"))
+            }
             Err(_e) => todo!("re throw"),
         }
     }

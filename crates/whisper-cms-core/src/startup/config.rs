@@ -8,7 +8,7 @@ use argon2::{
 use rand::{rngs::OsRng, Rng};
 
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use validator::{Validate, ValidationError, ValidationErrors};
@@ -22,7 +22,7 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
 pub type ConfigMap = HashMap<String, String>;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigFile {
     ser: Serializers,
     path: PathBuf,
@@ -98,11 +98,11 @@ pub enum ConfigError {
     Database(#[from] sqlx::Error),
 }
 
-pub trait FormatCodec: Send + Sync + std::fmt::Debug {
+pub trait FormatCodec: Send + Sync + std::fmt::Debug + Clone {
     fn encode(&self, map: &ConfigMap) -> Result<Vec<u8>, ConfigError>;
     fn decode(&self, data: &[u8]) -> Result<ConfigMap, ConfigError>;
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JsonCodec;
 
 impl FormatCodec for JsonCodec {
@@ -117,11 +117,11 @@ impl FormatCodec for JsonCodec {
     }
 }
 
-pub trait Transformation: Send + Sync + std::fmt::Debug {
+pub trait Transformation: Send + Sync + std::fmt::Debug + Clone {
     fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
     fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
 }
-
+#[derive(Clone)]
 pub struct Encrypted {
     password: ValidatedPassword,
     argon2: Argon2<'static>,
@@ -205,12 +205,12 @@ impl Transformation for Encrypted {
     }
 }
 
-pub trait Serializer {
+pub trait Serializer: Clone {
     fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError>;
     fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Serializers {
     JsonEncrypted(ConfigSerializer<JsonCodec, Encrypted>),
 }
@@ -228,7 +228,7 @@ impl Serializer for Serializers {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigSerializer<F, T>
 where
     F: FormatCodec,
