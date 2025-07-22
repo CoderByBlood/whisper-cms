@@ -1,56 +1,53 @@
 mod handler;
 
-use axum::{body::Body, extract::State, http::Request, response::IntoResponse, Router};
-use std::{net::SocketAddr, sync::Arc};
-use tokio::sync::RwLock;
-use tower::ServiceExt;
+use std::sync::Arc;
 
-use axum::{http::StatusCode, response::Response, Json};
+use axum::{
+    body::Body,
+    extract::State,
+    http::Request,
+    response::{IntoResponse, Response},
+    Json, Router,
+};
+use hyper::StatusCode;
 use serde_json::json;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
-use handler::*;
+use crate::{
+    request::handler::{
+        BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, RequestHandler,
+        ServingHandler,
+    },
+    startup::{self, Startup},
+};
 
-use crate::startup::Startup;
-
-#[derive(Debug)]
-pub struct Manager;
+pub struct Manager {
+    startup: Startup,
+    state: Arc<ManagerState>,
+}
 
 impl Manager {
-    pub fn build() -> Result<Manager, ManagerError> {
-        Ok(Manager {})
-    }
-    #[tracing::instrument(skip_all)]
-    pub async fn start(&self, addr: SocketAddr) -> Result<(), ManagerError> {
+    pub fn build(startup: Startup) -> Result<Manager, ManagerError> {
         // Start in Booting state
         let initial_handler = Box::new(BootingHandler);
-        let mgr_state = Arc::new(ManagerState {
+        let state = Arc::new(ManagerState {
             phase: ManagerPhase::Booting,
             handler: RwLock::new(initial_handler),
         });
-
-        // Fallback router
-        let router = Router::new()
-            .fallback(Self::dispatch_request)
-            .with_state(mgr_state);
-
-        println!("Listening on http://{}", addr);
-
-        // Use hyper 1.6.0 compatible server setup
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        dbg!(&listener);
-        axum::serve(listener, router.into_make_service()).await?;
-        Ok(())
+        Ok(Manager { startup, state })
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn dispatch_request(
-        State(app_state): State<Arc<ManagerState>>,
-        req: Request<Body>,
-    ) -> impl IntoResponse {
-        let handler = app_state.handler.read().await;
-        let router = handler.router().await;
-        router.oneshot(req).await
+    pub fn boot(&self) -> Result<(), ManagerError> {
+        // Case 1 - config file is missing: ConfigState::Missing
+        // Case 2 - config file exists but is invalid: ConfigState::Exists -> config.validate() -> ConfigState::Invalid
+        // Case 3 - config file exists and is valid: ConfigState::Exists -> config.validate() -> ConfigState::Valid
+        // Case 4 - config file exists, is valid, but unable to connect to DB: ConfigState::Valid -> config.get_connection().test_connection() -> false
+        // Case 5 - config file exists, is valid, connects to DB: ConfigState::Valid -> config.get_connection().test_connection() -> true
+        // Case 6 - config file exists, is valid, connects to DB, but no settings: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Empty
+        // Case 7 - config file exists, is valid, connects to DB, settings exists, settings are invalid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Invalid
+        // Case 8 - config file exists, is valid, connects to DB, setting exists, settings valid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Valid
+        Ok(())
     }
 }
 
@@ -67,8 +64,7 @@ pub struct ManagerState {
     pub handler: RwLock<Box<dyn RequestHandler>>,
 }
 
-impl ManagerState {    
-    
+impl ManagerState {
     #[tracing::instrument(skip_all)]
     pub async fn transition_to(&self, next: ManagerPhase) -> Result<(), ManagerError> {
         let mut handler_guard = self.handler.write().await;

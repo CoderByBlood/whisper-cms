@@ -1,10 +1,9 @@
 mod config;
+pub mod db;
+mod settings;
 
 use std::{
-    collections::HashMap,
-    fmt::Debug,
-    net::{AddrParseError, IpAddr},
-    num::ParseIntError, net::SocketAddr,
+    f64::consts::E, fmt::Debug, net::{AddrParseError, IpAddr, SocketAddr}, num::ParseIntError
 };
 
 use data_encoding::BASE32_NOPAD;
@@ -13,9 +12,12 @@ use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
 use thiserror::Error;
 use validator::ValidationErrors;
 
-use config::{ConfigError, ConfigurationFile, ValidatedPassword};
+use config::{ConfigError, ConfigFile, ValidatedPassword};
 
-use crate::startup::config::ConfigMap;
+use crate::startup::{
+    db::{DatabaseConfiguration, DbConfig, DbConn, PostgresConfig},
+    settings::Settings,
+};
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -43,6 +45,7 @@ pub struct Startup {
     port: u16,
     ip: IpAddr,
     filename: String,
+    process: Process,
 }
 
 impl Startup {
@@ -74,334 +77,92 @@ impl Startup {
         filename.push_str(".enc");
 
         Ok(Self {
-            password,
+            password: password.clone(),
             hashed,
             port,
             ip,
-            filename,
+            filename: filename.to_owned(),
+            process: Process::new(ConfigFile::new(password.clone(), filename.to_owned())),
         })
     }
-
-    #[tracing::instrument(skip_all)]
-    pub fn get_configuration(&self) -> impl DatabaseConfiguration {
-        PostgresConfig {
-            file: ConfigurationFile::new(self.password.to_owned(), &self.filename),
-            conn: None,
-        }
-    }
-
-
-    #[tracing::instrument(skip_all)]
-    pub fn get_socket_address(&self) -> SocketAddr {
-        SocketAddr::from((self.ip, self.port))
-    }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum DatabaseConfigState {
-    Missing,
-    Exists,
-    Valid,
-    Failed,
+#[derive(Debug, Clone)]
+pub enum Checkpoint {
+    Start,     //ConfigFile::new()
+    Missing,   //ConfigFile.exists() -> false
+    Loaded,    //ConfigFile.load() -> fails
+    Applied,   //DbConfig::new()
+    Connected, //DbConfig.test_connection() -> true
+    Validated, //Settings.valid() -> true
+    Ready,     //Settings.applied
 }
 
-pub trait DatabaseConfiguration: Debug {
-    fn state(&self) -> DatabaseConfigState;
-    fn save(&mut self, confg: HashMap<String, String>) -> Result<(), StartupError>;
-    fn connect(&self) -> Result<impl DatabaseConnection, StartupError>;
-    fn validate(&mut self) -> Result<(), StartupError>;
-}
-
-pub trait DatabaseConnection: Debug {
-    async fn test_connection(&self) -> Result<bool, ConfigError>;
-    fn to_connect_string(&self) -> String;
-}
-#[derive(Clone, Debug)]
-pub struct PostgresConn {
-    /// The host for the PostgreSQL server
-    host: String,
-
-    /// The port for the PostgreSQL server
-    port: u16,
-
-    /// The username for the PostgreSQL database
-    user: String,
-
-    /// The password to the PostgreSQL database
-    password: SecretString,
-
-    /// The name of the PostgreSQL database
-    database: String,
-}
+//| Field    |   None    |    Some(Ok    |    Some(Err)     |
+//|----------|-----------|---------------|------------------|
+//| file     | start     | exists        | load failed      |
+//| config   | not tried | mapping done  | mapping failed   |
+//| conn     | not tried | db connected  | connect failed   |
+//| settings | not tried | setting valid | settings invalid |
 #[derive(Debug)]
-pub struct PostgresConfig {
-    file: ConfigurationFile,
-    conn: Option<PostgresConn>,
+pub struct Process {
+    checkpoint: Checkpoint,
+    file: Option<Result<ConfigFile, StartupError>>,
+    config: Option<Result<DbConfig, StartupError>>,
+    conn: Option<Result<DbConn, StartupError>>,
+    settings: Option<Result<Settings, StartupError>>,
 }
 
-impl DatabaseConnection for PostgresConn {
-    #[tracing::instrument(skip_all)]
-    async fn test_connection(&self) -> Result<bool, ConfigError> {
-        let conn_str = self.to_connect_string().replace(
-            &format!("{:?}", self.password),
-            self.password.expose_secret(),
-        );
-
-        // Test the connection using ping (available in sqlx 0.8.6)
-        PgConnection::connect(&conn_str).await?.ping().await?;
-        Ok(true)
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn to_connect_string(&self) -> String {
-        format!(
-            "postgresql://{}:{:?}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.database
-        )
-    }
-}
-
-impl PostgresConfig {
-    #[tracing::instrument(skip_all)]
-    fn build_connection(contents: &ConfigMap) -> Result<PostgresConn, StartupError> {
-        let host = contents
-            .get("host")
-            .ok_or(StartupError::Mapping("missing `host` key"))?
-            .to_owned();
-
-        let port = contents
-            .get("port")
-            .ok_or(StartupError::Mapping("missing `port` key"))?
-            .parse()?;
-
-        let user = contents
-            .get("user")
-            .ok_or(StartupError::Mapping("missing `user` key"))?
-            .to_owned();
-
-        let password = contents
-            .get("password")
-            .ok_or(StartupError::Mapping("missing `password` key"))?
-            .to_owned();
-
-        let database = contents
-            .get("database")
-            .ok_or(StartupError::Mapping("missing `database` key"))?
-            .to_owned();
-
-        Ok(PostgresConn {
-            host,
-            port,
-            user,
-            password: SecretString::from(password),
-            database,
-        })
-    }
-}
-
-impl DatabaseConfiguration for PostgresConfig {
-    #[tracing::instrument(skip_all)]
-    fn state(&self) -> DatabaseConfigState {
-        if !self.file.exists() {
-            DatabaseConfigState::Missing
-        } else if self.file.tried().is_none() {
-            DatabaseConfigState::Exists
-        } else if !self.file.tried().unwrap() {
-            DatabaseConfigState::Failed
-        } else if self.conn.is_none() {
-            //someone called save on the File directly
-            DatabaseConfigState::Failed
-        } else {
-            DatabaseConfigState::Valid
+impl Process {
+    pub fn new(file: ConfigFile) -> Self {
+        Self {
+            checkpoint: Checkpoint::Start,
+            file: Some(Ok(file)),
+            config: None,
+            conn: None,
+            settings: None,
         }
     }
 
-    #[tracing::instrument(skip_all)]
-    fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError> {
-        self.conn = Some(Self::build_connection(&config)?);
-        self.file.save(config)?;
-        Ok(())
+    pub fn execute(&mut self) -> Result<(), StartupError> {
+        self.validate_settings()  //start at the end and wherever it stops (errors out) is where we are
     }
 
-    #[tracing::instrument(skip_all)]
-    fn validate(&mut self) -> Result<(), StartupError> {
-        match self.state() {
-            DatabaseConfigState::Missing | DatabaseConfigState::Failed => {
-                Err(StartupError::Mapping("Nothing to validate"))
-            }
-            DatabaseConfigState::Exists => {
-                self.conn = Some(Self::build_connection(&self.file.load()?)?);
-                Ok(())
-            }
-            DatabaseConfigState::Valid => Ok(()),
+    pub fn checkpoint(&self) -> Checkpoint {
+        self.checkpoint.clone()
+    }
+
+    fn config_exists(&mut self) -> Result<bool, StartupError> {
+        let file_ref = self.file.as_ref();
+        Ok(file_ref.is_some() && file_ref.unwrap().as_ref().is_ok() && file_ref.unwrap().as_ref().unwrap().exists())
+    }
+
+    fn load_config(&mut self) -> Result<(), StartupError> {
+        match self.config_exists() {
+            Ok(true) => todo!("load it, populate field and checkpoint"),
+            Ok(false) => todo!("return error"),
+            Err(_e) => todo!("re throw"),
         }
     }
 
-    #[tracing::instrument(skip_all)]
-    fn connect(&self) -> Result<impl DatabaseConnection, StartupError> {
-        match self.state() {
-            DatabaseConfigState::Valid => self
-                .conn
-                .clone()
-                .ok_or(StartupError::Mapping("miss matched states")),
-            _ => Err(StartupError::Mapping(
-                "Could not map configuration due to invalid state",
-            )),
+    fn apply_config(&mut self) -> Result<(), StartupError> {
+        match self.load_config() {
+            Ok(_) => todo!("apply the mapping, populate field and checkpoint"),
+            Err(_e) => todo!("re throw"),
         }
     }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_startup_build_filename_generation() {
-        let startup = Startup::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-            5432,
-            "127.0.0.1".into(),
-        )
-        .unwrap();
-
-        assert!(startup.filename.ends_with(".enc"));
-        assert!(startup.filename.len() <= 128 + 4);
+    fn connect_db(&mut self) -> Result<(), StartupError> {
+        match self.apply_config() {
+            Ok(_) => todo!("get the database connection and try to connect,and populate field and checkpoint"),
+            Err(_e) => todo!("re throw"),
+        }
     }
 
-    #[test]
-    fn test_startup_invalid_ip_fails() {
-        let result = Startup::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-            5432,
-            "invalid_ip".into(),
-        );
-        assert!(matches!(result, Err(StartupError::IpParse(_))));
-    }
-
-    #[test]
-    fn test_startup_invalid_password_fails() {
-        let result = Startup::build(
-            "weak".into(),
-            "saltislongenough".into(),
-            5432,
-            "127.0.0.1".into(),
-        );
-        assert!(matches!(result, Err(StartupError::Password(_))));
-    }
-
-    #[test]
-    fn test_postgres_config_state_transitions() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let path = tmp_dir.path().join("pg_config.enc");
-        let path_str = path.to_str().unwrap();
-
-        let config = PostgresConfig {
-            file: ConfigurationFile::new(password, path_str),
-            conn: None,
-        };
-
-        // File does not exist
-        assert_eq!(config.state(), DatabaseConfigState::Missing);
-    }
-
-    #[tokio::test]
-    async fn test_to_connect_string_format() {
-        let conn = PostgresConn {
-            host: "localhost".into(),
-            port: 5432,
-            user: "admin".into(),
-            password: SecretString::from("supersecret"),
-            database: "mydb".into(),
-        };
-
-        let conn_str = conn.to_connect_string();
-        assert!(conn_str.contains("admin"));
-        assert!(conn_str.contains("localhost"));
-        assert!(conn_str.contains("5432"));
-        assert!(conn_str.contains("mydb"));
-    }
-
-    #[test]
-    fn test_validate_missing_file() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let path = tmp_dir.path().join("missing_file.enc");
-        let path_str = path.to_str().unwrap();
-
-        let mut config = PostgresConfig {
-            file: ConfigurationFile::new(password, path_str),
-            conn: None,
-        };
-
-        let result = config.validate();
-        assert!(matches!(result, Err(StartupError::Mapping(_))));
-    }
-
-    #[test]
-    fn test_validate_missing_keys() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let path = tmp_dir.path().join("incomplete.enc");
-        let path_str = path.to_str().unwrap();
-
-        let mut config = PostgresConfig {
-            file: ConfigurationFile::new(password.clone(), path_str),
-            conn: None,
-        };
-
-        let mut map = HashMap::new();
-        map.insert("host".into(), "localhost".into());
-        config.file.save(map).unwrap();
-
-        let result = config.validate();
-        assert!(matches!(result, Err(StartupError::Mapping(_))));
-    }
-
-    #[test]
-    fn test_validate_and_connect_successful_path() {
-        let password = ValidatedPassword::build(
-            "StrongPass1$".into(),
-            "longsufficientlysalt".into(),
-        )
-        .unwrap();
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let path = tmp_dir.path().join("valid.enc");
-        let path_str = path.to_str().unwrap();
-
-        let mut config = PostgresConfig {
-            file: ConfigurationFile::new(password, path_str),
-            conn: None,
-        };
-
-        let mut map = HashMap::new();
-        map.insert("host".into(), "localhost".into());
-        map.insert("port".into(), "5432".into());
-        map.insert("user".into(), "myuser".into());
-        map.insert("password".into(), "mypassword".into());
-        map.insert("database".into(), "mydatabase".into());
-
-        config.save(map).unwrap();
-        assert!(config.validate().is_ok());
-        assert_eq!(config.state(), DatabaseConfigState::Valid);
-        let conn = config.connect();
-        assert!(conn.is_ok());
+    fn validate_settings(&mut self) -> Result<(), StartupError> {
+        match self.connect_db() {
+            Ok(_) => todo!("query the database for setting and validate, and populate field and checkpoint"),
+            Err(_e) => todo!("re throw"),
+        }
     }
 }

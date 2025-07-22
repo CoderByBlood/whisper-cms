@@ -23,16 +23,16 @@ const KEY_LEN: usize = 32;
 
 pub type ConfigMap = HashMap<String, String>;
 #[derive(Debug)]
-pub struct ConfigurationFile {
+pub struct ConfigFile {
     ser: Serializers,
     path: PathBuf,
     tried: Option<bool>,
 }
 
-impl ConfigurationFile {
+impl ConfigFile {
     #[tracing::instrument(skip_all)]
-    pub fn new(password: ValidatedPassword, path: &str) -> ConfigurationFile {
-        ConfigurationFile {
+    pub fn new(password: ValidatedPassword, path: String) -> ConfigFile {
+        ConfigFile {
             ser: Serializers::JsonEncrypted(ConfigSerializer::new(
                 JsonCodec {},
                 Encrypted::new(password),
@@ -541,7 +541,7 @@ mod tests {
         let path = dir.path().join("config_file.enc");
         let path_str = path.to_str().unwrap();
 
-        let mut file = ConfigurationFile::new(password.clone(), path_str);
+        let mut file = ConfigFile::new(password.clone(), path_str.to_owned());
 
         let mut map = ConfigMap::new();
         map.insert("theme".into(), "dark".into());
@@ -565,7 +565,7 @@ mod tests {
         let path = dir.path().join("missing.enc");
         let path_str = path.to_str().unwrap();
 
-        let mut file = ConfigurationFile::new(password, path_str);
+        let mut file = ConfigFile::new(password, path_str.to_owned());
         let result = file.load();
 
         assert!(result.is_err());

@@ -11,7 +11,7 @@ use tracing_subscriber::{self, layer::SubscriberExt, Registry};
 
 use cli::Args;
 
-use startup::{DatabaseConfiguration, DatabaseConnection, Startup, StartupError};
+use startup::{Startup, StartupError};
 use request::Manager;
 
 #[tokio::main]
@@ -31,9 +31,8 @@ async fn main() -> Result<(), StartupError> {
     tracing::subscriber::set_global_default(subscriber).expect("set global subscriber");
 
     let args = Args::parse();
-    let startup = Startup::build(args.password, args.salt, args.port, args.address)?;
-    let mut config = startup.get_configuration();
-    let map = HashMap::from([
+    let _startup = Startup::build(args.password, args.salt, args.port, args.address)?;
+    let _map: HashMap<String, String> = HashMap::from([
         ("host".into(), "localhost".into()),
         ("port".into(), "5432".into()),
         ("user".into(), "myuser".into()),
@@ -41,29 +40,6 @@ async fn main() -> Result<(), StartupError> {
         ("database".into(), "mydatabase".into()),
         ("pool".into(), "15".into()),
     ]);
-
-    debug!("{:?}", &config);
-    debug!("{:?}", config.state());
-
-    match config.validate() {
-        Err(_) => {
-            dbg!(&map);
-            config.save(map)
-        }
-        ok @ Ok(_) => ok,
-    }?;
-
-    debug!("{:?}", config.state());
-    debug!("{:?}", config.validate()?);
-    debug!("{:?}", config.state());
-    debug!("{:?}", config.connect()?);
-    debug!("{:?}", config.state());
-    debug!("{:?}", config.connect()?.to_connect_string());
-    debug!("{:?}", config.state());
-    debug!("{:?}", config.connect()?.test_connection().await?);
-
-    let mgr = Manager::build().map_err(|_| StartupError::Mapping("Building Failed"))?;
-    mgr.start(startup.get_socket_address()).await.map_err(|_| StartupError::Mapping("Building Failed"))?;
 
     Ok(())
 }
