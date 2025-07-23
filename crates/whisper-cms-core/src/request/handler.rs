@@ -10,6 +10,10 @@ use axum::{
 use thiserror::Error;
 use tower_http::services::ServeDir;
 
+use axum::{body::Body, extract::Request};
+use std::path::PathBuf;
+use tower::{service_fn, Service};
+
 use crate::request::ManagerError;
 
 #[async_trait]
@@ -23,12 +27,15 @@ pub struct NoopHandler;
 
 #[async_trait]
 impl RequestHandler for NoopHandler {
+    #[tracing::instrument(skip_all)]
     async fn router(&self) -> Router {
         Router::new()
     }
+    #[tracing::instrument(skip_all)]
     async fn on_enter(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
+    #[tracing::instrument(skip_all)]
     async fn on_exit(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
@@ -38,6 +45,7 @@ pub struct BootingHandler;
 
 #[async_trait]
 impl RequestHandler for BootingHandler {
+    #[tracing::instrument(skip_all)]
     async fn router(&self) -> Router {
         Router::new().fallback(axum::routing::any(|| async {
             (
@@ -46,9 +54,11 @@ impl RequestHandler for BootingHandler {
             )
         }))
     }
+    #[tracing::instrument(skip_all)]
     async fn on_enter(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
+    #[tracing::instrument(skip_all)]
     async fn on_exit(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
@@ -58,22 +68,18 @@ pub struct ConfiguringHandler;
 
 #[async_trait]
 impl RequestHandler for ConfiguringHandler {
+    #[tracing::instrument(skip_all)]
     async fn router(&self) -> Router {
-        Router::new()
-            .nest_service("/", ServeDir::new("static/config-spa"))
-            .fallback(axum::routing::any(|| async {
-                match tokio::fs::read_to_string("static/config-spa/index.html").await {
-                    Ok(content) => Html(content).into_response(),
-                    Err(_) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to load index",
-                    ).into_response(),
-                }
-            }))
+        Router::new().fallback_service(
+            ServeDir::new("static/config-spa")
+                .not_found_service(spa_index("static/config-spa/index.html")),
+        )
     }
+    #[tracing::instrument(skip_all)]
     async fn on_enter(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
+    #[tracing::instrument(skip_all)]
     async fn on_exit(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
@@ -83,22 +89,18 @@ pub struct InstallingHandler;
 
 #[async_trait]
 impl RequestHandler for InstallingHandler {
+    #[tracing::instrument(skip_all)]
     async fn router(&self) -> Router {
-        Router::new()
-            .nest_service("/", ServeDir::new("static/install-spa"))
-            .fallback(axum::routing::any(|| async {
-                match tokio::fs::read_to_string("static/install-spa/index.html").await {
-                    Ok(content) => Html(content).into_response(),
-                    Err(_) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to load index",
-                    ).into_response(),
-                }
-            }))
+        Router::new().fallback_service(
+            ServeDir::new("static/install-spa")
+                .not_found_service(spa_index("static/install-spa/index.html")),
+        )
     }
+    #[tracing::instrument(skip_all)]
     async fn on_enter(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
+    #[tracing::instrument(skip_all)]
     async fn on_exit(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
@@ -108,6 +110,7 @@ pub struct ServingHandler;
 
 #[async_trait]
 impl RequestHandler for ServingHandler {
+    #[tracing::instrument(skip_all)]
     async fn router(&self) -> Router {
         Router::new()
             .route("/", get(home_page))
@@ -116,9 +119,11 @@ impl RequestHandler for ServingHandler {
                 (StatusCode::NOT_FOUND, "Page not found").into_response()
             }))
     }
+    #[tracing::instrument(skip_all)]
     async fn on_enter(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
+    #[tracing::instrument(skip_all)]
     async fn on_exit(&mut self) -> Result<(), ManagerError> {
         Ok(())
     }
@@ -138,4 +143,33 @@ async fn home_page() -> Result<impl IntoResponse, ManagerError> {
     };
 
     Ok(Html(template.render()?))
+}
+
+#[tracing::instrument(skip_all)]
+fn spa_index(
+    index_path: &str,
+) -> impl Service<
+    Request<Body>,
+    Response = axum::response::Response,
+    Error = std::convert::Infallible,
+    Future = impl Send + 'static, // 👈 ensure the Future is Send
+> + Clone
+       + Send
+       + 'static {
+    let path = PathBuf::from(index_path);
+    service_fn(move |_req: Request<Body>| {
+        let path = path.clone();
+        async move {
+            let result = tokio::fs::read_to_string(path).await;
+            let response = match result {
+                Ok(content) => Html(content).into_response(),
+                Err(_) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load index",
+                )
+                    .into_response(),
+            };
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    })
 }
