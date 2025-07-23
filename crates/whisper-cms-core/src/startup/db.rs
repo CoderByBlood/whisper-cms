@@ -1,8 +1,7 @@
 use std::{collections::HashMap, fmt::Debug};
 
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::{postgres::PgPoolOptions, Connection, PgConnection, PgPool};
-use thiserror::Error;
+use sqlx::{Connection, PgConnection};
 
 use crate::startup::config::ConfigError;
 use crate::startup::config::ConfigFile;
@@ -43,6 +42,7 @@ impl DatabaseConfiguration for DbConfig {
 pub trait DatabaseConnection: Debug {
     async fn test_connection(&self) -> Result<bool, ConfigError>;
     fn to_connect_string(&self) -> String;
+    fn to_db_conn(&self) -> DbConn;
 }
 
 #[derive(Debug)]
@@ -60,6 +60,12 @@ impl DatabaseConnection for DbConn {
     fn to_connect_string(&self) -> String {
         match self {
             Self::Postgres(pg) => pg.to_connect_string(),
+        }
+    }
+
+    fn to_db_conn(&self) -> DbConn {
+        match self {
+            Self::Postgres(pg) => pg.to_db_conn(),
         }
     }
 }
@@ -106,6 +112,11 @@ impl DatabaseConnection for PostgresConn {
             "postgresql://{}:{:?}@{}:{}/{}",
             self.user, self.password, self.host, self.port, self.database
         )
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn to_db_conn(&self) -> DbConn {
+        DbConn::Postgres(self.clone())
     }
 }
 

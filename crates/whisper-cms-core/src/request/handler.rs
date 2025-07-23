@@ -7,7 +7,6 @@ use axum::{
     routing::get,
     Router,
 };
-use thiserror::Error;
 use tower_http::services::ServeDir;
 
 use axum::{body::Body, extract::Request};

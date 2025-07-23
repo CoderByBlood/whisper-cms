@@ -1,6 +1,6 @@
 mod cli;
-mod startup;
 mod request;
+mod startup;
 
 use std::{collections::HashMap, fs::File};
 
@@ -11,8 +11,8 @@ use tracing_subscriber::{self, layer::SubscriberExt, Registry};
 
 use cli::Args;
 
-use startup::{Startup, StartupError};
 use request::Manager;
+use startup::{Startup, StartupError};
 
 #[tokio::main]
 async fn main() -> Result<(), StartupError> {
@@ -30,10 +30,13 @@ async fn main() -> Result<(), StartupError> {
 
     tracing::subscriber::set_global_default(subscriber).expect("set global subscriber");
 
+    debug!("BEGIN main");
     let args = Args::parse();
+    debug!("Ags parsed");
     let startup = Startup::build(args.password, args.salt)?;
+    debug!("Startup process built");
     let mut req_mgr = Manager::build(startup)?;
-
+    debug!("Request Manager built and booting");
     req_mgr.boot(args.address, args.port).await?;
 
     let _map: HashMap<String, String> = HashMap::from([

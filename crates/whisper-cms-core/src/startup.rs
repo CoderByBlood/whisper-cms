@@ -11,10 +11,13 @@ use validator::ValidationErrors;
 
 use config::{ConfigError, ConfigFile, ValidatedPassword};
 
-use crate::{request::ManagerError, startup::{
-    db::{DatabaseConfiguration, DatabaseConnection, DbConfig, DbConn, PostgresConfig},
-    settings::Settings,
-}};
+use crate::{
+    request::ManagerError,
+    startup::{
+        db::{DatabaseConfiguration, DatabaseConnection, DbConfig, DbConn, PostgresConfig},
+        settings::Settings,
+    },
+};
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -166,6 +169,7 @@ impl Process {
 
                 match db.validate() {
                     Ok(_) => {
+                        self.conn = Some(Ok(db.connect()?.to_db_conn()));
                         self.checkpoint = Checkpoint::Applied;
                         Ok(())
                     }
@@ -180,21 +184,17 @@ impl Process {
     fn connect_db(&mut self) -> Result<(), StartupError> {
         match self.apply_config() {
             Ok(_) => {
-                let db = self.config.as_mut().unwrap().as_mut().unwrap();
+                let conn = self.conn.as_mut().unwrap().as_mut().unwrap();
 
                 // Used only if *not* in a tokio runtime
                 //let rt = Runtime::new().unwrap();
                 //let result = rt.block_on(db.connect()?.test_connection());
 
-                let result: Result<bool, StartupError> =
-                    tokio::task::block_in_place(|| match db.connect() {
-                        Ok(conn) => {
-                            let test = tokio::runtime::Handle::current()
-                                .block_on(conn.test_connection())?;
-                            Ok(test)
-                        }
-                        Err(e) => Err(e),
-                    });
+                let result: Result<bool, StartupError> = tokio::task::block_in_place(|| {
+                    let test =
+                        tokio::runtime::Handle::current().block_on(conn.test_connection())?;
+                    Ok(test)
+                });
 
                 match result? {
                     true => {
