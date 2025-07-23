@@ -11,10 +11,10 @@ use validator::ValidationErrors;
 
 use config::{ConfigError, ConfigFile, ValidatedPassword};
 
-use crate::startup::{
+use crate::{request::ManagerError, startup::{
     db::{DatabaseConfiguration, DatabaseConnection, DbConfig, DbConn, PostgresConfig},
     settings::Settings,
-};
+}};
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -29,6 +29,9 @@ pub enum StartupError {
 
     #[error("Could not load configuration error: {0}")]
     Config(#[from] ConfigError),
+
+    #[error("Could not boot request manager error: {0}")]
+    Request(#[from] ManagerError),
 
     #[error("Could not map configuration error: {0}")]
     Mapping(&'static str),
@@ -74,7 +77,14 @@ pub enum Checkpoint {
     Validated, //Settings.valid() -> true
     Ready,     //Settings.applied
 }
-
+// Case 1 - config file is missing: ConfigState::Missing
+// Case 2 - config file exists but is invalid: ConfigState::Exists -> config.validate() -> ConfigState::Invalid
+// Case 3 - config file exists and is valid: ConfigState::Exists -> config.validate() -> ConfigState::Valid
+// Case 4 - config file exists, is valid, but unable to connect to DB: ConfigState::Valid -> config.get_connection().test_connection() -> false
+// Case 5 - config file exists, is valid, connects to DB: ConfigState::Valid -> config.get_connection().test_connection() -> true
+// Case 6 - config file exists, is valid, connects to DB, but no settings: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Empty
+// Case 7 - config file exists, is valid, connects to DB, settings exists, settings are invalid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Invalid
+// Case 8 - config file exists, is valid, connects to DB, setting exists, settings valid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Valid
 //| Field    |   None    |    Some(Ok    |    Some(Err)     |
 //|----------|-----------|---------------|------------------|
 //| file     | start     | exists        | load failed      |
@@ -194,7 +204,7 @@ impl Process {
                     false => Err(StartupError::Mapping("Connection to Database failed")),
                 }
             }
-            Err(_e) => todo!("re throw"),
+            Err(e) => Err(e),
         }
     }
 
@@ -206,7 +216,7 @@ impl Process {
 
                 Err(StartupError::Mapping("Code Path Not Implemented"))
             }
-            Err(_e) => todo!("re throw"),
+            Err(e) => Err(e),
         }
     }
 }

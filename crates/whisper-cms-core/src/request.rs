@@ -1,6 +1,9 @@
 mod handler;
 
-use std::sync::Arc;
+use std::{
+    net::{AddrParseError, IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use axum::{
     body::Body,
@@ -13,22 +16,24 @@ use hyper::StatusCode;
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tower::ServiceExt;
+use tracing::{debug, info};
 
 use crate::{
     request::handler::{
         BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, RequestHandler,
         ServingHandler,
     },
-    startup::{self, Startup},
+    startup::{Checkpoint, Process},
 };
 
 pub struct Manager {
-    startup: Startup,
+    startup: Process,
     state: Arc<ManagerState>,
 }
 
 impl Manager {
-    pub fn build(startup: Startup) -> Result<Manager, ManagerError> {
+    pub fn build(startup: Process) -> Result<Manager, ManagerError> {
         // Start in Booting state
         let initial_handler = Box::new(BootingHandler);
         let state = Arc::new(ManagerState {
@@ -38,16 +43,49 @@ impl Manager {
         Ok(Manager { startup, state })
     }
 
-    pub fn boot(&self) -> Result<(), ManagerError> {
-        // Case 1 - config file is missing: ConfigState::Missing
-        // Case 2 - config file exists but is invalid: ConfigState::Exists -> config.validate() -> ConfigState::Invalid
-        // Case 3 - config file exists and is valid: ConfigState::Exists -> config.validate() -> ConfigState::Valid
-        // Case 4 - config file exists, is valid, but unable to connect to DB: ConfigState::Valid -> config.get_connection().test_connection() -> false
-        // Case 5 - config file exists, is valid, connects to DB: ConfigState::Valid -> config.get_connection().test_connection() -> true
-        // Case 6 - config file exists, is valid, connects to DB, but no settings: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Empty
-        // Case 7 - config file exists, is valid, connects to DB, settings exists, settings are invalid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Invalid
-        // Case 8 - config file exists, is valid, connects to DB, setting exists, settings valid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Valid
+    pub async fn boot(&mut self, address: String, port: u16) -> Result<(), ManagerError> {
+        match self.startup.execute() {
+            Ok(_) => self.state.transition_to(ManagerPhase::Serving).await?,
+            Err(_e) => {
+                // Todo: How to get the error message to the client
+                match self.startup.checkpoint() {
+                    Checkpoint::Connected => {
+                        self.state.transition_to(ManagerPhase::Installing).await?
+                    }
+                    Checkpoint::Validated => {
+                        self.state.transition_to(ManagerPhase::Installing).await?
+                    }
+                    Checkpoint::Ready => self.state.transition_to(ManagerPhase::Serving).await?,
+                    _ => self.state.transition_to(ManagerPhase::Configuring).await?,
+                }
+            }
+        }
+
+        // Fallback router
+        let router = Router::new()
+            .fallback(Self::dispatch_request)
+            .with_state(self.state.clone());
+
+        let ip: IpAddr = address.parse()?;
+        let addr = SocketAddr::new(ip, port);
+
+        info!("Listening on http://{}", addr);
+
+        // Use hyper 1.6.0 compatible server setup
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        debug!("listener: {:?}", &listener);
+        axum::serve(listener, router.into_make_service()).await?;
         Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn dispatch_request(
+        State(mgr_state): State<Arc<ManagerState>>,
+        req: Request<Body>,
+    ) -> impl IntoResponse {
+        let handler = mgr_state.handler.read().await;
+        let router = handler.router().await;
+        router.oneshot(req).await
     }
 }
 
@@ -95,6 +133,9 @@ pub enum ManagerError {
     #[error("Template error: {0}")]
     Template(#[from] askama::Error),
 
+    #[error("Could not parse IP address error: {0}")]
+    IpParse(#[from] AddrParseError),
+
     #[error("Unhandled internal application error")]
     Internal,
 }
@@ -103,6 +144,7 @@ impl IntoResponse for ManagerError {
     fn into_response(self) -> Response {
         let status = match self {
             ManagerError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ManagerError::IpParse(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ManagerError::SerdeJson(_) => StatusCode::BAD_REQUEST,
             ManagerError::Template(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ManagerError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
