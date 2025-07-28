@@ -10,7 +10,7 @@ use crate::startup::StartupError;
 
 pub trait DatabaseConfiguration: Debug {
     fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError>;
-    fn connect(&self) -> Result<impl DatabaseConnection, StartupError>;
+    fn connect(&self) -> Result<DatabaseConnection, StartupError>;
     fn validate(&mut self) -> Result<(), StartupError>;
 }
 
@@ -20,7 +20,7 @@ pub enum DbConfig {
 }
 
 impl DatabaseConfiguration for DbConfig {
-    fn connect(&self) -> Result<impl DatabaseConnection, StartupError> {
+    fn connect(&self) -> Result<DatabaseConnection, StartupError> {
         match self {
             Self::Postgres(pg) => pg.connect(),
         }
@@ -39,33 +39,22 @@ impl DatabaseConfiguration for DbConfig {
     }
 }
 
-pub trait DatabaseConnection: Debug {
-    async fn test_connection(&self) -> Result<bool, ConfigError>;
-    fn to_connect_string(&self) -> String;
-    fn to_db_conn(&self) -> DbConn;
-}
 
 #[derive(Debug)]
-pub enum DbConn {
+pub enum DatabaseConnection {
     Postgres(PostgresConn),
 }
 
-impl DatabaseConnection for DbConn {
-    async fn test_connection(&self) -> Result<bool, ConfigError> {
+impl DatabaseConnection {
+    pub async fn test_connection(&self) -> Result<bool, ConfigError> {
         match self {
             Self::Postgres(pg) => pg.test_connection().await,
         }
     }
 
-    fn to_connect_string(&self) -> String {
+    pub fn to_connect_string(&self) -> String {
         match self {
             Self::Postgres(pg) => pg.to_connect_string(),
-        }
-    }
-
-    fn to_db_conn(&self) -> DbConn {
-        match self {
-            Self::Postgres(pg) => pg.to_db_conn(),
         }
     }
 }
@@ -93,7 +82,7 @@ pub struct PostgresConfig {
     conn: Option<PostgresConn>,
 }
 
-impl DatabaseConnection for PostgresConn {
+impl PostgresConn {
     #[tracing::instrument(skip_all)]
     async fn test_connection(&self) -> Result<bool, ConfigError> {
         let conn_str = self.to_connect_string().replace(
@@ -113,20 +102,12 @@ impl DatabaseConnection for PostgresConn {
             self.user, self.password, self.host, self.port, self.database
         )
     }
-
-    #[tracing::instrument(skip_all)]
-    fn to_db_conn(&self) -> DbConn {
-        DbConn::Postgres(self.clone())
-    }
 }
 
 impl PostgresConfig {
     #[tracing::instrument(skip_all)]
     pub fn new(file: ConfigFile) -> Self {
-        Self {
-            file,
-            conn: None,
-        }
+        Self { file, conn: None }
     }
 
     #[tracing::instrument(skip_all)]
@@ -204,12 +185,224 @@ impl DatabaseConfiguration for PostgresConfig {
     }
 
     #[tracing::instrument(skip_all)]
-    fn connect(&self) -> Result<impl DatabaseConnection, StartupError> {
+    fn connect(&self) -> Result<DatabaseConnection, StartupError> {
         match &self.conn {
-            Some(conn) => Ok(conn.clone()),
+            Some(conn) => Ok(DatabaseConnection::Postgres(conn.clone())),
             None => Err(StartupError::Mapping(
                 "Could not connect - no connection configured - invalid state",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+    use tempfile::{tempdir, NamedTempFile};
+
+    use super::*;
+
+    fn build_config_map(valid: bool) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if valid {
+            map.insert("host".into(), "localhost".into());
+            map.insert("port".into(), "5432".into());
+            map.insert("user".into(), "admin".into());
+            map.insert("password".into(), "password123!".into());
+            map.insert("database".into(), "mydb".into());
+        } else {
+            map.insert("host".into(), "localhost".into());
+            // missing port, user, etc.
+        }
+        map
+    }
+
+    fn new_pg_config(temp_path: &str) -> PostgresConfig {
+        let pw = SecretString::new("Password123!".into());
+        let salt = "thisisaverysecuresalt";
+        let vpw = crate::startup::config::ValidatedPassword::build(
+            pw.expose_secret().to_string(),
+            salt.to_string(),
+        )
+        .unwrap();
+        let file = ConfigFile::new(vpw, temp_path.to_string());
+        PostgresConfig::new(file)
+    }
+
+    #[tokio::test]
+    async fn test_valid_connection_save_and_validate() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+        let mut config = new_pg_config(&temp_path);
+        let valid_map = build_config_map(true);
+        config.save(valid_map.clone()).unwrap();
+
+        config.validate().unwrap();
+
+        let db_conn = config.connect().unwrap();
+        assert_eq!(
+            db_conn.to_connect_string(),
+            PostgresConn {
+                host: "localhost".into(),
+                port: 5432,
+                user: "admin".into(),
+                password: SecretString::new("password123!".into()),
+                database: "mydb".into(),
+            }
+            .to_connect_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_invalid_config_fails() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+        let mut config = new_pg_config(&temp_path);
+        let bad_map = build_config_map(false);
+        let result = config.save(bad_map);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_when_file_missing_returns_error() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut temp_path = temp_file.path().to_str().unwrap().to_string();
+
+        temp_path.push_str("nonexistent.enc");
+
+        let mut config = new_pg_config(&temp_path);
+        let result = config.validate();
+        assert!(result.is_err());
+        assert_eq!(
+            format!("{}", result.unwrap_err()),
+            "Could not map configuration error: Nothing to validate, file doesn't exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connect_fails_if_not_configured() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+        let config = new_pg_config(&temp_path);
+        let result = config.connect();
+        assert!(result.is_err());
+        assert_eq!(
+        format!("{}", result.unwrap_err()),
+        "Could not map configuration error: Could not connect - no connection configured - invalid state"
+    );
+    }
+
+    #[tokio::test]
+    async fn test_dbconfig_trait_dispatch() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let temp_path = temp_file.path().to_str().unwrap().to_string();
+
+        let pg = new_pg_config(&temp_path);
+        let valid_map = build_config_map(true);
+
+        let mut db: Box<dyn DatabaseConfiguration> = Box::new(DbConfig::Postgres(pg));
+        db.save(valid_map).unwrap();
+        db.validate().unwrap();
+        let conn = db.connect().unwrap();
+        assert!(conn.to_connect_string().contains("localhost"));
+    }
+
+    fn mock_config_file_with_missing_file() -> ConfigFile {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.enc");
+        ConfigFile::new(
+            crate::startup::config::ValidatedPassword::build(
+                "Password123!".into(),
+                "secureSaltString123456".into(),
+            )
+            .unwrap(),
+            String::from(path.to_str().unwrap()),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_validate_missing_file_returns_error() {
+        let mut config = PostgresConfig::new(mock_config_file_with_missing_file());
+        let result = config.validate();
+        assert!(matches!(result, Err(StartupError::Mapping(msg)) if msg.contains("doesn't exist")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_failed_load_returns_error() {
+        let mut file = mock_config_file_with_missing_file();
+        let _saved = file.save(HashMap::new());
+        let mut config = PostgresConfig::new(file);
+        let result = config.validate();
+        assert!(
+            matches!(result, Err(StartupError::Mapping(msg)) if msg.contains("failed to load"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_missing_fields() {
+        let mut config = PostgresConfig::new(mock_config_file_with_missing_file());
+        let map: HashMap<String, String> = HashMap::new(); // no keys
+        let result = config.save(map);
+        assert!(matches!(result, Err(StartupError::Mapping(msg)) if msg.contains("missing")));
+    }
+
+    #[tokio::test]
+    async fn test_connect_without_validation_fails() {
+        let config = PostgresConfig::new(mock_config_file_with_missing_file());
+        let result = config.connect();
+        assert!(matches!(result, Err(StartupError::Mapping(msg)) if msg.contains("invalid state")));
+    }
+
+    #[tokio::test]
+    async fn test_connect_after_save_and_validate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("valid.enc");
+        let mut config = PostgresConfig::new(ConfigFile::new(
+            crate::startup::config::ValidatedPassword::build("Password123!".into(), "secureSaltString123456".into())
+                .unwrap(),
+            String::from(path.to_str().unwrap()),
+        ));
+
+        let mut map = HashMap::new();
+        map.insert("host".into(), "localhost".into());
+        map.insert("port".into(), "5432".into());
+        map.insert("user".into(), "user".into());
+        map.insert("password".into(), "secret".into());
+        map.insert("database".into(), "db".into());
+
+        config.save(map).unwrap();
+        config.validate().unwrap();
+        let result = config.connect();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_with_file_exists_and_not_tried() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("exists.enc");
+
+        // Create dummy encrypted config
+        let password =
+            crate::startup::config::ValidatedPassword::build("Password123!".into(), "secureSaltString123456".into())
+                .unwrap();
+        let mut config_file = ConfigFile::new(password, String::from(path.to_str().unwrap()));
+
+        // Write a valid config to disk manually to simulate file existence
+        let mut map = HashMap::new();
+        map.insert("host".into(), "localhost".into());
+        map.insert("port".into(), "5432".into());
+        map.insert("user".into(), "user".into());
+        map.insert("password".into(), "secret".into());
+        map.insert("database".into(), "db".into());
+
+        config_file.save(map).unwrap();
+
+        let mut config = PostgresConfig::new(config_file);
+        let result = config.validate();
+        assert!(result.is_ok());
     }
 }

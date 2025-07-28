@@ -14,7 +14,7 @@ use config::{ConfigError, ConfigFile, ValidatedPassword};
 use crate::{
     request::ManagerError,
     startup::{
-        db::{DatabaseConfiguration, DatabaseConnection, DbConfig, DbConn, PostgresConfig},
+        db::{DatabaseConfiguration, DbConfig, DatabaseConnection, PostgresConfig},
         settings::Settings,
     },
 };
@@ -50,6 +50,7 @@ pub enum ProcessError {
     #[error("Failed at step: {0:?} - because: {1}")]
     Message(Checkpoint, &'static str),
 }
+
 #[derive(Debug)]
 pub struct Startup {}
 
@@ -81,33 +82,19 @@ impl Startup {
 
 #[derive(Debug)]
 pub enum Checkpoint {
-    Missing,   //ConfigFile.exists() -> false
-    Exists,    //ConfigFile.exists() -> true
-    Loaded,    //ConfigFile.load() -> fails
-    Applied,   //DbConfig::new()
-    Connected, //DbConfig.test_connection() -> true
-    Validated, //Settings.valid() -> true
-    Ready,     //Settings.applied
+    Missing,   //.exists() -> false
+    Exists,    //.exists() -> true && .load() -> fails
+    Loaded,    //.load() -> succeeds && .apply() -> fails
+    Applied,   //.apply() -> succeeds && .test_connect() -> fails
+    Connected, //.test_connection() -> succeeds && .validate() -> fails
+    Validated, //.validate() -> succeeds && .execute() -> fails
+    Ready,     //.execute() -> succeeds
 }
-// Case 1 - config file is missing: ConfigState::Missing
-// Case 2 - config file exists but is invalid: ConfigState::Exists -> config.validate() -> ConfigState::Invalid
-// Case 3 - config file exists and is valid: ConfigState::Exists -> config.validate() -> ConfigState::Valid
-// Case 4 - config file exists, is valid, but unable to connect to DB: ConfigState::Valid -> config.get_connection().test_connection() -> false
-// Case 5 - config file exists, is valid, connects to DB: ConfigState::Valid -> config.get_connection().test_connection() -> true
-// Case 6 - config file exists, is valid, connects to DB, but no settings: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Empty
-// Case 7 - config file exists, is valid, connects to DB, settings exists, settings are invalid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Invalid
-// Case 8 - config file exists, is valid, connects to DB, setting exists, settings valid: ConfigState::Valid -> ...test_connection() -> true -> SettingsState:Valid
-//| Field    |   None    |    Some(Ok    |    Some(Err)     |
-//|----------|-----------|---------------|------------------|
-//| file     | start     | exists        | load failed      |
-//| config   | not tried | mapping done  | mapping failed   |
-//| conn     | not tried | db connected  | connect failed   |
-//| settings | not tried | setting valid | settings invalid |
 #[derive(Debug)]
 pub struct Process {
     file: Option<ConfigFile>,
     config: Option<DbConfig>,
-    conn: Option<DbConn>,
+    conn: Option<DatabaseConnection>,
     settings: Option<Settings>,
 }
 
@@ -160,7 +147,7 @@ impl Process {
         match db.validate() {
             Ok(_) => match db.connect() {
                 Ok(conn) => {
-                    self.conn = Some(conn.to_db_conn());
+                    self.conn = Some(conn);
                     Ok(Checkpoint::Applied)
                 }
                 Err(e) => Err(ProcessError::Startup(step, e)),

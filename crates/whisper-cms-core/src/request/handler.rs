@@ -212,3 +212,240 @@ fn spa_index(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt; // for `oneshot`
+
+
+    use super::*;
+    use http_body_util::BodyExt;
+    use std::fs;
+    use tempfile::NamedTempFile; // for .collect().await
+
+    #[tokio::test]
+    async fn noop_handler_router() {
+        let handler = NoopHandler;
+        let app = handler.router().await;
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn noop_handler_lifecycle() {
+        let mut handler = NoopHandler;
+        assert!(handler.on_enter().await.is_ok());
+        assert!(handler.on_exit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn booting_handler_router_status() {
+        let handler = BootingHandler;
+        let app = handler.router().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&body_bytes);
+        assert!(body.contains("Server is booting"));
+    }
+
+    #[tokio::test]
+    async fn booting_handler_lifecycle() {
+        let mut handler = BootingHandler;
+        assert!(handler.on_enter().await.is_ok());
+        assert!(handler.on_exit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn configuring_handler_fallback_exists() {
+        let index = NamedTempFile::new().unwrap();
+        fs::write(index.path(), "<html>config spa</html>").unwrap();
+        let index_path = index.path().to_str().unwrap();
+
+        let service = spa_index(index_path);
+        let req = Request::builder()
+            .uri("/unknown")
+            .body(Body::empty())
+            .unwrap();
+        let response = service.oneshot(req).await.unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(text.contains("config spa"));
+    }
+
+    #[tokio::test]
+    async fn configuring_handler_fallback_missing() {
+        let service = spa_index("/this/does/not/exist.html");
+        let req = Request::builder()
+            .uri("/unknown")
+            .body(Body::empty())
+            .unwrap();
+        let response = service.oneshot(req).await.unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(text.contains("Failed to load index"));
+    }
+
+    #[tokio::test]
+    async fn configuring_handler_lifecycle() {
+        let mut handler = ConfiguringHandler;
+        assert!(handler.on_enter().await.is_ok());
+        assert!(handler.on_exit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn installing_handler_fallback_exists() {
+        let index = NamedTempFile::new().unwrap();
+        fs::write(index.path(), "<html>install spa</html>").unwrap();
+        let index_path = index.path().to_str().unwrap();
+
+        let service = spa_index(index_path);
+        let req = Request::builder()
+            .uri("/install")
+            .body(Body::empty())
+            .unwrap();
+        let response = service.oneshot(req).await.unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(text.contains("install spa"));
+    }
+
+    #[tokio::test]
+    async fn installing_handler_fallback_missing() {
+        let service = spa_index("/missing/install/index.html");
+        let req = Request::builder()
+            .uri("/install")
+            .body(Body::empty())
+            .unwrap();
+        let response = service.oneshot(req).await.unwrap();
+
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(text.contains("Failed to load index"));
+    }
+
+    #[tokio::test]
+    async fn installing_handler_lifecycle() {
+        let mut handler = InstallingHandler;
+        assert!(handler.on_enter().await.is_ok());
+        assert!(handler.on_exit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn serving_handler_home() {
+        let handler = ServingHandler;
+        let app = handler.router().await;
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn serving_handler_404() {
+        let handler = ServingHandler;
+        let app = handler.router().await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn serving_handler_lifecycle() {
+        let mut handler = ServingHandler;
+        assert!(handler.on_enter().await.is_ok());
+        assert!(handler.on_exit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn req_handler_on_enter_all_variants() {
+        let mut handlers = vec![
+            ReqHandler::Noop(NoopHandler),
+            ReqHandler::Booting(BootingHandler),
+            ReqHandler::Configuring(ConfiguringHandler),
+            ReqHandler::Installing(InstallingHandler),
+            ReqHandler::Serving(ServingHandler),
+        ];
+
+        for handler in &mut handlers {
+            assert!(handler.on_enter().await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn req_handler_on_exit_all_variants() {
+        let mut handlers = vec![
+            ReqHandler::Noop(NoopHandler),
+            ReqHandler::Booting(BootingHandler),
+            ReqHandler::Configuring(ConfiguringHandler),
+            ReqHandler::Installing(InstallingHandler),
+            ReqHandler::Serving(ServingHandler),
+        ];
+
+        for handler in &mut handlers {
+            assert!(handler.on_exit().await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn req_handler_router_all_variants() {
+        let handlers = vec![
+            ReqHandler::Noop(NoopHandler),
+            ReqHandler::Booting(BootingHandler),
+            ReqHandler::Configuring(ConfiguringHandler),
+            ReqHandler::Installing(InstallingHandler),
+            ReqHandler::Serving(ServingHandler),
+        ];
+
+        for handler in &handlers {
+            let app = handler.router().await;
+            let response = app
+                .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await;
+            assert!(response.is_ok());
+        }
+    }
+}
