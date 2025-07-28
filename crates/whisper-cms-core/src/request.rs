@@ -21,8 +21,8 @@ use tracing::{debug, info};
 
 use crate::{
     request::handler::{
-        BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, RequestHandler,
-        ServingHandler,
+        BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, ReqHandler,
+        RequestHandler, ServingHandler,
     },
     startup::{Checkpoint, Process, ProcessError},
 };
@@ -35,7 +35,7 @@ pub struct Manager {
 impl Manager {
     pub fn build(startup: Process) -> Result<Manager, ManagerError> {
         // Start in Booting state
-        let initial_handler = Box::new(BootingHandler);
+        let initial_handler = Box::new(ReqHandler::Booting(BootingHandler));
         let state = Arc::new(ManagerState {
             //phase: ManagerPhase::Booting,
             handler: RwLock::new(initial_handler),
@@ -54,6 +54,8 @@ impl Manager {
                     ProcessError::Startup(checkpoint, _) => checkpoint,
                     ProcessError::Message(checkpoint, _) => checkpoint,
                 };
+
+                debug!("Checkpoint = {:?}", checkpoint);
 
                 match checkpoint {
                     Checkpoint::Connected => {
@@ -106,21 +108,22 @@ pub enum ManagerPhase {
 
 pub struct ManagerState {
     //pub phase: ManagerPhase,
-    pub handler: RwLock<Box<dyn RequestHandler>>,
+    pub handler: RwLock<Box<ReqHandler>>,
 }
 
 impl ManagerState {
     #[tracing::instrument(skip_all)]
     pub async fn transition_to(&self, next: ManagerPhase) -> Result<(), ManagerError> {
         let mut handler_guard = self.handler.write().await;
-        let mut old_handler = std::mem::replace(&mut *handler_guard, Box::new(NoopHandler));
+        let mut old_handler =
+            std::mem::replace(&mut *handler_guard, Box::new(ReqHandler::Noop(NoopHandler)));
         old_handler.on_exit().await?;
 
-        let mut new_handler: Box<dyn RequestHandler> = match next {
-            ManagerPhase::Booting => Box::new(BootingHandler),
-            ManagerPhase::Configuring => Box::new(ConfiguringHandler),
-            ManagerPhase::Installing => Box::new(InstallingHandler),
-            ManagerPhase::Serving => Box::new(ServingHandler),
+        let mut new_handler: Box<ReqHandler> = match next {
+            ManagerPhase::Booting => Box::new(ReqHandler::Booting(BootingHandler)),
+            ManagerPhase::Configuring => Box::new(ReqHandler::Configuring(ConfiguringHandler)),
+            ManagerPhase::Installing => Box::new(ReqHandler::Installing(InstallingHandler)),
+            ManagerPhase::Serving => Box::new(ReqHandler::Serving(ServingHandler)),
         };
 
         new_handler.on_enter().await?;
@@ -142,7 +145,6 @@ pub enum ManagerError {
 
     #[error("Could not parse IP address error: {0}")]
     IpParse(#[from] AddrParseError),
-
     //#[error("Unhandled internal application error")]
     //Internal,
 }

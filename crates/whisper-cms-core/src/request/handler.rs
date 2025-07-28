@@ -22,6 +22,46 @@ pub trait RequestHandler: Send + Sync {
     async fn on_exit(&mut self) -> Result<(), ManagerError>;
 }
 
+pub enum ReqHandler {
+    Noop(NoopHandler),
+    Booting(BootingHandler),
+    Configuring(ConfiguringHandler),
+    Installing(InstallingHandler),
+    Serving(ServingHandler),
+}
+
+#[async_trait]
+impl RequestHandler for ReqHandler {
+    async fn router(&self) -> Router {
+        match self {
+            ReqHandler::Noop(h) => h.router().await,
+            ReqHandler::Booting(h) => h.router().await,
+            ReqHandler::Configuring(h) => h.router().await,
+            ReqHandler::Installing(h) => h.router().await,
+            ReqHandler::Serving(h) => h.router().await,
+        }
+    }
+
+    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+        match self {
+            ReqHandler::Noop(h) => h.on_enter().await,
+            ReqHandler::Booting(h) => h.on_enter().await,
+            ReqHandler::Configuring(h) => h.on_enter().await,
+            ReqHandler::Installing(h) => h.on_enter().await,
+            ReqHandler::Serving(h) => h.on_enter().await,
+        }
+    }
+
+    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+        match self {
+            ReqHandler::Noop(h) => h.on_exit().await,
+            ReqHandler::Booting(h) => h.on_exit().await,
+            ReqHandler::Configuring(h) => h.on_exit().await,
+            ReqHandler::Installing(h) => h.on_exit().await,
+            ReqHandler::Serving(h) => h.on_exit().await,
+        }
+    }
+}
 pub struct NoopHandler;
 
 #[async_trait]
