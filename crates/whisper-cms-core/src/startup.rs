@@ -41,6 +41,15 @@ pub enum StartupError {
     //#[error("Database access error: {0}")]
     //Database(#[from] sqlx::Error),
 }
+
+#[derive(Debug, Error)]
+pub enum ProcessError {
+    #[error("Failed at step: {0:?} - because: {1}")]
+    Startup(Checkpoint, StartupError),
+
+    #[error("Failed at step: {0:?} - because: {1}")]
+    Message(Checkpoint, &'static str),
+}
 #[derive(Debug)]
 pub struct Startup {}
 
@@ -70,10 +79,10 @@ impl Startup {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Checkpoint {
-    Start,     //ConfigFile::new()
     Missing,   //ConfigFile.exists() -> false
+    Exists,    //ConfigFile.exists() -> true
     Loaded,    //ConfigFile.load() -> fails
     Applied,   //DbConfig::new()
     Connected, //DbConfig.test_connection() -> true
@@ -96,19 +105,17 @@ pub enum Checkpoint {
 //| settings | not tried | setting valid | settings invalid |
 #[derive(Debug)]
 pub struct Process {
-    checkpoint: Checkpoint,
-    file: Option<Result<ConfigFile, StartupError>>,
-    config: Option<Result<DbConfig, StartupError>>,
-    conn: Option<Result<DbConn, StartupError>>,
-    settings: Option<Result<Settings, StartupError>>,
+    file: Option<ConfigFile>,
+    config: Option<DbConfig>,
+    conn: Option<DbConn>,
+    settings: Option<Settings>,
 }
 
 impl Process {
     #[tracing::instrument(skip_all)]
     pub fn new(file: ConfigFile) -> Self {
         Self {
-            checkpoint: Checkpoint::Start,
-            file: Some(Ok(file)),
+            file: Some(file),
             config: None,
             conn: None,
             settings: None,
@@ -116,64 +123,58 @@ impl Process {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn execute(&mut self) -> Result<(), StartupError> {
+    pub fn execute(&mut self) -> Result<Checkpoint, ProcessError> {
         match self.validate_settings() {
             //start at the end and wherever it stops (errors out) is where we are
-            Ok(_) => {
-                self.checkpoint = Checkpoint::Ready;
-                Ok(())
-            }
+            Ok(_) => Ok(Checkpoint::Ready),
             Err(e) => Err(e),
         }
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn checkpoint(&self) -> Checkpoint {
-        self.checkpoint.clone()
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn config_exists(&mut self) -> Result<bool, StartupError> {
+    fn config_exists(&mut self) -> Result<Checkpoint, ProcessError> {
         let file_ref = self.file.as_ref();
         if file_ref.is_some()
-            && file_ref.unwrap().as_ref().is_ok()
-            && file_ref.unwrap().as_ref().unwrap().exists()
+            && file_ref.unwrap().exists()
         {
-            Ok(true)
+            Ok(Checkpoint::Exists)
         } else {
-            self.checkpoint = Checkpoint::Missing;
-            Ok(false)
+            Err(ProcessError::Message(
+                Checkpoint::Missing,
+                "Configuration file does not exist",
+            ))
         }
     }
 
     #[tracing::instrument(skip_all)]
-    fn load_config(&mut self) -> Result<(), StartupError> {
+    fn load_config(&mut self) -> Result<Checkpoint, ProcessError> {
         match self.config_exists() {
-            Ok(true) => {
-                let pg = PostgresConfig::new(self.file.as_ref().unwrap().as_ref().unwrap().clone());
+            Ok(_) => {
+                let file = self.file.take();
+                let pg = PostgresConfig::new(file.unwrap());
 
-                self.config = Some(Ok(DbConfig::Postgres(pg)));
-                self.checkpoint = Checkpoint::Loaded;
-                Ok(())
+                self.config = Some(DbConfig::Postgres(pg));
+                Ok(Checkpoint::Loaded)
             }
-            Ok(false) => Err(StartupError::Mapping("Configuration file does not exist")),
             Err(e) => Err(e),
         }
     }
 
     #[tracing::instrument(skip_all)]
-    fn apply_config(&mut self) -> Result<(), StartupError> {
+    fn apply_config(&mut self) -> Result<Checkpoint, ProcessError> {
         match self.load_config() {
-            Ok(_) => {
-                let db = self.config.as_mut().unwrap().as_mut().unwrap();
+            Ok(step) => {
+                let db = self.config.as_mut().unwrap();
 
                 match db.validate() {
-                    Ok(_) => {
-                        self.conn = Some(Ok(db.connect()?.to_db_conn()));
-                        self.checkpoint = Checkpoint::Applied;
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
+                    Ok(_) => match db.connect() {
+                        Ok(conn) => {
+                            self.conn = Some(conn.to_db_conn());
+                            Ok(Checkpoint::Applied)
+                        }
+                        Err(e) => Err(ProcessError::Startup(step, e)),
+                    },
+                    Err(e) => Err(ProcessError::Startup(step, e)),
                 }
             }
             Err(e) => Err(e),
@@ -181,10 +182,10 @@ impl Process {
     }
 
     #[tracing::instrument(skip_all)]
-    fn connect_db(&mut self) -> Result<(), StartupError> {
+    fn connect_db(&mut self) -> Result<Checkpoint, ProcessError> {
         match self.apply_config() {
-            Ok(_) => {
-                let conn = self.conn.as_mut().unwrap().as_mut().unwrap();
+            Ok(step) => {
+                let conn = self.conn.as_mut().unwrap();
 
                 // Used only if *not* in a tokio runtime
                 //let rt = Runtime::new().unwrap();
@@ -196,12 +197,12 @@ impl Process {
                     Ok(test)
                 });
 
-                match result? {
-                    true => {
-                        self.checkpoint = Checkpoint::Connected;
-                        Ok(())
-                    }
-                    false => Err(StartupError::Mapping("Connection to Database failed")),
+                match result {
+                    Ok(truth) => match truth {
+                        true => Ok(Checkpoint::Connected),
+                        false => Err(ProcessError::Message(step, "Connection to Database failed")),
+                    },
+                    Err(e) => Err(ProcessError::Startup(step, e)),
                 }
             }
             Err(e) => Err(e),
@@ -209,13 +210,12 @@ impl Process {
     }
 
     #[tracing::instrument(skip_all)]
-    fn validate_settings(&mut self) -> Result<(), StartupError> {
+    fn validate_settings(&mut self) -> Result<(), ProcessError> {
         match self.connect_db() {
-            Ok(_) => {
-                self.checkpoint = Checkpoint::Validated;
-
-                Err(StartupError::Mapping("Code Path Not Implemented"))
-            }
+            Ok(_) => Err(ProcessError::Message(
+                Checkpoint::Validated,
+                "Code Path Not Implemented",
+            )),
             Err(e) => Err(e),
         }
     }

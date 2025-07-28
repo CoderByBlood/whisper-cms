@@ -8,7 +8,7 @@ use argon2::{
 use rand::{rngs::OsRng, Rng};
 
 use secrecy::{ExposeSecret, SecretString};
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use validator::{Validate, ValidationError, ValidationErrors};
@@ -22,7 +22,7 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
 pub type ConfigMap = HashMap<String, String>;
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigFile {
     ser: Serializers,
     path: PathBuf,
@@ -98,11 +98,11 @@ pub enum ConfigError {
     Database(#[from] sqlx::Error),
 }
 
-pub trait FormatCodec: Send + Sync + std::fmt::Debug + Clone {
+pub trait FormatCodec: Send + Sync + std::fmt::Debug {
     fn encode(&self, map: &ConfigMap) -> Result<Vec<u8>, ConfigError>;
     fn decode(&self, data: &[u8]) -> Result<ConfigMap, ConfigError>;
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct JsonCodec;
 
 impl FormatCodec for JsonCodec {
@@ -117,11 +117,10 @@ impl FormatCodec for JsonCodec {
     }
 }
 
-pub trait Transformation: Send + Sync + std::fmt::Debug + Clone {
+pub trait Transformation: Send + Sync + std::fmt::Debug {
     fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
     fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
 }
-#[derive(Clone)]
 pub struct Encrypted {
     password: ValidatedPassword,
     argon2: Argon2<'static>,
@@ -205,12 +204,12 @@ impl Transformation for Encrypted {
     }
 }
 
-pub trait Serializer: Clone {
+pub trait Serializer {
     fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError>;
     fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Serializers {
     JsonEncrypted(ConfigSerializer<JsonCodec, Encrypted>),
 }
@@ -228,7 +227,7 @@ impl Serializer for Serializers {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigSerializer<F, T>
 where
     F: FormatCodec,
@@ -318,7 +317,7 @@ fn validate_password_strength(p: &str) -> Result<(), ValidationError> {
 }
 
 /// Securely validated and hashed password
-#[derive(Zeroize, Clone)]
+#[derive(Zeroize)]
 #[zeroize(drop)]
 pub struct ValidatedPassword {
     raw: SecretString,
@@ -541,7 +540,7 @@ mod tests {
         let path = dir.path().join("config_file.enc");
         let path_str = path.to_str().unwrap();
 
-        let mut file = ConfigFile::new(password.clone(), path_str.to_owned());
+        let mut file = ConfigFile::new(password, path_str.to_owned());
 
         let mut map = ConfigMap::new();
         map.insert("theme".into(), "dark".into());

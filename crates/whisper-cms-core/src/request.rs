@@ -24,7 +24,7 @@ use crate::{
         BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, RequestHandler,
         ServingHandler,
     },
-    startup::{Checkpoint, Process},
+    startup::{Checkpoint, Process, ProcessError},
 };
 
 pub struct Manager {
@@ -48,9 +48,14 @@ impl Manager {
 
         match self.startup.execute() {
             Ok(_) => self.state.transition_to(ManagerPhase::Serving).await?,
-            Err(_e) => {
+            Err(e) => {
                 // Todo: How to get the error message to the client
-                match self.startup.checkpoint() {
+                let checkpoint = match e {
+                    ProcessError::Startup(checkpoint, _) => checkpoint,
+                    ProcessError::Message(checkpoint, _) => checkpoint,
+                };
+
+                match checkpoint {
                     Checkpoint::Connected => {
                         self.state.transition_to(ManagerPhase::Installing).await?
                     }
@@ -91,7 +96,7 @@ impl Manager {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ManagerPhase {
     Booting,
     Configuring,
