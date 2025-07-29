@@ -59,9 +59,8 @@ workspace {
                 RequestManager -> this "responds"
             }
 
-            PostgreSQL = container PostgreSQL "PostgreSQL Database Server" "C" "external" {
-                su -> this "starts"
-                DataService -> PostgreSQL "calls"
+            LibSQL = container LibSQL "LibSQL Database" "Rust" "external" {
+                DataService -> LibSQL "calls"
             }
         }
     }
@@ -113,7 +112,7 @@ workspace {
             RequestManager -> Core "save configuration"
             Core -> StartupManager "validate configuration"
             StartupManager -> DataService "test configuration"
-            DataService -> PostgreSQL "test connection"
+            DataService -> LibSQL "test connection"
             StartupManager -> Argon2 "write configuration"
             StartupManager -> Core "configuration stored"
             Core -> RequestManager "state change - Configured"
@@ -124,7 +123,7 @@ workspace {
             RequestManager -> Core "install"
             Core -> StartupManager "validate site options"
             StartupManager -> DataService "store site options"
-            DataService -> PostgreSQL "write site options"
+            DataService -> LibSQL "write site options"
             StartupManager -> Core "installed"
             Core -> RequestManager "state change - Ready"
             RequestManager -> Nginx "send response"
@@ -137,8 +136,8 @@ workspace {
             StartupManager -> Argon2 "read configuration"
             Core -> StartupManager "validate configuration"
             StartupManager -> DataService "test configuration"
-            DataService -> PostgreSQL "test connection"
-            DataService -> PostgreSQL "read site options"
+            DataService -> LibSQL "test connection"
+            DataService -> LibSQL "read site options"
             Core -> StartupManager "validate site options"
             Core -> RequestManager "state change - Ready"
             Core -> su "successfully started"

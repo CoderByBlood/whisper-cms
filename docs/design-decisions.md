@@ -157,16 +157,21 @@ that can be built on top
 
 ## Database
 
-### Decision: PostgreSQL Database is the datastore for structured data
+### Decision: libSQL/SQLite is the datastore for structured data
 
-**Rationale:** PostgreSQL's mature and scalable functionality around full text
+**Rationale:** Rust's SQLite implementation in libSQL builds upon the mature and
+scalable functionality around the original SQLite. It supports full text
 searching, native JSON storage and indexing, compile-time checked rust drivers,
 and cryptography most closely aligns with the project's priorities.
 
 #### Alternatives Considered
 
-- MySQL: Although is performant, PostgreSQL is faster at scale
-- SQLite: Missing key features and has scaling limitations
+- PostgreSQL: Although extremely performant and can scale, requires a separate
+  server and is more appropriate for a higher write to read ratio
+- MySQL: Although is performant, same rational as PostgreSQL as the reads will
+  several orders of magnitude out weigh the writes
+- SQLite: Missing key features like full text search and has scaling limitations
+  should you need to run the database as a separate server
 - MongoDB: CMS's have relational- and document-based requirements, given the
   heavy querying for rendering and administering, a relational database is
   better suited
@@ -174,9 +179,9 @@ and cryptography most closely aligns with the project's priorities.
 
 #### Tradeoffs
 
-- Vendor Lock: Leveraging PostgreSQL-specific extensions severely limits the
-  ability to migrate to another database
-- Availability: Users must use PostgreSQL and cannot use another database
+- Vendor Lock: Leveraging an embedded database severely limits the ability to
+  migrate to another database
+- Availability: Users must use libSQL and cannot use another database
 
 ---
 
@@ -184,9 +189,9 @@ and cryptography most closely aligns with the project's priorities.
 
 ### Decision: Use hard deletes with a full audit trail of who, when and what
 
-**Rationale:** PostgreSQL provides an automated way to create full audit of data
-changes so there is no need to take on the storage costs and performance hit for
-soft deletes
+**Rationale:** libSQL provides an automated way to create full audit of data
+changes so there is no need to take on the performance hit for soft deletes -
+Note: this is different from unpublishing content
 
 #### Alternatives Considered
 
@@ -196,6 +201,8 @@ soft deletes
 
 - Difficult Undo Delete/Restore/Recycle-Bin Implementation: Requires finding the
   change in the audit table and unpacking it to undo/restore deletes
+- Complicated User Experience: Users must be warned that deletes are permanent
+  and offer a unpublish option along side a delete confirmation
 
 ---
 
