@@ -14,7 +14,7 @@ use config::{ConfigError, ConfigFile, ValidatedPassword};
 use crate::{
     request::ManagerError,
     startup::{
-        db::{DatabaseConfiguration, DbConfig, DatabaseConnection, PostgresConfig},
+        db::{DatabaseConfiguration, DatabaseConnection},
         settings::Settings,
     },
 };
@@ -44,11 +44,11 @@ pub enum StartupError {
 
 #[derive(Debug, Error)]
 pub enum ProcessError {
-    #[error("Failed at step: {0:?} - because: {1}")]
+    #[error("Failed at step: {0:?} - because of error: {1}")]
     Startup(Checkpoint, StartupError),
 
-    #[error("Failed at step: {0:?} - because: {1}")]
-    Message(Checkpoint, &'static str),
+    #[error("Failed at step: {0:?} - with message: {1}")]
+    Step(Checkpoint, &'static str),
 }
 
 #[derive(Debug)]
@@ -93,7 +93,7 @@ pub enum Checkpoint {
 #[derive(Debug)]
 pub struct Process {
     file: Option<ConfigFile>,
-    config: Option<DbConfig>,
+    config: Option<DatabaseConfiguration>,
     conn: Option<DatabaseConnection>,
     settings: Option<Settings>,
 }
@@ -122,7 +122,7 @@ impl Process {
         if file_ref.is_some() && file_ref.unwrap().exists() {
             Ok(Checkpoint::Exists)
         } else {
-            Err(ProcessError::Message(
+            Err(ProcessError::Step(
                 Checkpoint::Missing,
                 "Configuration file does not exist",
             ))
@@ -132,10 +132,7 @@ impl Process {
     #[tracing::instrument(skip_all)]
     fn load_config(&mut self) -> Result<Checkpoint, ProcessError> {
         self.config_exists()?;
-
-        let pg = PostgresConfig::new(self.file.take().unwrap());
-
-        self.config = Some(DbConfig::Postgres(pg));
+        self.config = Some(DatabaseConfiguration::new(self.file.take().unwrap()));
         Ok(Checkpoint::Loaded)
     }
 
@@ -173,7 +170,7 @@ impl Process {
         match result {
             Ok(truth) => match truth {
                 true => Ok(Checkpoint::Connected),
-                false => Err(ProcessError::Message(step, "Connection to Database failed")),
+                false => Err(ProcessError::Step(step, "Connection to Database failed")),
             },
             Err(e) => Err(ProcessError::Startup(step, e)),
         }
@@ -182,7 +179,7 @@ impl Process {
     #[tracing::instrument(skip_all)]
     fn validate_settings(&mut self) -> Result<(), ProcessError> {
         let _step = self.connect_db()?;
-        Err(ProcessError::Message(
+        Err(ProcessError::Step(
             Checkpoint::Validated,
             "Code Path Not Implemented",
         ))

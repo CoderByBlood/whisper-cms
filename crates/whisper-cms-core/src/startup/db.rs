@@ -8,31 +8,31 @@ use crate::startup::config::ConfigFile;
 use crate::startup::config::ConfigMap;
 use crate::startup::StartupError;
 
-pub trait DatabaseConfiguration: Debug {
-    fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError>;
-    fn connect(&self) -> Result<DatabaseConnection, StartupError>;
-    fn validate(&mut self) -> Result<(), StartupError>;
-}
-
 #[derive(Debug)]
-pub enum DbConfig {
+pub enum DatabaseConfiguration {
     Postgres(PostgresConfig),
 }
 
-impl DatabaseConfiguration for DbConfig {
-    fn connect(&self) -> Result<DatabaseConnection, StartupError> {
+impl DatabaseConfiguration {
+    pub fn new(file: ConfigFile) -> DatabaseConfiguration {
+        Self::Postgres(PostgresConfig::new(file))
+    }
+}
+
+impl DatabaseConfiguration {
+    pub fn connect(&self) -> Result<DatabaseConnection, StartupError> {
         match self {
             Self::Postgres(pg) => pg.connect(),
         }
     }
 
-    fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError> {
+    pub fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError> {
         match self {
             Self::Postgres(pg) => pg.save(config),
         }
     }
 
-    fn validate(&mut self) -> Result<(), StartupError> {
+    pub fn validate(&mut self) -> Result<(), StartupError> {
         match self {
             Self::Postgres(pg) => pg.validate(),
         }
@@ -147,7 +147,7 @@ impl PostgresConfig {
     }
 }
 
-impl DatabaseConfiguration for PostgresConfig {
+impl PostgresConfig {
     #[tracing::instrument(skip_all)]
     fn save(&mut self, config: HashMap<String, String>) -> Result<(), StartupError> {
         self.conn = Some(Self::build_connection(&config)?);
@@ -294,21 +294,6 @@ mod tests {
         format!("{}", result.unwrap_err()),
         "Could not map configuration error: Could not connect - no connection configured - invalid state"
     );
-    }
-
-    #[tokio::test]
-    async fn test_dbconfig_trait_dispatch() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let temp_path = temp_file.path().to_str().unwrap().to_string();
-
-        let pg = new_pg_config(&temp_path);
-        let valid_map = build_config_map(true);
-
-        let mut db: Box<dyn DatabaseConfiguration> = Box::new(DbConfig::Postgres(pg));
-        db.save(valid_map).unwrap();
-        db.validate().unwrap();
-        let conn = db.connect().unwrap();
-        assert!(conn.to_connect_string().contains("localhost"));
     }
 
     fn mock_config_file_with_missing_file() -> ConfigFile {

@@ -52,7 +52,7 @@ impl Manager {
                 // Todo: How to get the error message to the client
                 let checkpoint = match e {
                     ProcessError::Startup(checkpoint, _) => checkpoint,
-                    ProcessError::Message(checkpoint, _) => checkpoint,
+                    ProcessError::Step(checkpoint, _) => checkpoint,
                 };
 
                 debug!("Checkpoint = {:?}", checkpoint);
