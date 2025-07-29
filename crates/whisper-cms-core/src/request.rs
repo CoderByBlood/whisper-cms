@@ -24,7 +24,7 @@ use crate::{
         BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, ReqHandler,
         RequestHandler, ServingHandler,
     },
-    startup::{Checkpoint, Process, ProcessError},
+    startup::{Checkpoint, Process},
 };
 
 pub struct Manager {
@@ -50,10 +50,7 @@ impl Manager {
             Ok(_) => self.state.transition_to(ManagerPhase::Serving).await?,
             Err(e) => {
                 // Todo: How to get the error message to the client
-                let checkpoint = match e {
-                    ProcessError::Startup(checkpoint, _) => checkpoint,
-                    ProcessError::Step(checkpoint, _) => checkpoint,
-                };
+                let checkpoint = e.checkpoint();
 
                 debug!("Checkpoint = {:?}", checkpoint);
 

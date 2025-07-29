@@ -51,6 +51,15 @@ pub enum ProcessError {
     Step(Checkpoint, &'static str),
 }
 
+impl ProcessError {
+    pub fn checkpoint(&self) -> &Checkpoint {
+        match self {
+            ProcessError::Startup(cp, _) => cp,
+            ProcessError::Step(cp, _) => cp,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Startup {}
 
