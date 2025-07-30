@@ -34,12 +34,22 @@ pub struct ConfigFile {
 
 impl ConfigFile {
     #[tracing::instrument(skip_all)]
-    pub fn new(password: ValidatedPassword, path: String) -> ConfigFile {
-        let _ser =
+    pub fn as_encrypted(password: ValidatedPassword, path: String) -> Self {
+        let ser =
             Serializer::JsonEncryptedFile(FileSerializer::new(JsonCodec, Encrypted::new(password)));
+
+        Self {
+            ser,
+            path: PathBuf::from(path),
+            tried: None,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn as_local_db(path: String) -> Self {
         let ser = Serializer::JsonNoopSql(LibSqlSerializer::new(JsonCodec, Noop));
 
-        ConfigFile {
+        Self {
             ser,
             path: PathBuf::from(path),
             tried: None,
@@ -576,12 +586,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_config_serializer_save_and_load() {
+    async fn test_json_enc_config_serializer_save_and_load() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let codec = JsonCodec;
         let enc = Encrypted::new(password);
         let serializer = FileSerializer::new(codec, enc);
+
+        let mut map = ConfigMap::new();
+        map.insert("api_key".into(), "1234567890".into());
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.enc");
+
+        serializer.save_to_path(&map, &path).unwrap();
+        let restored = serializer.load_from_path(&path).unwrap();
+
+        assert_eq!(map, restored);
+    }
+
+    #[tokio::test]
+    async fn test_json_db_config_serializer_save_and_load() {
+        //let password =
+        //    ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
+        let codec = JsonCodec;
+        let enc = Noop;
+        let mut serializer = LibSqlSerializer::new(codec, enc);
 
         let mut map = ConfigMap::new();
         map.insert("api_key".into(), "1234567890".into());
@@ -636,7 +666,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_configuration_file_save_and_load_updates_tried() {
+    async fn test_encrypted_configuration_file_save_and_load_updates_tried() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
 
@@ -644,7 +674,7 @@ mod tests {
         let path = dir.path().join("config_file.enc");
         let path_str = path.to_str().unwrap();
 
-        let mut file = ConfigFile::new(password, path_str.to_owned());
+        let mut file = ConfigFile::as_encrypted(password, path_str.to_owned());
 
         let mut map = ConfigMap::new();
         map.insert("theme".into(), "dark".into());
@@ -660,7 +690,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_configuration_file_load_fails_sets_tried_false() {
+    async fn test_database_configuration_file_save_and_load_updates_tried() {
+        //let password =
+        //    ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config_file.enc");
+        let path_str = path.to_str().unwrap();
+
+        let mut file = ConfigFile::as_local_db(path_str.to_owned());
+
+        let mut map = ConfigMap::new();
+        map.insert("theme".into(), "dark".into());
+
+        assert_eq!(file.tried(), None);
+
+        file.save(map.clone()).unwrap();
+        assert_eq!(file.tried(), Some(true));
+
+        let loaded = file.load().unwrap();
+        assert_eq!(file.tried(), Some(true));
+        assert_eq!(loaded, map);
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_configuration_file_load_fails_sets_tried_false() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
 
@@ -668,7 +722,23 @@ mod tests {
         let path = dir.path().join("missing.enc");
         let path_str = path.to_str().unwrap();
 
-        let mut file = ConfigFile::new(password, path_str.to_owned());
+        let mut file = ConfigFile::as_encrypted(password, path_str.to_owned());
+        let result = file.load();
+
+        assert!(result.is_err());
+        assert_eq!(file.tried(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_database_configuration_file_load_fails_sets_tried_false() {
+        //let password =
+        //    ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.enc");
+        let path_str = path.to_str().unwrap();
+
+        let mut file = ConfigFile::as_local_db(path_str.to_owned());
         let result = file.load();
 
         assert!(result.is_err());

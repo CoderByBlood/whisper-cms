@@ -94,7 +94,7 @@ impl Startup {
         // Step 5: Add the extension
         filename.push_str(".enc");
 
-        Ok(Process::new(ConfigFile::new(password, filename)))
+        Ok(Process::new(ConfigFile::as_local_db(filename)))
     }
 }
 

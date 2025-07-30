@@ -226,7 +226,7 @@ mod tests {
             salt.to_string(),
         )
         .unwrap();
-        let file = ConfigFile::new(vpw, temp_path.to_string());
+        let file = ConfigFile::as_encrypted(vpw, temp_path.to_string());
         PostgresConfig::new(file)
     }
 
@@ -299,7 +299,7 @@ mod tests {
     fn mock_config_file_with_missing_file() -> ConfigFile {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nonexistent.enc");
-        ConfigFile::new(
+        ConfigFile::as_encrypted(
             crate::startup::config::ValidatedPassword::build(
                 "Password123!".into(),
                 "secureSaltString123456".into(),
@@ -346,7 +346,7 @@ mod tests {
     async fn test_connect_after_save_and_validate() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("valid.enc");
-        let mut config = PostgresConfig::new(ConfigFile::new(
+        let mut config = PostgresConfig::new(ConfigFile::as_encrypted(
             crate::startup::config::ValidatedPassword::build("Password123!".into(), "secureSaltString123456".into())
                 .unwrap(),
             String::from(path.to_str().unwrap()),
@@ -374,7 +374,7 @@ mod tests {
         let password =
             crate::startup::config::ValidatedPassword::build("Password123!".into(), "secureSaltString123456".into())
                 .unwrap();
-        let mut config_file = ConfigFile::new(password, String::from(path.to_str().unwrap()));
+        let mut config_file = ConfigFile::as_encrypted(password, String::from(path.to_str().unwrap()));
 
         // Write a valid config to disk manually to simulate file existence
         let mut map = HashMap::new();
