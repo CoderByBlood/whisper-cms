@@ -12,8 +12,10 @@ axum = "0.8.4"
 clap = { version = "4.5.40", features = ["derive", "env"] }
 data-encoding = "2.9.0"
 derive_more = { version = "2.0.1", features = ["from"] }
+futures = "0.3.31"
 hyper = "1.6.0"
 inquire = "0.7.5"
+libsql = "0.9.19"
 rand = "0.8"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -35,3 +37,4 @@ zeroize = { version = "1.8.1", features = ["derive"] }
 tempfile = "3"
 http-body-util = "0.1.0"
 mockall = "0.13.1"
+once_cell = "1.21.3"
