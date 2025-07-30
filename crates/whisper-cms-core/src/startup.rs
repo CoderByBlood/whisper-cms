@@ -6,8 +6,13 @@ use std::{net::AddrParseError, num::ParseIntError};
 
 use data_encoding::BASE32_NOPAD;
 use secrecy::{ExposeSecret, SecretString};
+use std::future::Future;
 use thiserror::Error;
-use validator::ValidationErrors;
+use tokio::{
+    runtime::{Handle, Runtime, RuntimeFlavor},
+    task,
+};
+use validator::ValidationErrors; // for .now_or_never()
 
 use config::{ConfigError, ConfigFile, ValidatedPassword};
 
@@ -47,6 +52,9 @@ pub enum ProcessError {
     #[error("Failed at step: {0:?} - because of error: {1}")]
     Startup(Checkpoint, StartupError),
 
+    #[error("Failed at step: {0:?} - because of error: {1}")]
+    Config(Checkpoint, ConfigError),
+
     #[error("Failed at step: {0:?} - with message: {1}")]
     Step(Checkpoint, &'static str),
 }
@@ -56,6 +64,7 @@ impl ProcessError {
         match self {
             ProcessError::Startup(cp, _) => cp,
             ProcessError::Step(cp, _) => cp,
+            ProcessError::Config(cp, _) => cp,
         }
     }
 }
@@ -167,21 +176,14 @@ impl Process {
         let step = self.apply_config()?;
         let conn = self.conn.as_mut().unwrap();
 
-        // Used only if *not* in a tokio runtime
-        //let rt = Runtime::new().unwrap();
-        //let result = rt.block_on(db.connect()?.test_connection());
-
-        let result: Result<bool, StartupError> = tokio::task::block_in_place(|| {
-            let test = tokio::runtime::Handle::current().block_on(conn.test_connection())?;
-            Ok(test)
-        });
+        let result = block_in_runtime(async { conn.test_connection().await });
 
         match result {
             Ok(truth) => match truth {
                 true => Ok(Checkpoint::Connected),
                 false => Err(ProcessError::Step(step, "Connection to Database failed")),
             },
-            Err(e) => Err(ProcessError::Startup(step, e)),
+            Err(e) => Err(ProcessError::Config(step, e)),
         }
     }
 
@@ -192,5 +194,26 @@ impl Process {
             Checkpoint::Validated,
             "Code Path Not Implemented",
         ))
+    }
+}
+
+pub fn block_in_runtime<F>(fut: F) -> F::Output
+where
+    F: Future,
+{
+    match Handle::try_current() {
+        Ok(handle) => match handle.runtime_flavor() {
+            // Multi-threaded runtime (Axum): safe to block
+            RuntimeFlavor::MultiThread => task::block_in_place(|| handle.block_on(fut)),
+
+            // Single-threaded runtime (#[tokio::test]): we cannot block the executor thread
+            RuntimeFlavor::CurrentThread | _ => {
+                // Manually poll the future without requiring 'static
+                futures::executor::block_on(fut)
+            }
+        },
+
+        // Outside a runtime: create a temporary one
+        Err(_) => Runtime::new().unwrap().block_on(fut),
     }
 }

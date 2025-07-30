@@ -53,6 +53,7 @@ impl Manager {
                 let checkpoint = e.checkpoint();
 
                 debug!("Checkpoint = {:?}", checkpoint);
+                debug!("Error = {:?}", e);
 
                 match checkpoint {
                     Checkpoint::Connected => {

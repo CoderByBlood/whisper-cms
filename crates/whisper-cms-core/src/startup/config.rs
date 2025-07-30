@@ -5,6 +5,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, PasswordHasher, Version,
 };
+use libsql::{params, Builder, Database};
 use rand::{rngs::OsRng, Rng};
 
 use secrecy::{ExposeSecret, SecretString};
@@ -17,6 +18,8 @@ use zeroize::Zeroize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::startup::block_in_runtime;
+
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
@@ -24,7 +27,7 @@ const KEY_LEN: usize = 32;
 pub type ConfigMap = HashMap<String, String>;
 #[derive(Debug)]
 pub struct ConfigFile {
-    ser: Serializers,
+    ser: Serializer,
     path: PathBuf,
     tried: Option<bool>,
 }
@@ -32,11 +35,12 @@ pub struct ConfigFile {
 impl ConfigFile {
     #[tracing::instrument(skip_all)]
     pub fn new(password: ValidatedPassword, path: String) -> ConfigFile {
+        let _ser =
+            Serializer::JsonEncryptedFile(FileSerializer::new(JsonCodec, Encrypted::new(password)));
+        let ser = Serializer::JsonNoopSql(LibSqlSerializer::new(JsonCodec, Noop));
+
         ConfigFile {
-            ser: Serializers::JsonEncrypted(ConfigSerializer::new(
-                JsonCodec {},
-                Encrypted::new(password),
-            )),
+            ser,
             path: PathBuf::from(path),
             tried: None,
         }
@@ -95,7 +99,10 @@ pub enum ConfigError {
     Serde(#[from] serde_json::Error),
 
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    SQLx(#[from] sqlx::Error),
+
+    #[error("Database error: {0}")]
+    LibSql(#[from] libsql::Error),
 }
 
 pub trait FormatCodec: Send + Sync + std::fmt::Debug {
@@ -121,6 +128,20 @@ pub trait Transformation: Send + Sync + std::fmt::Debug {
     fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
     fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError>;
 }
+
+#[derive(Debug)]
+pub struct Noop;
+
+impl Transformation for Noop {
+    fn pack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError> {
+        Ok(input.to_vec())
+    }
+
+    fn unpack(&self, input: &[u8]) -> Result<Vec<u8>, ConfigError> {
+        Ok(input.to_vec())
+    }
+}
+
 pub struct Encrypted {
     password: ValidatedPassword,
     argon2: Argon2<'static>,
@@ -204,31 +225,29 @@ impl Transformation for Encrypted {
     }
 }
 
-pub trait Serializer {
-    fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError>;
-    fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError>;
-}
-
 #[derive(Debug)]
-enum Serializers {
-    JsonEncrypted(ConfigSerializer<JsonCodec, Encrypted>),
+enum Serializer {
+    JsonEncryptedFile(FileSerializer<JsonCodec, Encrypted>),
+    JsonNoopSql(LibSqlSerializer<JsonCodec, Noop>),
 }
 
-impl Serializer for Serializers {
-    fn load_from_path(&self, path: &Path) -> Result<ConfigMap, ConfigError> {
+impl Serializer {
+    fn load_from_path(&mut self, path: &Path) -> Result<ConfigMap, ConfigError> {
         match self {
-            Serializers::JsonEncrypted(ser) => ser.load_from_path(path),
+            Serializer::JsonEncryptedFile(ser) => ser.load_from_path(path),
+            Serializer::JsonNoopSql(ser) => ser.load_from_path(path),
         }
     }
 
-    fn save_to_path(&self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
+    fn save_to_path(&mut self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
         match self {
-            Serializers::JsonEncrypted(ser) => ser.save_to_path(map, path),
+            Serializer::JsonEncryptedFile(ser) => ser.save_to_path(map, path),
+            Serializer::JsonNoopSql(ser) => ser.save_to_path(map, path),
         }
     }
 }
 #[derive(Debug)]
-pub struct ConfigSerializer<F, T>
+pub struct FileSerializer<F, T>
 where
     F: FormatCodec,
     T: Transformation,
@@ -237,7 +256,7 @@ where
     transformation: T,
 }
 
-impl<F, T> ConfigSerializer<F, T>
+impl<F, T> FileSerializer<F, T>
 where
     F: FormatCodec,
     T: Transformation,
@@ -264,6 +283,91 @@ where
         let unpacked = self.transformation.unpack(&data)?;
         let map = self.format.decode(&unpacked)?;
         Ok(map)
+    }
+}
+#[derive(Debug)]
+pub struct LibSqlSerializer<F, T>
+where
+    F: FormatCodec,
+    T: Transformation,
+{
+    format: F,
+    transformation: T,
+    database: Option<Database>,
+}
+
+impl<F, T> LibSqlSerializer<F, T>
+where
+    F: FormatCodec,
+    T: Transformation,
+{
+    #[tracing::instrument(skip_all)]
+    pub fn new(format: F, transformation: T) -> Self {
+        Self {
+            format,
+            transformation,
+            database: None,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn save_to_path(&mut self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
+        let db = self.build_database(path)?;
+        let conn = db.connect()?;
+
+        // Create table if it doesn't exist
+        block_in_runtime(async {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL)",
+                (),
+            )
+            .await
+        })?;
+
+        let encoded = self.format.encode(map)?;
+        let packed = self.transformation.pack(&encoded)?;
+
+        block_in_runtime(async {
+            conn.execute(
+                "INSERT INTO settings (id, data) VALUES (?1, ?2)",
+                (1, packed.as_slice()),
+            )
+            .await
+        })?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn load_from_path(&mut self, path: &Path) -> Result<ConfigMap, ConfigError> {
+        let db = self.build_database(path)?;
+        let conn = db.connect()?;
+
+        let mut stmt = block_in_runtime(async {
+            conn.prepare("SELECT data FROM settings WHERE id = ?1")
+                .await
+        })?;
+        let mut rows = block_in_runtime(async { stmt.query(params![1i64]).await })?;
+
+        if let Some(row) = block_in_runtime(async { rows.next().await })? {
+            let data: Vec<u8> = row.get(0)?;
+            let unpacked = self.transformation.unpack(&data)?;
+            let map = self.format.decode(&unpacked)?;
+            Ok(map)
+        } else {
+            Err(ConfigError::Transformation("No Data Found".to_string()))
+        }
+    }
+
+    fn build_database(&mut self, path: &Path) -> Result<&Database, ConfigError> {
+        if self.database.is_some() {
+            // If already built, just return a reference
+            Ok(self.database.as_ref().unwrap())
+        } else {
+            // Build database connection
+            let db = block_in_runtime(async { Builder::new_local(path).build().await })?;
+            self.database = Some(db);
+            Ok(self.database.as_ref().unwrap())
+        }
     }
 }
 
@@ -427,8 +531,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn test_json_codec_roundtrip() {
+    #[tokio::test]
+    async fn test_json_codec_roundtrip() {
         let codec = JsonCodec;
         let mut map = ConfigMap::new();
         map.insert("key".into(), "value".into());
@@ -439,8 +543,8 @@ mod tests {
         assert_eq!(map, decoded);
     }
 
-    #[test]
-    fn test_validated_password_build_verify() {
+    #[tokio::test]
+    async fn test_validated_password_build_verify() {
         let password = String::from("StrongPass1$");
         let salt = "longsufficientlysalt".into();
 
@@ -449,8 +553,8 @@ mod tests {
         assert!(!validated.verify("wrongpass"));
     }
 
-    #[test]
-    fn test_validated_password_eq_secure_false_for_different_hashes() {
+    #[tokio::test]
+    async fn test_validated_password_eq_secure_false_for_different_hashes() {
         let pw1 =
             ValidatedPassword::build("StrongPass1$".into(), "salt123456789012".into()).unwrap();
         let pw2 =
@@ -458,8 +562,8 @@ mod tests {
         assert!(!pw1.eq_secure(&pw2)); // different salts → different hashes
     }
 
-    #[test]
-    fn test_encrypted_pack_unpack_roundtrip() {
+    #[tokio::test]
+    async fn test_encrypted_pack_unpack_roundtrip() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let enc = Encrypted::new(password);
@@ -471,13 +575,13 @@ mod tests {
         assert_eq!(original, &unpacked[..]);
     }
 
-    #[test]
-    fn test_config_serializer_save_and_load() {
+    #[tokio::test]
+    async fn test_config_serializer_save_and_load() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let codec = JsonCodec;
         let enc = Encrypted::new(password);
-        let serializer = ConfigSerializer::new(codec, enc);
+        let serializer = FileSerializer::new(codec, enc);
 
         let mut map = ConfigMap::new();
         map.insert("api_key".into(), "1234567890".into());
@@ -491,8 +595,8 @@ mod tests {
         assert_eq!(map, restored);
     }
 
-    #[test]
-    fn test_validation_fails_on_weak_password() {
+    #[tokio::test]
+    async fn test_validation_fails_on_weak_password() {
         let weak_password = "password".into(); // No uppercase, digit, or symbol
         let salt = "longsufficientlysalt".into();
 
@@ -500,8 +604,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_unpack_fails_on_short_input() {
+    #[tokio::test]
+    async fn test_unpack_fails_on_short_input() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let enc = Encrypted::new(password);
@@ -511,16 +615,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_validated_password_debug_does_not_expose_secret() {
+    #[tokio::test]
+    async fn test_validated_password_debug_does_not_expose_secret() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let debug_str = format!("{:?}", password);
         assert!(debug_str.contains("**REDACTED**"));
     }
 
-    #[test]
-    fn test_validated_password_serde_protected() {
+    #[tokio::test]
+    async fn test_validated_password_serde_protected() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let serialized = serde_json::to_string(&password).unwrap();
@@ -531,8 +635,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_configuration_file_save_and_load_updates_tried() {
+    #[tokio::test]
+    async fn test_configuration_file_save_and_load_updates_tried() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
 
@@ -555,8 +659,8 @@ mod tests {
         assert_eq!(loaded, map);
     }
 
-    #[test]
-    fn test_configuration_file_load_fails_sets_tried_false() {
+    #[tokio::test]
+    async fn test_configuration_file_load_fails_sets_tried_false() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
 
@@ -571,8 +675,8 @@ mod tests {
         assert_eq!(file.tried(), Some(false));
     }
 
-    #[test]
-    fn test_unpack_fails_with_wrong_password() {
+    #[tokio::test]
+    async fn test_unpack_fails_with_wrong_password() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let enc = Encrypted::new(password);
@@ -588,8 +692,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_derive_key_length() {
+    #[tokio::test]
+    async fn test_derive_key_length() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "a_really_long_salt_val".into())
                 .unwrap();
