@@ -1,6 +1,6 @@
-mod config;
+pub mod config;
 pub mod db;
-mod settings;
+pub mod settings;
 
 use std::{net::AddrParseError, num::ParseIntError};
 
@@ -94,7 +94,7 @@ impl Startup {
         // Step 5: Add the extension
         filename.push_str(".enc");
 
-        Ok(Process::new(ConfigFile::as_local_db(filename)))
+        Ok(Process::new(password, ConfigFile::as_local_db(filename)))
     }
 }
 
@@ -110,6 +110,7 @@ pub enum Checkpoint {
 }
 #[derive(Debug)]
 pub struct Process {
+    password: ValidatedPassword,
     file: Option<ConfigFile>,
     config: Option<DatabaseConfiguration>,
     conn: Option<DatabaseConnection>,
@@ -118,13 +119,18 @@ pub struct Process {
 
 impl Process {
     #[tracing::instrument(skip_all)]
-    pub fn new(file: ConfigFile) -> Self {
+    pub fn new(password: ValidatedPassword, file: ConfigFile) -> Self {
         Self {
+            password,
             file: Some(file),
             config: None,
             conn: None,
             settings: None,
         }
+    }
+
+    pub fn password(&self) -> ValidatedPassword {
+        self.password.clone()
     }
 
     #[tracing::instrument(skip_all)]

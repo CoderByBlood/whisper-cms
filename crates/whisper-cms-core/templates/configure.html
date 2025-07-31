@@ -1,0 +1,33 @@
+{% extends "base.html" %} {% block title %}Configuration{% endblock %} {% block
+content %}
+<div class="flex items-center justify-center min-h-screen">
+  <div class="bg-white p-6 rounded shadow w-full max-w-md">
+    <!-- Password-only login -->
+    <form
+      hx-post="/login"
+      hx-target="#config-container"
+      hx-swap="outerHTML"
+      x-data="{ error: {{ error.is_some() | json }} }"
+      class="space-y-4"
+      id="config-container"
+    >
+      <h1 class="text-xl font-semibold">Admin Login</h1>
+      <input
+        type="password"
+        name="password"
+        placeholder="Password"
+        class="w-full border rounded px-3 py-2 focus:outline-none focus:ring"
+        :class="{ 'border-red-500': error }"
+        required
+      />
+      <div x-show="error" class="text-red-600 text-sm">Invalid password</div>
+      <button
+        type="submit"
+        class="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700"
+      >
+        Login
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

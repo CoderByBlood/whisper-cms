@@ -431,7 +431,7 @@ fn validate_password_strength(p: &str) -> Result<(), ValidationError> {
 }
 
 /// Securely validated and hashed password
-#[derive(Zeroize)]
+#[derive(Zeroize, Clone)]
 #[zeroize(drop)]
 pub struct ValidatedPassword {
     raw: SecretString,

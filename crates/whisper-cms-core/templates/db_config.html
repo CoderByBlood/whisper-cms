@@ -1,0 +1,52 @@
+{# templates/db_config.html #}
+<div id="db-config-container" class="space-y-4" x-data="{ dbType: 'embedded' }">
+    <h2 class="text-lg font-bold mb-4">Database Configuration</h2>
+
+    <!-- Database Type Selection -->
+    <div class="space-y-2">
+        <label class="block font-semibold">Choose a database type:</label>
+        <div class="flex gap-4">
+            <label class="flex items-center gap-2">
+                <input type="radio" name="db_type" value="embedded" x-model="dbType" />
+                Embedded Database
+            </label>
+            <label class="flex items-center gap-2">
+                <input type="radio" name="db_type" value="server" x-model="dbType" />
+                Database Server
+            </label>
+        </div>
+    </div>
+
+    <!-- If Embedded, show simple submit -->
+    <template x-if="dbType === 'embedded'">
+        <form hx-post="/save" hx-target="#save-result" hx-swap="innerHTML" class="space-y-3">
+            <input type="hidden" name="db_type" value="embedded" />
+            <button type="submit"
+                class="bg-green-600 text-white w-full py-2 rounded hover:bg-green-700">
+                Use Embedded Database
+            </button>
+            <div id="save-result" class="mt-2 text-sm text-gray-700"></div>
+        </form>
+    </template>
+
+    <!-- If Database Server, expand the full form -->
+    <template x-if="dbType === 'server'">
+        <form hx-post="/save" hx-target="#save-result" hx-swap="innerHTML" class="space-y-3">
+            <input type="hidden" name="db_type" value="server" />
+
+            <input type="text" name="db_host" placeholder="Database Host" class="input w-full px-3 py-2 border rounded" />
+            <input type="number" name="db_port" placeholder="Port" class="input w-full px-3 py-2 border rounded" />
+            <input type="text" name="db_username" placeholder="Username" class="input w-full px-3 py-2 border rounded" />
+            <input type="password" name="db_password" placeholder="Password" class="input w-full px-3 py-2 border rounded" />
+            <input type="text" name="db_name" placeholder="Database Name" class="input w-full px-3 py-2 border rounded" />
+            <input type="number" name="pool_size" placeholder="Pool Size" class="input w-full px-3 py-2 border rounded" />
+
+            <button type="submit"
+                class="bg-green-600 text-white w-full py-2 rounded hover:bg-green-700">
+                Save Configuration
+            </button>
+
+            <div id="save-result" class="mt-2 text-sm text-gray-700"></div>
+        </form>
+    </template>
+</div>

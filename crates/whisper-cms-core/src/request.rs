@@ -22,7 +22,7 @@ use tracing::{debug, info};
 use crate::{
     request::handler::{
         BootingHandler, ConfiguringHandler, InstallingHandler, NoopHandler, ReqHandler,
-        RequestHandler, ServingHandler,
+        RequestHandler, ServingHandler, SessionManager,
     },
     startup::{Checkpoint, Process},
 };
@@ -38,6 +38,7 @@ impl Manager {
         let initial_handler = Box::new(ReqHandler::Booting(BootingHandler));
         let state = Arc::new(ManagerState {
             //phase: ManagerPhase::Booting,
+            manager: Arc::new(SessionManager::new(startup.password())),
             handler: RwLock::new(initial_handler),
         });
         Ok(Manager { startup, state })
@@ -106,6 +107,7 @@ pub enum ManagerPhase {
 
 pub struct ManagerState {
     //pub phase: ManagerPhase,
+    manager: Arc<SessionManager>,
     pub handler: RwLock<Box<ReqHandler>>,
 }
 
@@ -119,7 +121,9 @@ impl ManagerState {
 
         let mut new_handler: Box<ReqHandler> = match next {
             ManagerPhase::Booting => Box::new(ReqHandler::Booting(BootingHandler)),
-            ManagerPhase::Configuring => Box::new(ReqHandler::Configuring(ConfiguringHandler)),
+            ManagerPhase::Configuring => Box::new(ReqHandler::Configuring(ConfiguringHandler {
+                session_manager: self.manager.clone(),
+            })),
             ManagerPhase::Installing => Box::new(ReqHandler::Installing(InstallingHandler)),
             ManagerPhase::Serving => Box::new(ReqHandler::Serving(ServingHandler)),
         };

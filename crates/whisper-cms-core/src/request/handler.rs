@@ -2,15 +2,33 @@
 use askama::Template;
 use async_trait::async_trait;
 use axum::{
+    extract::State,
     http::StatusCode,
-    response::{Html, IntoResponse},
-    routing::get,
-    Router,
+    middleware::Next,
+    response::{Html, IntoResponse, Response},
+    routing::{get, post},
+    Form, Router,
 };
+use base64::{engine::general_purpose, Engine as _};
+use hmac::{Hmac, Mac};
+use hyper::HeaderMap;
+use rand::Rng;
+use serde::Deserialize;
+use sha2::Sha256;
 use tower_http::services::ServeDir;
 
+use axum_extra::extract::cookie::{Cookie, CookieJar};
+use tracing::debug;
+
+use crate::startup::config::{ConfigFile, ValidatedPassword};
+
 use axum::{body::Body, extract::Request};
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tower::{service_fn, Service};
 
 use crate::request::ManagerError;
@@ -103,16 +121,30 @@ impl RequestHandler for BootingHandler {
     }
 }
 
-pub struct ConfiguringHandler;
+pub struct ConfiguringHandler {
+    pub session_manager: Arc<SessionManager>,
+}
 
 #[async_trait]
 impl RequestHandler for ConfiguringHandler {
     #[tracing::instrument(skip_all)]
     async fn router(&self) -> Router {
-        Router::new().fallback_service(
-            ServeDir::new("static/config-spa")
-                .not_found_service(spa_index("static/config-spa/index.html")),
-        )
+        Router::new()
+            .fallback_service(
+                ServeDir::new("config-app").not_found_service(spa_index("config-app/index.html")),
+            )
+            // public
+            .route("/", get(show_configure))
+            .route("/login", post(login))
+            // protected
+            .route(
+                "/save",
+                post(save_configuration).route_layer(axum::middleware::from_fn_with_state(
+                    self.session_manager.clone(),
+                    require_session,
+                )),
+            )
+            .with_state(self.session_manager.clone())
     }
     #[tracing::instrument(skip_all)]
     async fn on_enter(&mut self) -> Result<(), ManagerError> {
@@ -175,6 +207,7 @@ pub struct HomeTemplate {
     pub message: String,
 }
 
+#[tracing::instrument(skip_all)]
 async fn home_page() -> Result<impl IntoResponse, ManagerError> {
     let template = HomeTemplate {
         title: "Welcome".into(),
@@ -213,19 +246,301 @@ fn spa_index(
     })
 }
 
+#[derive(Template)]
+#[template(path = "configure.html")]
+pub struct ConfigureTemplate {
+    pub error: Option<String>,
+}
+#[derive(Template)]
+#[template(path = "configure_full.html")]
+pub struct ConfigureFullTemplate {
+    pub config_form: String,
+}
+
+#[derive(Template)]
+#[template(path = "db_config.html")]
+pub struct DbConfigTemplate;
+
+#[derive(Deserialize)]
+pub struct LoginForm {
+    pub password: String,
+}
+
+#[tracing::instrument(skip_all)]
+pub async fn show_configure(
+    State(session): State<Arc<SessionManager>>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+) -> Html<String> {
+    if let Some(cookie) = jar.get("session") {
+        let fingerprint = fingerprint_from_headers(&headers);
+        debug!("CONFIGURE REQUEST");
+        if session.validate_session(cookie.value(), &fingerprint) {
+            // If this is an HTMX request, return partial
+            if headers.contains_key("HX-Request") {
+                debug!("HTMX REQUEST");
+                return Html(DbConfigTemplate.render().unwrap());
+            }
+
+            debug!("NON-HTMX REQUEST");
+            // Otherwise, return the full page with the config form embedded
+            let partial = DbConfigTemplate.render().unwrap();
+            return Html(
+                ConfigureFullTemplate {
+                    config_form: partial,
+                }
+                .render()
+                .unwrap(),
+            );
+        }
+    }
+
+    // Otherwise show the login screen
+    Html(ConfigureTemplate { error: None }.render().unwrap())
+}
+
+#[tracing::instrument(skip_all)]
+pub async fn login(
+    jar: CookieJar,
+    State(session): State<Arc<SessionManager>>,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> (CookieJar, Html<String>) {
+    if session.verify_password(&form.password) {
+        // Build fingerprint and session cookie
+        let fingerprint = fingerprint_from_headers(&headers);
+        let cookie_value = session.create_cookie(&fingerprint);
+
+        // Attach session cookie using CookieJar
+        let updated_jar = jar.add(
+            Cookie::build(("session", cookie_value))
+                .http_only(true)
+                .path("/")
+                .build(),
+        );
+
+        // Return DbConfig form (HTMX will swap this in)
+        (updated_jar, Html(DbConfigTemplate.render().unwrap()))
+    } else {
+        // Invalid password: just return login template with error, no new cookies
+        (
+            jar,
+            Html(
+                ConfigureTemplate {
+                    error: Some("Invalid password".to_string()),
+                }
+                .render()
+                .unwrap(),
+            ),
+        )
+    }
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone)]
+pub struct SessionManager {
+    password: ValidatedPassword,
+    sessions: Arc<RwLock<HashMap<String, (u64, String)>>>, // token -> (expiry, fingerprint)
+}
+
+impl SessionManager {
+    #[tracing::instrument(skip_all)]
+    pub fn new(password: ValidatedPassword) -> Self {
+        Self {
+            password,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn verify_password(&self, attempt: &str) -> bool {
+        self.password.verify(attempt)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub fn create_cookie(&self, fingerprint: &str) -> String {
+        type HmacSha256 = Hmac<sha2::Sha256>;
+
+        let token: [u8; 32] = rand::thread_rng().gen();
+        let token_b64 = base64::engine::general_purpose::STANDARD.encode(&token);
+
+        let expiry = SystemTime::now()
+            .checked_add(Duration::from_secs(600))
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut mac = HmacSha256::new_from_slice(self.password.as_hashed().as_bytes()).unwrap();
+        mac.update(format!("{token_b64}:{expiry}").as_bytes());
+        let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        // Store and return token
+        self.sessions
+            .write()
+            .unwrap()
+            .insert(token_b64.clone(), (expiry, fingerprint.to_string()));
+
+        format!("{token_b64}:{expiry}:{sig}")
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn validate_session(&self, cookie: &str, fingerprint: &str) -> bool {
+        let parts: Vec<&str> = cookie.split(':').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+
+        let (token, expiry_str, sig) = (parts[0], parts[1], parts[2]);
+
+        // verify signature
+        let mut mac = HmacSha256::new_from_slice(&self.password.as_hashed().as_bytes()).unwrap();
+        mac.update(format!("{token}:{expiry_str}").as_bytes());
+        if mac
+            .verify_slice(&general_purpose::STANDARD.decode(sig).unwrap_or_default())
+            .is_err()
+        {
+            return false;
+        }
+
+        // verify expiry
+        let expiry = expiry_str.parse::<u64>().unwrap_or(0);
+        if SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            > expiry
+        {
+            return false;
+        }
+
+        // verify fingerprint
+        if let Some((_, saved_fingerprint)) = self.sessions.read().unwrap().get(token) {
+            return saved_fingerprint == fingerprint;
+        }
+        false
+    }
+}
+
+/// Axum middleware to enforce sessions
+#[tracing::instrument(skip_all)]
+pub async fn require_session(
+    State(session): State<Arc<SessionManager>>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let fingerprint = fingerprint_from_headers(req.headers());
+
+    if let Some(cookie_header) = req.headers().get("cookie") {
+        if let Some(raw_session) = cookie_header
+            .to_str()
+            .ok()
+            .and_then(|v| v.strip_prefix("session="))
+        {
+            if session.validate_session(raw_session, &fingerprint) {
+                return Ok(next.run(req).await);
+            }
+        }
+    }
+
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+#[tracing::instrument(skip_all)]
+fn fingerprint_from_headers(headers: &HeaderMap) -> String {
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown-ip");
+    let ua = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown-ua");
+    format!("{ip}-{ua}")
+}
+
+#[derive(serde::Deserialize)]
+pub struct ConfigForm {
+    pub db_type: String, // "embedded" or "server"
+    pub db_host: Option<String>,
+    pub db_port: Option<u16>,
+    pub db_username: Option<String>,
+    pub db_password: Option<String>,
+    pub db_name: Option<String>,
+    pub pool_size: Option<u8>,
+}
+
+pub async fn save_configuration(
+    jar: CookieJar,
+    State(session): State<Arc<SessionManager>>,
+    headers: HeaderMap,
+    Form(form): Form<ConfigForm>,
+) -> (CookieJar, Html<String>) {
+    // Get the session cookie (same API)
+    if let Some(cookie) = jar.get("session") {
+        let fingerprint = fingerprint_from_headers(&headers);
+
+        if !session.validate_session(cookie.value(), &fingerprint) {
+            return (
+                jar,
+                Html("<div class='text-red-600'>Unauthorized: Invalid session</div>".to_string()),
+            );
+        }
+    } else {
+        return (
+            jar,
+            Html("<div class='text-red-600'>Unauthorized: No session found</div>".to_string()),
+        );
+    }
+
+    // Process the form based on db_type
+    if form.db_type == "embedded" {
+        // Save embedded DB configuration
+        // TODO: persist to disk
+        return (
+            jar,
+            Html("<div class='text-green-600'>Embedded database selected and saved successfully!</div>".to_string()),
+        );
+    } else {
+        // Validate required server fields
+        if form.db_host.is_none() || form.db_port.is_none() {
+            return (
+                jar,
+                Html(
+                    "<div class='text-red-600'>Please fill in all required server fields</div>"
+                        .to_string(),
+                ),
+            );
+        }
+
+        // TODO: test database connection + persist config
+        return (
+            jar,
+            Html("<div class='text-green-600'>Database server configuration saved successfully!</div>".to_string()),
+        );
+    }
+}
 #[cfg(test)]
 mod tests {
     use axum::{
         body::Body,
         http::{Request, StatusCode},
     };
-    use tower::ServiceExt; // for `oneshot`
-
+    use tower::ServiceExt;
 
     use super::*;
     use http_body_util::BodyExt;
     use std::fs;
-    use tempfile::NamedTempFile; // for .collect().await
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn temp_config_file(password: ValidatedPassword) -> ConfigFile {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config_file.enc");
+        let path_str = path.to_str().unwrap();
+
+        ConfigFile::as_encrypted(password, path_str.to_owned())
+    }
 
     #[tokio::test]
     async fn noop_handler_router() {
@@ -314,7 +629,12 @@ mod tests {
 
     #[tokio::test]
     async fn configuring_handler_lifecycle() {
-        let mut handler = ConfiguringHandler;
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
+        let mut handler = ConfiguringHandler {
+            //config_file: Arc::new(temp_config_file(password.clone())),
+            session_manager: Arc::new(SessionManager::new(password)),
+        };
         assert!(handler.on_enter().await.is_ok());
         assert!(handler.on_exit().await.is_ok());
     }
@@ -402,10 +722,15 @@ mod tests {
 
     #[tokio::test]
     async fn req_handler_on_enter_all_variants() {
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let mut handlers = vec![
             ReqHandler::Noop(NoopHandler),
             ReqHandler::Booting(BootingHandler),
-            ReqHandler::Configuring(ConfiguringHandler),
+            ReqHandler::Configuring(ConfiguringHandler {
+                //config_file: Arc::new(temp_config_file(password.clone())),
+                session_manager: Arc::new(SessionManager::new(password)),
+            }),
             ReqHandler::Installing(InstallingHandler),
             ReqHandler::Serving(ServingHandler),
         ];
@@ -417,10 +742,15 @@ mod tests {
 
     #[tokio::test]
     async fn req_handler_on_exit_all_variants() {
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
         let mut handlers = vec![
             ReqHandler::Noop(NoopHandler),
             ReqHandler::Booting(BootingHandler),
-            ReqHandler::Configuring(ConfiguringHandler),
+            ReqHandler::Configuring(ConfiguringHandler {
+                //config_file: Arc::new(temp_config_file(password.clone())),
+                session_manager: Arc::new(SessionManager::new(password)),
+            }),
             ReqHandler::Installing(InstallingHandler),
             ReqHandler::Serving(ServingHandler),
         ];
@@ -432,10 +762,15 @@ mod tests {
 
     #[tokio::test]
     async fn req_handler_router_all_variants() {
-        let handlers = vec![
+        let password =
+            ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
+        let mut handlers = vec![
             ReqHandler::Noop(NoopHandler),
             ReqHandler::Booting(BootingHandler),
-            ReqHandler::Configuring(ConfiguringHandler),
+            ReqHandler::Configuring(ConfiguringHandler {
+                //config_file: Arc::new(temp_config_file(password.clone())),
+                session_manager: Arc::new(SessionManager::new(password)),
+            }),
             ReqHandler::Installing(InstallingHandler),
             ReqHandler::Serving(ServingHandler),
         ];

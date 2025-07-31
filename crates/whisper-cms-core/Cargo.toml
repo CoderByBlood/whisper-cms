@@ -6,13 +6,16 @@ edition = "2021"
 [dependencies]
 aes-gcm = "0.10"
 argon2 = "0.5.3"
-askama = "0.14.0"
+askama = { version = "0.14.0", features = ["serde_json"] }
 async-trait = "0.1.88"
 axum = "0.8.4"
+axum-extra = { version = "0.10.1", features = ["cookie"] }
+base64 = "0.22.1"
 clap = { version = "4.5.40", features = ["derive", "env"] }
 data-encoding = "2.9.0"
 derive_more = { version = "2.0.1", features = ["from"] }
 futures = "0.3.31"
+hmac = "0.12.1"
 hyper = "1.6.0"
 inquire = "0.7.5"
 libsql = "0.9.19"
@@ -20,6 +23,7 @@ rand = "0.8"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+sha2 = "0.10.9"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
 subtle = "2.6.1"
 thiserror = "2.0.12"
