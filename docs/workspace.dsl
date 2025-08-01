@@ -86,7 +86,7 @@ workspace {
             title "WhisperCMS - AdminTheme - Component Diagram"
         }
 
-        dynamic Core WhisperCMS-Installation-Sequence {
+        dynamic Core WhisperCMS-Startup-Sequence {
             su -> RequestManager "(cli arg)->(Ready)"
             RequestManager -> StartupManager "(cli arg)->(Settings)"
             RequestManager -> StartupManager "(Settings)->(Kernel)"
@@ -96,7 +96,7 @@ workspace {
             Nginx -> admin "proxy response"
         }
 
-        dynamic Core WhisperCMS-Startup-Sequence {
+        dynamic Core WhisperCMS-Installation-Sequence {
             su -> RequestManager "(cli arg)->(Ready)"
             RequestManager -> StartupManager "(cli arg)->(Settings | Config | None)"
             admin -> Nginx "GET /"
