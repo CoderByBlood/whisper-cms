@@ -6,8 +6,7 @@ workspace {
 
         WhisperCMS = softwareSystem WhisperCMS "Multi-site Rust CMS with plugin/theme system" {
 
-            Kernel = container Kernel "The core" "Rust" "internal" {
-                Core = component Core "The OS level process" "Rust" "application"
+            Core = container Core "The core" "Rust" "internal" {
                 // PluginSPI = component PluginSPI "The spec all plugins must implement" "Rust" "interface"
                 ThemeSPI = component ThemeSPI "The spec all themes must implement" "Rust" "interface"
                 AdminAPI = component AdminAPI "The API for Admin UI" "Rust" "api"
@@ -25,17 +24,16 @@ workspace {
                 Axum = component Axum "Content routing" "Rust" "library"
                 Argon2 = component Argon2 "File encryption" "Rust" "library"
 
-                su -> Core "starts"
+                su -> RequestManager "starts"
 
-                Core -> StartupManager "checks with"
+                RequestManager -> StartupManager "starts"
                 StartupManager -> DataService "starts"
                 StartupManager -> Argon2 "uses"
-                //Core -> RequestManager "binds"
+                //Cast -> RequestManager "binds"
 
                 AdminAPI -> ThemeManager "loads"
                 RequestManager -> StaticService "forwards"
                 RequestManager -> ContentService "forwards"
-                RequestManager -> Core "bound by"
                 // AdminAPI -> ConfigService "uses"
                 StaticService -> Pingora "uses"
                 ThemeManager -> Git2 "uses"
@@ -77,10 +75,10 @@ workspace {
             autolayout lr
             title "WhisperCMS - Container Diagram"
         }
-        component Kernel WhisperCMS-Component-Kernel {
+        component Core WhisperCMS-Component-Core {
             include *
             autolayout lr
-            title "WhisperCMS - Kernel - Component Diagram"
+            title "WhisperCMS - Core - Component Diagram"
         }
         component AdminTheme WhisperCMS-Component-AdminTheme {
             include *
@@ -88,59 +86,45 @@ workspace {
             title "WhisperCMS - AdminTheme - Component Diagram"
         }
 
-        dynamic Kernel WhisperCMS-Installation-Sequence {
-            su -> Core "starts with configuration password"
-            Core -> StartupManager "check for configuration"
-            Core -> StartupManager "create password hash"
-            StartupManager -> Argon2 "write hash"
-            Core -> RequestManager "state change - Not Configured"
-            Core -> su "successfully started"
+        dynamic Core WhisperCMS-Installation-Sequence {
+            su -> RequestManager "(cli arg)->(Ready)"
+            RequestManager -> StartupManager "(cli arg)->(Settings)"
+            RequestManager -> StartupManager "(Settings)->(Kernel)"
+            RequestManager -> ContentService "(Kernel)->(Ready)"
+            RequestManager -> su "successfully started"
+            RequestManager -> Nginx "303 - /"
+            Nginx -> admin "proxy response"
+        }
+
+        dynamic Core WhisperCMS-Startup-Sequence {
+            su -> RequestManager "(cli arg)->(Ready)"
+            RequestManager -> StartupManager "(cli arg)->(Settings | Config | None)"
             admin -> Nginx "GET /"
             Nginx -> RequestManager "request index.html"
-            RequestManager -> Core "load index.html"
-            RequestManager -> Nginx "send response - configuration.vue"
+            RequestManager -> Nginx "200 - login.html"
             Nginx -> admin "proxy response"
             admin -> Nginx "/POST /login {password}"
             Nginx -> RequestManager "do login"
-            RequestManager -> Core "validate password"
-            Core -> StartupManager "compare password with hash"
-            Core -> RequestManager "success"
-            RequestManager -> Nginx "send response"
-            Nginx -> admin "proxy response {json}"
-            admin -> Nginx "POST /configure {json - database info}"
-            Nginx -> RequestManager "do configuration"
-            RequestManager -> Core "save configuration"
-            Core -> StartupManager "validate configuration"
-            StartupManager -> DataService "test configuration"
-            DataService -> LibSQL "test connection"
-            StartupManager -> Argon2 "write configuration"
-            StartupManager -> Core "configuration stored"
-            Core -> RequestManager "state change - Configured"
-            RequestManager -> Nginx "send response - installation.vue"
-            Nginx -> admin "proxy response {json}"
-            admin -> Nginx "POST /install {json - site options}"
+            RequestManager -> StartupManager "(Password)->(Settings| Config | None)"
+            RequestManager -> Nginx "200 - configuration.html"
+            Nginx -> admin "proxy response"
+            admin -> Nginx "POST /configure {form info}"
+            Nginx -> RequestManager "save configuration"
+            RequestManager -> StartupManager "(ConfigData)->(Settings | Config)"
+            StartupManager -> DataService "(ConfigData)->(Config)"
+            DataService -> LibSQL "(Statement)->(ResultSet)"
+            RequestManager -> Nginx "200 - installation.html"
+            Nginx -> admin "proxy response"
+            admin -> Nginx "POST /install {site options}"
             Nginx -> RequestManager "do installation"
-            RequestManager -> Core "install"
-            Core -> StartupManager "validate site options"
-            StartupManager -> DataService "store site options"
-            DataService -> LibSQL "write site options"
-            StartupManager -> Core "installed"
-            Core -> RequestManager "state change - Ready"
-            RequestManager -> Nginx "send response"
-            Nginx -> admin "proxy response {json}"
-        }
-
-        dynamic Kernel WhisperCMS-Startup-Sequence {
-            su -> Core "starts with configuration password"
-            Core -> StartupManager "check for configuration"
-            StartupManager -> Argon2 "read configuration"
-            Core -> StartupManager "validate configuration"
-            StartupManager -> DataService "test configuration"
-            DataService -> LibSQL "test connection"
-            DataService -> LibSQL "read site options"
-            Core -> StartupManager "validate site options"
-            Core -> RequestManager "state change - Ready"
-            Core -> su "successfully started"
+            RequestManager -> StartupManager "(SettingsData)->(Settings)"
+            StartupManager -> DataService "(SettingData)->(Settings)"
+            DataService -> LibSQL "(Statement)->(ResultSet)"
+            RequestManager -> StartupManager "(Settings)->(Kernel)"
+            RequestManager -> ContentService "(Kernel)->(Ready)"
+            RequestManager -> su "successfully started"
+            RequestManager -> Nginx "303 - /"
+            Nginx -> admin "proxy response"
         }
     
         styles {

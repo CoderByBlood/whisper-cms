@@ -191,7 +191,7 @@ and cryptography most closely aligns with the project's priorities.
 
 **Rationale:** libSQL provides an automated way to create full audit of data
 changes so there is no need to take on the performance hit for soft deletes -
-Note: this is different from unpublishing content
+Note: this is different from un-publishing content
 
 #### Alternatives Considered
 
