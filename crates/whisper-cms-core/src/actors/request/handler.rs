@@ -29,10 +29,9 @@ use std::{
 };
 use tower::{service_fn, Service, ServiceExt};
 
-use crate::actors::{
-    config::ValidatedPassword,
-    request::{Checkpoint, RequestError},
-};
+use super::{Checkpoint, RequestError};
+
+use crate::actors::request::ValidatedPassword;
 #[derive(Debug)]
 pub struct RequestManager {
     state: Arc<ManagerState>,
