@@ -1,4 +1,3 @@
-// handler/mod.rs
 use askama::Template;
 use async_trait::async_trait;
 use axum::{
@@ -18,28 +17,136 @@ use sha2::Sha256;
 use tower_http::services::ServeDir;
 
 use axum_extra::extract::cookie::{Cookie, CookieJar};
-use tracing::debug;
-
-use crate::startup::config::{ConfigFile, ValidatedPassword};
+use tracing::{debug, info};
 
 use axum::{body::Body, extract::Request};
 use std::{
     collections::HashMap,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tower::{service_fn, Service};
+use tower::{service_fn, Service, ServiceExt};
 
-use crate::request::ManagerError;
+use crate::actors::{
+    config::ValidatedPassword,
+    request::{Checkpoint, RequestError},
+};
+#[derive(Debug)]
+pub struct RequestManager {
+    state: Arc<ManagerState>,
+    address: String,
+    port: u16,
+}
+
+impl RequestManager {
+    #[tracing::instrument(skip_all)]
+    pub fn new(password: ValidatedPassword, address: String, port: u16) -> RequestManager {
+        // Start in Booting state
+        let initial_handler = Box::new(ReqHandler::Booting(BootingHandler));
+        let state = Arc::new(ManagerState {
+            //phase: ManagerPhase::Booting,
+            manager: Arc::new(SessionManager::new(password)),
+            handler: tokio::sync::RwLock::new(initial_handler),
+        });
+        RequestManager {
+            state,
+            address,
+            port,
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn boot(&mut self, checkpoint: &Checkpoint) -> Result<(), RequestError> {
+        self.state.transition_to(ManagerPhase::Booting).await?;
+
+        match checkpoint {
+            Checkpoint::Deferred => self.state.transition_to(ManagerPhase::Configuring).await?,
+            Checkpoint::Configured => self.state.transition_to(ManagerPhase::Installing).await?,
+            Checkpoint::Installed => self.state.transition_to(ManagerPhase::Serving).await?,
+            Checkpoint::Provisioned => self.state.transition_to(ManagerPhase::Serving).await?,
+        }
+
+        // Fallback router
+        let router = Router::new()
+            .fallback(Self::dispatch_request)
+            .with_state(self.state.clone());
+
+        let ip: IpAddr = self.address.parse()?;
+        let addr = SocketAddr::new(ip, self.port);
+
+        info!("Listening on http://{}", addr);
+
+        // Use hyper 1.6.0 compatible server setup
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        debug!("listener: {:?}", &listener);
+        let serve = axum::serve(listener, router.into_make_service());
+        debug!("serving: {serve:?}");
+        tokio::spawn(async { serve.await });
+        debug!("awaiting");
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn dispatch_request(
+        State(mgr_state): State<Arc<ManagerState>>,
+        req: Request<Body>,
+    ) -> impl IntoResponse {
+        debug!("{mgr_state:?} is handling {req:?}");
+        let handler = mgr_state.handler.read().await;
+        let router = handler.router().await;
+        router.oneshot(req).await
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ManagerPhase {
+    Booting,
+    Configuring,
+    Installing,
+    Serving,
+}
+
+#[derive(Debug)]
+pub struct ManagerState {
+    //pub phase: ManagerPhase,
+    manager: Arc<SessionManager>,
+    pub handler: tokio::sync::RwLock<Box<ReqHandler>>,
+}
+
+impl ManagerState {
+    #[tracing::instrument(skip_all)]
+    pub async fn transition_to(&self, next: ManagerPhase) -> Result<(), RequestError> {
+        let mut handler_guard = self.handler.write().await;
+        let mut old_handler =
+            std::mem::replace(&mut *handler_guard, Box::new(ReqHandler::Noop(NoopHandler)));
+        old_handler.on_exit().await?;
+
+        let mut new_handler: Box<ReqHandler> = match next {
+            ManagerPhase::Booting => Box::new(ReqHandler::Booting(BootingHandler)),
+            ManagerPhase::Configuring => Box::new(ReqHandler::Configuring(ConfiguringHandler {
+                session_manager: self.manager.clone(),
+            })),
+            ManagerPhase::Installing => Box::new(ReqHandler::Installing(InstallingHandler)),
+            ManagerPhase::Serving => Box::new(ReqHandler::Serving(ServingHandler)),
+        };
+
+        new_handler.on_enter().await?;
+        *handler_guard = new_handler;
+        Ok(())
+    }
+}
 
 #[async_trait]
 pub trait RequestHandler: Send + Sync {
     async fn router(&self) -> Router;
-    async fn on_enter(&mut self) -> Result<(), ManagerError>;
-    async fn on_exit(&mut self) -> Result<(), ManagerError>;
+    async fn on_enter(&mut self) -> Result<(), RequestError>;
+    async fn on_exit(&mut self) -> Result<(), RequestError>;
 }
 
+#[derive(Debug)]
 pub enum ReqHandler {
     Noop(NoopHandler),
     Booting(BootingHandler),
@@ -60,7 +167,7 @@ impl RequestHandler for ReqHandler {
         }
     }
 
-    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+    async fn on_enter(&mut self) -> Result<(), RequestError> {
         match self {
             ReqHandler::Noop(h) => h.on_enter().await,
             ReqHandler::Booting(h) => h.on_enter().await,
@@ -70,7 +177,7 @@ impl RequestHandler for ReqHandler {
         }
     }
 
-    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+    async fn on_exit(&mut self) -> Result<(), RequestError> {
         match self {
             ReqHandler::Noop(h) => h.on_exit().await,
             ReqHandler::Booting(h) => h.on_exit().await,
@@ -80,6 +187,7 @@ impl RequestHandler for ReqHandler {
         }
     }
 }
+#[derive(Debug)]
 pub struct NoopHandler;
 
 #[async_trait]
@@ -89,15 +197,16 @@ impl RequestHandler for NoopHandler {
         Router::new()
     }
     #[tracing::instrument(skip_all)]
-    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+    async fn on_enter(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+    async fn on_exit(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub struct BootingHandler;
 
 #[async_trait]
@@ -112,15 +221,16 @@ impl RequestHandler for BootingHandler {
         }))
     }
     #[tracing::instrument(skip_all)]
-    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+    async fn on_enter(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+    async fn on_exit(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub struct ConfiguringHandler {
     pub session_manager: Arc<SessionManager>,
 }
@@ -147,15 +257,16 @@ impl RequestHandler for ConfiguringHandler {
             .with_state(self.session_manager.clone())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+    async fn on_enter(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+    async fn on_exit(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub struct InstallingHandler;
 
 #[async_trait]
@@ -168,15 +279,16 @@ impl RequestHandler for InstallingHandler {
         )
     }
     #[tracing::instrument(skip_all)]
-    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+    async fn on_enter(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+    async fn on_exit(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
 }
 
+#[derive(Debug)]
 pub struct ServingHandler;
 
 #[async_trait]
@@ -191,11 +303,11 @@ impl RequestHandler for ServingHandler {
             }))
     }
     #[tracing::instrument(skip_all)]
-    async fn on_enter(&mut self) -> Result<(), ManagerError> {
+    async fn on_enter(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_exit(&mut self) -> Result<(), ManagerError> {
+    async fn on_exit(&mut self) -> Result<(), RequestError> {
         Ok(())
     }
 }
@@ -208,7 +320,7 @@ pub struct HomeTemplate {
 }
 
 #[tracing::instrument(skip_all)]
-async fn home_page() -> Result<impl IntoResponse, ManagerError> {
+async fn home_page() -> Result<impl IntoResponse, RequestError> {
     let template = HomeTemplate {
         title: "Welcome".into(),
         message: "This is rendered with Askama.".into(),
@@ -338,10 +450,10 @@ pub async fn login(
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SessionManager {
     password: ValidatedPassword,
-    sessions: Arc<RwLock<HashMap<String, (u64, String)>>>, // token -> (expiry, fingerprint)
+    sessions: Arc<std::sync::RwLock<HashMap<String, (u64, String)>>>, // token -> (expiry, fingerprint)
 }
 
 impl SessionManager {
@@ -349,7 +461,7 @@ impl SessionManager {
     pub fn new(password: ValidatedPassword) -> Self {
         Self {
             password,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -532,15 +644,7 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
     use std::fs;
-    use tempfile::{tempdir, NamedTempFile};
-
-    fn temp_config_file(password: ValidatedPassword) -> ConfigFile {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("config_file.enc");
-        let path_str = path.to_str().unwrap();
-
-        ConfigFile::as_encrypted(password, path_str.to_owned())
-    }
+    use tempfile::NamedTempFile;
 
     #[tokio::test]
     async fn noop_handler_router() {
@@ -764,7 +868,7 @@ mod tests {
     async fn req_handler_router_all_variants() {
         let password =
             ValidatedPassword::build("StrongPass1$".into(), "longsufficientlysalt".into()).unwrap();
-        let mut handlers = vec![
+        let handlers = vec![
             ReqHandler::Noop(NoopHandler),
             ReqHandler::Booting(BootingHandler),
             ReqHandler::Configuring(ConfiguringHandler {

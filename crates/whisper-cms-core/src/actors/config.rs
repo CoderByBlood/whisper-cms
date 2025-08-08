@@ -1,30 +1,134 @@
 use aes_gcm::aead::{Aead, KeyInit};
-//use aes_gcm::aes::cipher::StreamCipher;
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{
     password_hash::{PasswordHash, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, PasswordHasher, Version,
 };
+use data_encoding::BASE32_NOPAD;
 use libsql::{params, Builder, Database};
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use rand::{rngs::OsRng, Rng};
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
+use tracing::debug;
 use validator::{Validate, ValidationError, ValidationErrors};
 use zeroize::Zeroize;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::startup::block_in_runtime;
+use crate::CliArgs;
+
+pub type ConfigMap = HashMap<String, String>;
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("Could not startup due to: {0}")]
+    Internal(&'static str),
+
+    #[error("Could not startup due to: {0}")]
+    Transformation(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Serde error: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    #[error("Database error: {0}")]
+    LibSql(#[from] libsql::Error),
+}
+
+#[derive(Debug)]
+pub struct ConfigArgs {
+    pub args: CliArgs,
+}
+
+#[derive(Debug)]
+pub enum ConfigEnvelope {
+    Load {
+        reply: RpcReplyPort<Result<ConfigReply, ConfigError>>,
+    },
+}
+
+#[derive(Debug)]
+pub enum ConfigReply {
+    Load(ConfigMap),
+}
+
+#[derive(Debug)]
+pub struct ConfigState {
+//    password: ValidatedPassword,
+    file: ConfigFile,
+}
+
+#[derive(Debug)]
+pub struct Config;
+
+impl Actor for Config {
+    type Msg = ConfigEnvelope;
+    type State = ConfigState;
+    type Arguments = ConfigArgs;
+
+    #[tracing::instrument(skip_all)]
+    async fn pre_start(
+        &self,
+        _me: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        debug!("with {args:?}");
+        let raw = args.args.password;
+        let salt = args.args.salt;
+        let password = ValidatedPassword::build(raw, salt)?;
+        let hashed = SecretString::from(password.as_hashed());
+
+        let hash = hashed.expose_secret();
+        // Step 1: Reverse the string
+        let reversed: String = hash.chars().rev().collect();
+
+        // Step 2: Base32 encode the reversed bytes
+        let encoded = BASE32_NOPAD.encode(reversed.as_bytes());
+
+        // Step 3: Normalize to lowercase
+        let lowercase = encoded.to_lowercase();
+
+        // Step 4: Truncate to 128 characters
+        let mut path: String = lowercase.chars().take(128).collect();
+
+        // Step 5: Add the extension
+        path.push_str(".enc");
+        let file = ConfigFile::as_encrypted(password.clone(), path);
+
+        Ok(ConfigState { /*password,*/ file })
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle(
+        &self,
+        _me: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("{msg:?} with state {state:?}");
+
+        match msg {
+            ConfigEnvelope::Load { reply } => {
+                match state.file.load().await {
+                    Ok(map) => Ok(reply.send(Ok(ConfigReply::Load(map)))?),
+                    Err(e) => Ok(reply.send(Err(e))?)
+                }
+            }
+        }
+    }
+}
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
-pub type ConfigMap = HashMap<String, String>;
 #[derive(Debug)]
 pub struct ConfigFile {
     ser: Serializer,
@@ -67,9 +171,10 @@ impl ConfigFile {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn load(&mut self) -> Result<ConfigMap, ConfigError> {
+    pub async fn load(&mut self) -> Result<ConfigMap, ConfigError> {
         self.ser
             .load_from_path(&*self.path)
+            .await
             .map(|result| {
                 self.tried = Some(true);
                 result
@@ -81,9 +186,10 @@ impl ConfigFile {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn save(&mut self, config: ConfigMap) -> Result<(), ConfigError> {
+    pub async fn save(&mut self, config: ConfigMap) -> Result<(), ConfigError> {
         self.ser
             .save_to_path(&config, &*self.path)
+            .await
             .map(|result| {
                 self.tried = Some(true);
                 result
@@ -93,26 +199,6 @@ impl ConfigFile {
                 err
             })
     }
-}
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    //#[error("Format error: {0}")]
-    //Format(&'static str),
-    #[error("Transformation error: {0}")]
-    Transformation(String),
-
-    #[error("Serde error: {0}")]
-    Serde(#[from] serde_json::Error),
-
-    #[error("Database error: {0}")]
-    SQLx(#[from] sqlx::Error),
-
-    #[error("Database error: {0}")]
-    LibSql(#[from] libsql::Error),
 }
 
 pub trait FormatCodec: Send + Sync + std::fmt::Debug {
@@ -242,17 +328,17 @@ enum Serializer {
 }
 
 impl Serializer {
-    fn load_from_path(&mut self, path: &Path) -> Result<ConfigMap, ConfigError> {
+    async fn load_from_path(&mut self, path: &Path) -> Result<ConfigMap, ConfigError> {
         match self {
             Serializer::JsonEncryptedFile(ser) => ser.load_from_path(path),
-            Serializer::JsonNoopSql(ser) => ser.load_from_path(path),
+            Serializer::JsonNoopSql(ser) => ser.load_from_path(path).await,
         }
     }
 
-    fn save_to_path(&mut self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
+    async fn save_to_path(&mut self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
         match self {
             Serializer::JsonEncryptedFile(ser) => ser.save_to_path(map, path),
-            Serializer::JsonNoopSql(ser) => ser.save_to_path(map, path),
+            Serializer::JsonNoopSql(ser) => ser.save_to_path(map, path).await,
         }
     }
 }
@@ -321,44 +407,39 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn save_to_path(&mut self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
-        let db = self.build_database(path)?;
+    pub async fn save_to_path(&mut self, map: &ConfigMap, path: &Path) -> Result<(), ConfigError> {
+        let db = self.build_database(path).await?;
         let conn = db.connect()?;
 
         // Create table if it doesn't exist
-        block_in_runtime(async {
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL)",
-                (),
-            )
-            .await
-        })?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL)",
+            (),
+        )
+        .await?;
 
         let encoded = self.format.encode(map)?;
         let packed = self.transformation.pack(&encoded)?;
 
-        block_in_runtime(async {
-            conn.execute(
-                "INSERT INTO settings (id, data) VALUES (?1, ?2)",
-                (1, packed.as_slice()),
-            )
-            .await
-        })?;
+        conn.execute(
+            "INSERT INTO settings (id, data) VALUES (?1, ?2)",
+            (1, packed.as_slice()),
+        )
+        .await?;
         Ok(())
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn load_from_path(&mut self, path: &Path) -> Result<ConfigMap, ConfigError> {
-        let db = self.build_database(path)?;
+    pub async fn load_from_path(&mut self, path: &Path) -> Result<ConfigMap, ConfigError> {
+        let db = self.build_database(path).await?;
         let conn = db.connect()?;
 
-        let mut stmt = block_in_runtime(async {
-            conn.prepare("SELECT data FROM settings WHERE id = ?1")
-                .await
-        })?;
-        let mut rows = block_in_runtime(async { stmt.query(params![1i64]).await })?;
+        let mut stmt = conn
+            .prepare("SELECT data FROM settings WHERE id = ?1")
+            .await?;
+        let mut rows = stmt.query(params![1i64]).await?;
 
-        if let Some(row) = block_in_runtime(async { rows.next().await })? {
+        if let Some(row) = rows.next().await? {
             let data: Vec<u8> = row.get(0)?;
             let unpacked = self.transformation.unpack(&data)?;
             let map = self.format.decode(&unpacked)?;
@@ -368,13 +449,13 @@ where
         }
     }
 
-    fn build_database(&mut self, path: &Path) -> Result<&Database, ConfigError> {
+    async fn build_database(&mut self, path: &Path) -> Result<&Database, ConfigError> {
         if self.database.is_some() {
             // If already built, just return a reference
             Ok(self.database.as_ref().unwrap())
         } else {
             // Build database connection
-            let db = block_in_runtime(async { Builder::new_local(path).build().await })?;
+            let db = Builder::new_local(path).build().await?;
             self.database = Some(db);
             Ok(self.database.as_ref().unwrap())
         }
@@ -619,8 +700,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.enc");
 
-        serializer.save_to_path(&map, &path).unwrap();
-        let restored = serializer.load_from_path(&path).unwrap();
+        serializer.save_to_path(&map, &path).await.unwrap();
+        let restored = serializer.load_from_path(&path).await.unwrap();
 
         assert_eq!(map, restored);
     }
@@ -681,10 +762,10 @@ mod tests {
 
         assert_eq!(file.tried(), None);
 
-        file.save(map.clone()).unwrap();
+        file.save(map.clone()).await.unwrap();
         assert_eq!(file.tried(), Some(true));
 
-        let loaded = file.load().unwrap();
+        let loaded = file.load().await.unwrap();
         assert_eq!(file.tried(), Some(true));
         assert_eq!(loaded, map);
     }
@@ -705,10 +786,10 @@ mod tests {
 
         assert_eq!(file.tried(), None);
 
-        file.save(map.clone()).unwrap();
+        file.save(map.clone()).await.unwrap();
         assert_eq!(file.tried(), Some(true));
 
-        let loaded = file.load().unwrap();
+        let loaded = file.load().await.unwrap();
         assert_eq!(file.tried(), Some(true));
         assert_eq!(loaded, map);
     }
@@ -723,7 +804,7 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         let mut file = ConfigFile::as_encrypted(password, path_str.to_owned());
-        let result = file.load();
+        let result = file.load().await;
 
         assert!(result.is_err());
         assert_eq!(file.tried(), Some(false));
@@ -739,7 +820,7 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         let mut file = ConfigFile::as_local_db(path_str.to_owned());
-        let result = file.load();
+        let result = file.load().await;
 
         assert!(result.is_err());
         assert_eq!(file.tried(), Some(false));
