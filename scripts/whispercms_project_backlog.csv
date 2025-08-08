@@ -1,0 +1,82 @@
+Title,Body,Epic,MVP,Priority,Status
+"As an operator, I want a first-run install wizard so that I can initialize the site safely.","- Visiting /admin on first run redirects to Install wizard (Booting→Installing→Serving).
+- Maintenance page shown on public routes during install; cleared on completion.
+- Successful completion transitions runtime to Serving.",EPIC 0 — Installation & First-Run,Yes,P1,Backlog
+"As an operator, I want to create or connect a Git repo so that content is versioned from day 1.","- Choose Create New (init) or Connect Existing (clone/attach).
+- Validate required structure (content/, config/); refuse with actionable errors if invalid.
+- Initial commit written (bootstrap); credentials are not stored in Git.",EPIC 0 — Installation & First-Run,Yes,P1,Backlog
+"As an operator, I want to create the first admin so that the console is secure.","- Admin user created with Argon2id-hashed password.
+- HMAC-signed cookie issued on login; optional IP/User-Agent binding; session TTL enforced.",EPIC 0 — Installation & First-Run,Yes,P1,Backlog
+"As an operator, I want to set initial theme mounts so that pages render immediately.","- Select compiled themes for '/', '/api/', '/feed/' and write config/theme_mounts.toml to Git.
+- Boot fails fast on unknown theme ID with remediation hint.",EPIC 0 — Installation & First-Run,Yes,P1,Backlog
+"As an operator, I want the DB rebuilt from Git on boot so that runtime is clean and fast.","- SQLite file deleted and rebuilt fresh from Git on boot.
+- TOML parse errors include file path and line/column; partial DB state is not served.
+- Rebuild completes in ≤ 2s for 1k items on 4vCPU/8GB SSD VM (document SLO).",EPIC A — Core Content Store & Boot Pipeline,Yes,P1,Backlog
+"As a content editor, I want frontmatter in TOML fenced by +++ so that formatting is consistent.","- Frontmatter must be TOML within +++ fences at top of file; body follows.
+- YAML/JSON frontmatter and volatile fields are rejected with actionable errors.
+- Required core keys validated; invalid files are excluded from routing with admin warnings.",EPIC A — Core Content Store & Boot Pipeline,Yes,P1,Backlog
+"As an editor, I want to enter commit messages so that changes are auditable.","- Commit message is required for saves in MVP; preview shown before commit.
+- On concurrent changes, commit fails with readable diff for resolve+retry.",EPIC A — Core Content Store & Boot Pipeline,Yes,P1,Backlog
+"As an editor, I want hierarchical categories by path so that URLs reflect structure.","- Frontmatter accepts categories_path: [""seg1"",""seg2""].
+- Router builds canonical URL '/{categories_path}/{slug}'.
+- Invalid segments (not in registry) block publish with helpful error.",EPIC B — Taxonomy & Routing,Yes,P1,Backlog
+"As an editor, I want flat tags so that filtering and search are richer.","- Frontmatter accepts tags_set: [""tag1"",""tag2""].
+- Unknown tags are flagged with a suggestion to add or remove.",EPIC B — Taxonomy & Routing,Yes,P1,Backlog
+"As an operator, I want old paths to 301 so that SEO is preserved.","- Changing a post slug appends previous full path to old_paths[]; requests to any old path 301.
+- Category rename/move appends to term old_paths[]; category archives 301 to canonical.",EPIC B — Taxonomy & Routing,Yes,P1,Backlog
+"As a theme developer, I want a RequestContext so that templates receive typed data.","- Context flags: is_home, is_front_page, is_single, is_archive(category|tag|author|date), is_search, is_404.
+- Single routes resolve by {type, slug} and category path.",EPIC C — Request Handling & Rendering,Yes,P1,Backlog
+"As an admin, I want to mount themes at paths so that API/feeds and site render side-by-side.","- config/theme_mounts.toml maps '/', '/api/', '/feed/' to compiled theme IDs.
+- Unknown theme IDs cause fail-fast boot with clear error; switching writes a Git commit.",EPIC C — Request Handling & Rendering,Yes,P1,Backlog
+"As a visitor, I want a default SSR theme so that pages render cleanly.","- Renders home, single, category/tag archive, search, 404.
+- Honors excerpt, featured_image, and is_sticky.
+- Templates invoke filters explicitly; missing filters do not crash render.",EPIC C — Request Handling & Rendering,Yes,P1,Backlog
+"As an integrator, I want a headless JSON theme at /api/ so that I can consume content programmatically.","- JSON endpoints mirror SSR routes with pagination, canonical URLs, and taxonomy paths.",EPIC C — Request Handling & Rendering,Yes,P1,Backlog
+"As a plugin developer, I want typed hook registration so that mistakes are caught at compile time.","- Plugins register via #[plugin] + inventory with metadata including hooks and priority.
+- Hooks execute in priority order (u8); stable within same priority.",EPIC D — Plugin System & Hooks,Yes,P1,Backlog
+"As an operator, I want timeouts and short-circuits so that slow hooks don’t harm availability.","- Per-hook timeout enforced; timeouts logged with plugin name and hook id.
+- Filters/actions can short-circuit; ctx.was_short_circuited() and reason are visible in diagnostics.",EPIC D — Plugin System & Hooks,Yes,P1,Backlog
+"As a plugin developer, I want a frontmatter service so that I can write in my namespace safely.","- Single-file update only in MVP; writes restricted to plugin.{slug}.* via core service.
+- Edits validated; invalid writes rejected with specific messages; changes committed to Git.",EPIC D — Plugin System & Hooks,Yes,P1,Backlog
+"As an admin, I want secure sessions so that the console is protected.",- HMAC-signed cookies; optional IP/User-Agent binding; short TTL enforced by middleware.,EPIC E — Admin Auth & Console,Yes,P1,Backlog
+"As an editor, I want a Markdown editor with preview so that I can edit confidently.","- Save Draft and Publish buttons perform Git commits with required manual messages.
+- Filters and shortcodes resolve on render; preview shows rendered body.",EPIC E — Admin Auth & Console,Yes,P1,Backlog
+"As an admin, I want to manage users and roles so that access is controlled.",- Create/edit users; assign roles; permissions enforced by hybrid capability model (Known + Dynamic).,EPIC E — Admin Auth & Console,Yes,P1,Backlog
+"As an editor, I want taxonomy management so that structure stays consistent.","- Create/move/rename hierarchical terms updates registry and all affected content frontmatter in one commit.
+- Manual Git edits outside admin are not auto-repaired; warnings surface in validation.",EPIC E — Admin Auth & Console,Yes,P1,Backlog
+"As an editor, I want visibility controls so that I can protect content (Public/Private/Password).","- Private requires read_private_{type}; enforced at query-time.
+- Password groups supported with Argon2id; success sets scoped HMAC cookie.",EPIC E — Admin Auth & Console,Yes,P1,Backlog
+"As an operator, I want canonical redirects so that legacy URLs work.",- Requests to any post old_paths[] or taxonomy old_paths[] 301 to canonical URLs.,EPIC F — Canonicalization,Yes,P1,Backlog
+"As a visitor, I want global search so that I can find content.","- Index built over title, slug, excerpt, rendered body, taxonomy terms.
+- Field qualifiers supported (e.g., type:post author:alice); ranked results include canonical URL and snippet.",EPIC G — Search & Query,Yes,P1,Backlog
+"As an operator, I want a config folder in Git so that settings are versioned.",- All settings under /config/; theme mounts in config/theme_mounts.toml; plugin/theme configs under /config/{plugins|themes}/...toml.,"EPIC H — Config, Roles & Capabilities",Yes,P1,Backlog
+"As an admin, I want roles with capabilities so that access is predictable.",- Enforcement of KnownCapability and DynamicCapability(String) for edit/publish/visibility operations.,"EPIC H — Config, Roles & Capabilities",Yes,P1,Backlog
+"As an operator, I want tracing and basic metrics so that I can diagnose issues.",- tracing spans cover request→context→hooks→render; histograms for TTFB; SQLite query timings; boot rebuild time.,EPIC I — Observability (minimal),Yes,P1,Backlog
+"As an operator, I want automated preflight & health checks in the wizard so that I can verify readiness.","- Preflight validates disk perms, Git connectivity, DB path, env secrets, network egress.
+- Health endpoint shows Installing|Serving|Maintenance and basic checks.",EPIC 0 — Installation & First-Run,No,P2,Backlog
+"As an operator, I want a resumable install wizard so that interruptions do not corrupt state.",- Wizard resumes at last step after interruption; re-running steps no-ops where appropriate.,EPIC 0 — Installation & First-Run,No,P2,Backlog
+"As a devops engineer, I want a CLI install mode so that I can automate provisioning.",- whisper install --new/--repo initializes non-interactively; exits non-zero on failure with machine-readable errors.,EPIC 0 — Installation & First-Run,No,P2,Backlog
+"As an editor, I want AI-generated default commit messages so that everyday edits are faster.","- If message omitted, AI proposes one; editor can override before commit.",EPIC A — Core Content Store & Boot Pipeline,No,P2,Backlog
+"As a sysadmin, I want sample Nginx reverse-proxy templates so that I can deploy behind a proxy quickly.","- Provide tested Nginx snippets for TLS termination, gzip/brotli, caching headers, and health checks.",EPIC C — Request Handling & Rendering,No,P2,Backlog
+"As a plugin developer, I want batch frontmatter updates so that migrations are one commit.",- Core service supports multi-file transactional update with conflict detection and dry-run preview.,EPIC D — Plugin System & Hooks,No,P2,Backlog
+"As an editor, I want autosave and recovery so that I do not lose work.",- Timed autosaves per user per post; recovery prompt on divergence.,EPIC E — Admin Auth & Console,No,P2,Backlog
+"As an editor, I want scheduled publishing so that posts go live automatically.",- Actor publishes at publish_at; logs and retries on failure.,EPIC F — Publishing,No,P2,Backlog
+"As a developer, I want a hook introspection panel so that I can see ordering and short-circuits.","- Admin-only dev panel lists hooks by priority, plugin, duration, and short-circuit state; disabled in prod by default.",EPIC I — Observability (developer tools),No,P2,Backlog
+"As a site owner, I want comments so that readers can discuss posts.","- Threaded comments, moderation queue, spam hooks; data stored outside content frontmatter.",EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As a subscriber, I want RSS/Atom feeds so that I can follow updates.",- Mount at /feed/; category feeds supported; robots hints via hook.,EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As a visitor, I want breadcrumbs so that I know where I am.",- Plugin exposes breadcrumb filter from categories_path; theme renders HTML.,EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As an editor, I want embeds so that rich content displays nicely.",- Whitelisted providers; sanitized HTML; cache with admin controls; internal post/page cards.,EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As an editor, I want a media manager so that images are responsive.",- Upload original; generate derivatives; metadata persisted; helper outputs <img> with srcset/sizes; regenerate action.,EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As an editor, I want editorial notifications so that I do not miss important events.",- Email/webhooks for publish/failure/lock takeover/autosave; rate-limited with retries.,EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As a visitor, I want user registration and profiles so that I can interact.","- Public sign-up (optional), email verification, password reset; CAPTCHA hooks.",EPIC J — Official Plugins (Phase 1),No,P2,Backlog
+"As an editor, I want an editorial workflow so that approvals are enforced.","- Custom statuses, assignments, checklists stored in frontmatter; publish guards block until ready; admin UI transitions.",EPIC L — Third-Party Plugins (Phase 2),No,P2,Backlog
+"As a marketer, I want SEO metadata so that pages rank better.",- Adds SEO fields; head filter emits tags; validation warnings on missing critical fields.,EPIC L — Third-Party Plugins (Phase 2),No,P2,Backlog
+"As a security admin, I want CAPTCHA/anti-spam so that bots are mitigated.",- Hooks into login/forms/comments; provider pluggability; rate-limit hooks.,EPIC L — Third-Party Plugins (Phase 2),No,P2,Backlog
+"As a user, I want shortlinks so that I can share compact URLs.",- Support /p/{id} mapped to canonical; 301 maintained.,EPIC L — Third-Party Plugins (Phase 2),No,P2,Backlog
+"As a theme developer, I want theme settings in admin so that the site is configurable.",- Per-theme config UI; persisted in config/themes/{theme_id}.toml.,EPIC M — Theme Enhancements,No,P2,Backlog
+"As an editor, I want menu locations managed via admin so that navigation is easy.",- Theme-declared locations; Git-tracked menu config; theme renders.,EPIC M — Theme Enhancements,No,P2,Backlog
+"As an editor, I want a semantic diff viewer so that I can compare revisions.",- Side-by-side diff of frontmatter and body; copy-from-revision action.,EPIC N — Ops/Tooling,No,P2,Backlog
+"As an operator, I want static pre-render so that I can push to a CDN.",- CLI prebuilds routes to disk; checksum map; invalidation list.,EPIC N — Ops/Tooling,No,P2,Backlog
+"As an operator, I want a Docker image so that deployment is straightforward.",- Official image builds Rust binary; mounts Git and SQLite volumes; includes health endpoint.,EPIC N — Ops/Tooling,No,P2,Backlog
+"As an engineer, I want CI workflows so that tests and linting run automatically.",- GitHub Actions pipeline runs fmt/clippy/tests on PR; artifacts for release builds.,EPIC N — Ops/Tooling,No,P2,Backlog
+"As a localization engineer, I want i18n plugin hooks so that translations integrate cleanly.",- Hooks for text catalog extraction and runtime locale selection; themes/plugins can provide locales.,EPIC N — Ops/Tooling,No,P2,Backlog
