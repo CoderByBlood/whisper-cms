@@ -157,6 +157,7 @@ WhisperCMS is organized into the following major containers:
 ## 📌 Component View (Core)
 
 ### Components
+
 ### Core Component Diagram
 
 ![Kernel Component Overview](./diagrams/structurizr-WhisperCMS-Component-Core.svg)
@@ -164,6 +165,7 @@ WhisperCMS is organized into the following major containers:
 #### Core Component Diagram Key
 
 ![Kernel Component Overview Key](./diagrams/structurizr-WhisperCMS-Component-Core-key.svg)
+
 - **ThemeSPI** – Interface all themes must implement
 - **AdminAPI** – REST API for AdminTheme
 - **RequestManager** – Routes all requests and controls flow
