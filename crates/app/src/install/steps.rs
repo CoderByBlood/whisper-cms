@@ -1,61 +1,133 @@
-use crate::install::progress::Msg;
-use anyhow::Result;
 use secrecy::ExposeSecret;
-use tokio::sync::broadcast::Sender;
-use types::InstallPlan;
 
-pub async fn run_all(plan: InstallPlan, tx: Sender<Msg>) -> Result<()> {
-    // 1) Generate secrets (in-memory for now)
-    tx.send(Msg::Info("generating secrets")).ok();
-    let secrets = domain::security::secrets::generate();
+use crate::install::progress::Msg;
+use types::InstallStep;
 
-    // 2) Write core config installed=false
-    tx.send(Msg::Begin("WriteCoreConfigs")).ok();
-    let mut core = domain::config::core::CoreConfig {
+pub async fn run_all_from(
+    mut plan: types::InstallPlan,
+    tx: tokio::sync::broadcast::Sender<Msg>,
+    start_from: Option<InstallStep>,
+) -> anyhow::Result<()> {
+    // Ordered steps for resume logic
+    let order = [
+        InstallStep::GenerateSecrets,
+        InstallStep::WriteCoreConfigs,
+        InstallStep::WriteAdminConfig,
+        InstallStep::MigrateDb,
+        InstallStep::SeedBaseline,
+        InstallStep::FlipInstalledTrue,
+    ];
+
+    let start_idx = start_from
+        .and_then(|s| order.iter().position(|&x| x == s).map(|i| i + 1))
+        .unwrap_or(0);
+
+    // Persist resume info after each successful step (no secrets at rest)
+    let persist_step = |step: InstallStep| -> anyhow::Result<()> {
+        let prev = infra::install::resume::load()?.unwrap_or_default();
+        let st = infra::install::resume::Resume {
+            last_step: Some(step_name(step).to_string()),
+            started_at: prev.started_at,
+            plan_fingerprint: prev.plan_fingerprint,
+        };
+        infra::install::resume::save(&st)
+    };
+
+    // Working domain config (secrets in-memory until written)
+    let mut cfg = domain::config::core::CoreConfig {
         site_name: plan.site_name.clone(),
         base_url: plan.base_url.as_str().to_string(),
         timezone: plan.timezone.clone(),
         installed: false,
-        secrets: Some(secrets),
+        secrets: None,
     };
-    infra::config::io::write_toml(infra::config::paths::core_toml(), &core)?;
-    tx.send(Msg::Success("WriteCoreConfigs")).ok();
 
-    // 3) Write admin config (hash)
-    tx.send(Msg::Begin("WriteAdminConfig")).ok();
-    let hash =
-        domain::security::password::hash_password(plan.admin_password.unwrap().expose_secret())
-            .map_err(|e| anyhow::anyhow!("hash: {e}"))?;
-    let admin = domain::config::admin::AdminConfig {
-        admin_identity: "admin".into(),
-        password_hash: hash,
-        created_at: time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "now".into()),
-    };
-    infra::config::io::write_toml(infra::config::paths::admin_toml(), &admin)?;
-    tx.send(Msg::Success("WriteAdminConfig")).ok();
+    for &step in &order[start_idx..] {
+        let _ = tx.send(Msg::Begin(step_name(step)));
 
-    // 4) Migrate DB
-    tx.send(Msg::Begin("MigrateDb")).ok();
-    // For demo: read DATABASE_URL from env or default to a local sqlite file
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://data/whispercms.db".into());
-    let pool = infra::db::pool::connect(&database_url).await?;
-    infra::db::migrate::run(&pool).await?;
-    tx.send(Msg::Success("MigrateDb")).ok();
+        match step {
+            InstallStep::GenerateSecrets => {
+                cfg.secrets = Some(domain::security::secrets::generate());
+            }
 
-    // 5) Seed baseline
-    tx.send(Msg::Begin("SeedBaseline")).ok();
-    infra::db::seed::baseline(&pool).await?;
-    tx.send(Msg::Success("SeedBaseline")).ok();
+            InstallStep::WriteCoreConfigs => {
+                infra::config::io::write_toml(infra::config::paths::core_toml(), &cfg)?;
+            }
 
-    // 6) Flip installed=true and persist
-    tx.send(Msg::Begin("FlipInstalledTrue")).ok();
-    core.installed = true;
-    infra::config::io::write_toml(infra::config::paths::core_toml(), &core)?;
-    // Clear any resume state if you later add it
-    tx.send(Msg::Success("FlipInstalledTrue")).ok();
+            InstallStep::WriteAdminConfig => {
+                // Take and zeroize the password immediately after hashing
+                let pw = plan
+                    .admin_password
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("missing admin password"))?;
+                let hash = domain::security::password::hash_password(pw.expose_secret())
+                    .map_err(|e| anyhow::anyhow!("hash: {e}"))?;
 
+                let admin = domain::config::admin::AdminConfig {
+                    admin_identity: "admin".into(),
+                    password_hash: hash,
+                    created_at: time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_else(|_| "now".into()),
+                };
+                infra::config::io::write_toml(infra::config::paths::admin_toml(), &admin)?;
+            }
+
+            InstallStep::MigrateDb => {
+                let database_url = std::env::var("DATABASE_URL")
+                    .unwrap_or_else(|_| "sqlite://data/whispercms.db".into());
+
+                if let Some(path) = database_url.strip_prefix("sqlite://") {
+                    use std::path::Path;
+                    if let Some(parent) = Path::new(path).parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+
+                let pool = infra::db::pool::connect(&database_url).await?;
+                infra::db::migrate::run(&pool).await?;
+            }
+
+            InstallStep::SeedBaseline => {
+                let database_url = std::env::var("DATABASE_URL")
+                    .unwrap_or_else(|_| "sqlite://data/whispercms.db".into());
+
+                if let Some(path) = database_url.strip_prefix("sqlite://") {
+                    use std::path::Path;
+                    if let Some(parent) = Path::new(path).parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+
+                let pool = infra::db::pool::connect(&database_url).await?;
+                infra::db::seed::baseline(&pool).await?;
+            }
+
+            InstallStep::FlipInstalledTrue => {
+                cfg.installed = true;
+                infra::config::io::write_toml(infra::config::paths::core_toml(), &cfg)?;
+            }
+        }
+
+        let _ = tx.send(Msg::Success(step_name(step)));
+        persist_step(step)?;
+    }
+
+    // Done: clear resume and signal success
+    let _ = infra::install::resume::clear();
+    let _ = tx.send(Msg::Success("Install"));
+    let _ = tx.send(Msg::Done);
     Ok(())
+}
+
+// helper (unchanged)
+fn step_name(s: InstallStep) -> &'static str {
+    match s {
+        InstallStep::GenerateSecrets => "GenerateSecrets",
+        InstallStep::WriteCoreConfigs => "WriteCoreConfigs",
+        InstallStep::MigrateDb => "MigrateDb",
+        InstallStep::SeedBaseline => "SeedBaseline",
+        InstallStep::WriteAdminConfig => "WriteAdminConfig",
+        InstallStep::FlipInstalledTrue => "FlipInstalledTrue",
+    }
 }

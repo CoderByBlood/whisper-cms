@@ -1,3 +1,6 @@
+use anyhow::Result;
+use sqlx::AnyPool;
 
-use anyhow::Result; use sqlx::AnyPool;
-pub async fn baseline(_pool: &AnyPool) -> Result<()> { Ok(()) }
+pub async fn baseline(_pool: &AnyPool) -> Result<()> {
+    Ok(())
+}

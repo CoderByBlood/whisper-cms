@@ -1,7 +1,13 @@
-use axum::{extract::{Form, State}, response::{IntoResponse, Redirect}};
+use axum::{
+    extract::{Form, State},
+    response::{IntoResponse, Redirect},
+};
 use crate::state::AppState;
 use super::plan::InstallForm;
 use std::sync::RwLockWriteGuard;
+
+use infra::install::resume;
+use types::InstallStep;
 
 pub async fn post_config(
     State(app): State<AppState>,
@@ -23,10 +29,13 @@ pub async fn post_config(
     }
 }
 
-pub async fn post_run(
-    State(app): State<AppState>,
-) -> impl IntoResponse {
-    // capture plan
+pub async fn post_run(State(app): State<AppState>) -> impl IntoResponse {
+    // Run guard: if a sender exists, someone is already running an install.
+    if app.progress.read().unwrap().is_some() {
+        return (axum::http::StatusCode::CONFLICT, "install already running").into_response();
+    }
+
+    // Get or require a plan (no plaintext persistence for password)
     let plan = {
         let plan_lock = app.plan.read().unwrap();
         match &*plan_lock {
@@ -35,30 +44,60 @@ pub async fn post_run(
         }
     };
 
-    // create a fresh broadcast channel each run
+    // Determine resume point (after a crash/restart)
+    let resume_from = match resume::load() {
+        Ok(Some(r)) => r.last_step.as_deref().and_then(parse_step),
+        _ => None,
+    };
+
+    // Create a fresh broadcast channel for this run
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
     {
         let mut cell = app.progress.write().unwrap();
         *cell = Some(tx.clone());
     }
 
-    // Spawn the coordinator; it will emit progress into `tx`
+    // Seed/overwrite resume file with a start marker (no sensitive data)
+    let start = resume::Resume {
+        last_step: resume_from.map(step_name_str).or(Some("Start".into())),
+        started_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "now".into()),
+        plan_fingerprint: format!("{}|{}|{}", plan.site_name, plan.base_url, plan.timezone),
+    };
+    let _ = resume::save(&start);
+
+    // Kick off steps (resuming if needed)
     tokio::spawn(async move {
-        use crate::install::progress::Msg::*;
-        // Start
-        let _ = tx.send(Begin("GenerateSecrets"));
-
-        // Orchestrate steps
-        if let Err(e) = crate::install::steps::run_all(plan.clone(), tx.clone()).await {
-            let _ = tx.send(Fail("Install", format!("{e}")));
-            let _ = tx.send(Done);
-            return;
+        if let Err(e) = crate::install::steps::run_all_from(plan, tx.clone(), resume_from).await {
+            let _ = tx.send(crate::install::progress::Msg::Fail("Install", format!("{e}")));
+            let _ = tx.send(crate::install::progress::Msg::Done);
         }
-
-        let _ = tx.send(Success("Install"));
-        let _ = tx.send(Done);
+        // Drop progress channel at end so a new run can start later
     });
 
-    // 204 No Content; page JS will already be listening on /install/progress
     axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+fn parse_step(s: &str) -> Option<InstallStep> {
+    use InstallStep::*;
+    match s {
+        "GenerateSecrets"   => Some(GenerateSecrets),
+        "WriteCoreConfigs"  => Some(WriteCoreConfigs),
+        "MigrateDb"         => Some(MigrateDb),
+        "SeedBaseline"      => Some(SeedBaseline),
+        "WriteAdminConfig"  => Some(WriteAdminConfig),
+        "FlipInstalledTrue" => Some(FlipInstalledTrue),
+        _ => None,
+    }
+}
+fn step_name_str(s: InstallStep) -> String {
+    match s {
+        InstallStep::GenerateSecrets   => "GenerateSecrets",
+        InstallStep::WriteCoreConfigs  => "WriteCoreConfigs",
+        InstallStep::MigrateDb         => "MigrateDb",
+        InstallStep::SeedBaseline      => "SeedBaseline",
+        InstallStep::WriteAdminConfig  => "WriteAdminConfig",
+        InstallStep::FlipInstalledTrue => "FlipInstalledTrue",
+    }.to_string()
 }

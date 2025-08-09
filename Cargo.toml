@@ -48,7 +48,7 @@ password-hash = { version = "0.5", features = ["std"] }
 argon2        = { version = "0.5", features = ["std"] }
 
 # DB (switch via crate features in infra)
-sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "any", "migrate"] }
+sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "any", "sqlite", "migrate"] }
 
 # Test
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "cookies", "rustls-tls"] }
