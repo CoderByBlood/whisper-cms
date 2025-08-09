@@ -1,6 +1,7 @@
 use anyhow::Result;
-use sqlx::AnyPool;
+use crate::db::Conn;
 
-pub async fn baseline(_pool: &AnyPool) -> Result<()> {
+pub async fn baseline(_conn: &Conn) -> Result<()> {
+    // optional: insert baseline records
     Ok(())
 }

@@ -77,30 +77,18 @@ pub async fn run_all_from(
                 let database_url = std::env::var("DATABASE_URL")
                     .unwrap_or_else(|_| "sqlite://data/whispercms.db".into());
 
-                if let Some(path) = database_url.strip_prefix("sqlite://") {
-                    use std::path::Path;
-                    if let Some(parent) = Path::new(path).parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                }
-
-                let pool = infra::db::pool::connect(&database_url).await?;
-                infra::db::migrate::run(&pool).await?;
+                let conn = infra::db::connect(&database_url).await?;
+                infra::db::migrate::run(&conn).await?;
+                infra::db::seed::baseline(&conn).await?;
             }
 
             InstallStep::SeedBaseline => {
                 let database_url = std::env::var("DATABASE_URL")
                     .unwrap_or_else(|_| "sqlite://data/whispercms.db".into());
 
-                if let Some(path) = database_url.strip_prefix("sqlite://") {
-                    use std::path::Path;
-                    if let Some(parent) = Path::new(path).parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                }
-
-                let pool = infra::db::pool::connect(&database_url).await?;
-                infra::db::seed::baseline(&pool).await?;
+                let conn = infra::db::connect(&database_url).await?;
+                infra::db::migrate::run(&conn).await?;
+                infra::db::seed::baseline(&conn).await?;
             }
 
             InstallStep::FlipInstalledTrue => {
