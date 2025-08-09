@@ -1,3 +1,44 @@
+{% extends "layout/base.html" %}
+{% block title %}Install — Running{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold mb-4">Installing…</h1>
 
-{% extends "layout/base.html" %}{% block title %}Install — Running{% endblock %}
-{% block content %}<h1 class="text-2xl font-bold">Running…</h1>{% endblock %}
+<ol id="log" class="space-y-1 text-sm">
+  <li>Starting…</li>
+</ol>
+
+<script>
+// 1) Kick off the run (idempotent server-side)
+fetch("/install/run", { method: "POST" }).catch(()=>{});
+
+// 2) Connect to SSE and append messages
+const log = document.getElementById("log");
+const es  = new EventSource("/install/progress");
+
+es.onmessage = (ev) => {
+  try {
+    const msg = JSON.parse(ev.data);
+    let text = "";
+    switch (msg.type) {
+      case "Begin": text = `▶ ${msg.data}`; break;
+      case "Ok":    text = `✔ ${msg.data}`; break;
+      case "Info":  text = `… ${msg.data}`; break;
+      case "Fail":  text = `✖ ${msg.data[0]} — ${msg.data[1]}`; break;
+      case "Done":
+        text = "🎉 Install complete"; 
+        // Optionally redirect to Done page:
+        setTimeout(() => { window.location.href = "/install/done"; }, 600);
+        break;
+      default: text = ev.data;
+    }
+    const li = document.createElement("li");
+    li.textContent = text;
+    log.appendChild(li);
+  } catch {
+    const li = document.createElement("li");
+    li.textContent = ev.data;
+    log.appendChild(li);
+  }
+};
+</script>
+{% endblock %}

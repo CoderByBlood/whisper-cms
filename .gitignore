@@ -21,6 +21,10 @@ target
 !.env.example
 !*.enc.example
 
+# ignore generated config files
+/config/admin.toml
+/config/core.toml
+
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 

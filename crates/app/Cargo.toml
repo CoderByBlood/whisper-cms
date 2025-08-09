@@ -20,7 +20,11 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 url = {workspace = true }
 serde = {workspace = true }
+serde_json = {workspace = true }
 secrecy = {workspace = true }
+tokio-stream = { workspace = true }
+futures-core = { workspace = true }
+time = { workspace = true }
 
 domain = { path = "../domain" }
 infra = { path = "../infra" }
