@@ -10,5 +10,5 @@ reqwest = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
 infra = { path = "../infra" }
-core = { path = "../core" }
+domain = { path = "../domain" }
 types = { path = "../types" }

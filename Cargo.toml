@@ -3,7 +3,7 @@
 resolver = "2"
 members = [
   "crates/app",
-  "crates/core",
+  "crates/domain",
   "crates/infra",
   "crates/actors",
   "crates/types",
@@ -37,6 +37,8 @@ tower-http = { version = "0.6.6", features = ["trace", "limit", "fs"] }
 ractor = "0.15.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-attributes = "0.1.30"
+tracing-flame = "0.2"
 
 # Security
 password-hash = { version = "0.5", features = ["std"] }

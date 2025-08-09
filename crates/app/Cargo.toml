@@ -19,7 +19,7 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 
-core = { path = "../core" }
+domain = { path = "../domain" }
 infra = { path = "../infra" }
 actors = { path = "../actors" }
 types = { path = "../types" }

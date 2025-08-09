@@ -7,7 +7,7 @@ name = "actors"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "core",
+ "domain",
  "infra",
  "ractor",
  "thiserror",
@@ -76,7 +76,7 @@ dependencies = [
  "askama_axum",
  "axum",
  "axum-extra",
- "core",
+ "domain",
  "infra",
  "tokio",
  "tower",
@@ -529,21 +529,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "password-hash",
- "rand_core 0.6.4",
- "secrecy",
- "serde",
- "thiserror",
- "time",
- "types",
- "url",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -717,6 +702,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95249b50c6c185bee49034bcb378a49dc2b5dff0be90ff6616d31d64febab05d"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "domain"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "password-hash",
+ "rand_core 0.6.4",
+ "secrecy",
+ "serde",
+ "thiserror",
+ "time",
+ "tracing",
+ "types",
+ "url",
 ]
 
 [[package]]
@@ -1340,11 +1341,12 @@ name = "infra"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "core",
+ "domain",
  "secrecy",
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "time",
  "toml",
  "tracing",
@@ -1398,7 +1400,7 @@ dependencies = [
 name = "kit"
 version = "0.1.0"
 dependencies = [
- "core",
+ "domain",
  "infra",
  "reqwest",
  "tempfile",

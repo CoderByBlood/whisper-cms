@@ -9,6 +9,6 @@ ractor = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-core = { path = "../core" }
+domain = { path = "../domain" }
 infra = { path = "../infra" }
 types = { path = "../types" }

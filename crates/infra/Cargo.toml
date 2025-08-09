@@ -17,5 +17,6 @@ secrecy = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true }
 serde_json = {workspace = true}
-core = { path = "../core" }
+tempfile = {workspace = true}
+domain = { path = "../domain" }
 types = { path = "../types" }

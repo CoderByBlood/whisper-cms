@@ -1,6 +1,6 @@
 
 [package]
-name = "core"
+name = "domain"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,4 +13,5 @@ argon2 = { workspace = true }
 password-hash = { workspace = true }
 thiserror = { workspace = true }
 rand_core = { workspace = true }
+tracing = { workspace = true }
 types = { path = "../types" }
