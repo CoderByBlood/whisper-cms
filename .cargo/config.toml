@@ -1,0 +1,4 @@
+[alias]
+build-diagrams = "make generate-diagrams"
+validate-diagrams = "make validate-diagrams"
+clean-diagrams = "make clean-diagrams"
