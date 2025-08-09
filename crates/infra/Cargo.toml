@@ -1,0 +1,21 @@
+
+[package]
+name = "infra"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+db-sqlite = ["sqlx/sqlite"]
+default = ["db-sqlite"]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+time = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+sqlx = { workspace = true }
+serde_json = {workspace = true}
+core = { path = "../core" }
+types = { path = "../types" }

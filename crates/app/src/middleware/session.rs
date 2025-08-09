@@ -1,0 +1,1 @@
+// Install-session cookie middleware stub

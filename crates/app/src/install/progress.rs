@@ -1,0 +1,1 @@
+// Progress stream stub

@@ -1,7 +1,51 @@
+
 [workspace]
 resolver = "2"
 members = [
-    "crates/whisper-cms-core",
-    "crates/whisper-cms-plugin-spi",
-    "crates/whisper-cms-theme-spi"
+  "crates/app",
+  "crates/core",
+  "crates/infra",
+  "crates/actors",
+  "crates/types",
+  "crates/kit",
 ]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2.0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9.5"
+url = {version = "2", features = ["serde"]}
+time = { version = "0.3", features = ["macros", "serde"] }
+secrecy = "0.10.3"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# Web
+axum = "0.8.4"
+axum-extra = { version = "0.10.1", features = ["cookie"] }
+askama = "0.14.0"
+askama_axum = "0.4"
+tower = "0.5"
+tower-http = { version = "0.6.6", features = ["trace", "limit", "fs"] }
+
+# Actors / telemetry
+ractor = "0.15.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Security
+password-hash = { version = "0.5", features = ["std"] }
+argon2        = { version = "0.5", features = ["std"] }
+
+# DB (switch via crate features in infra)
+sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "any", "migrate"] }
+
+# Test
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "cookies", "rustls-tls"] }
+tempfile = "3"

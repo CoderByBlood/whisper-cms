@@ -1,0 +1,25 @@
+
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+install = []
+
+[dependencies]
+axum = { workspace = true }
+axum-extra = { workspace = true }
+askama = { workspace = true }
+askama_axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+core = { path = "../core" }
+infra = { path = "../infra" }
+actors = { path = "../actors" }
+types = { path = "../types" }

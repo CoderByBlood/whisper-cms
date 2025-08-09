@@ -1,0 +1,16 @@
+
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+time = { workspace = true }
+url = { workspace = true }
+secrecy = { workspace = true }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
+thiserror = { workspace = true }
+rand_core = { workspace = true }
+types = { path = "../types" }

@@ -1,0 +1,1 @@
+// GET /install pages
