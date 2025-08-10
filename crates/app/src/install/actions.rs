@@ -1,6 +1,6 @@
 use axum::{
     extract::{Form, State},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
 };
 use crate::state::AppState;
 use super::plan::InstallForm;
@@ -12,7 +12,7 @@ use types::InstallStep;
 pub async fn post_config(
     State(app): State<AppState>,
     Form(form): Form<InstallForm>,
-) -> impl IntoResponse {
+) -> Response {
     match form.validate_into_plan() {
         Ok(plan) => {
             let mut slot: RwLockWriteGuard<'_, Option<_>> = app.plan.write().unwrap();
@@ -29,17 +29,22 @@ pub async fn post_config(
     }
 }
 
-pub async fn post_run(State(app): State<AppState>) -> impl IntoResponse {
-    // Run guard: if a sender exists, someone is already running an install.
+pub async fn post_run(State(app): State<AppState>) -> Response {
+    // Optional: already installed? Nothing to run.
+    if app.is_installed() {
+        return (axum::http::StatusCode::GONE, "already installed").into_response();
+    }
+
+    // Run guard: only one install at a time.
     if app.progress.read().unwrap().is_some() {
         return (axum::http::StatusCode::CONFLICT, "install already running").into_response();
     }
 
-    // Get or require a plan (no plaintext persistence for password)
+    // Get the plan (move it out; don't clone secrets)
     let plan = {
-        let plan_lock = app.plan.read().unwrap();
-        match &*plan_lock {
-            Some(p) => p.clone(),
+        let mut slot = app.plan.write().unwrap();
+        match slot.take() {
+            Some(p) => p,
             None => return (axum::http::StatusCode::BAD_REQUEST, "no plan set").into_response(),
         }
     };
@@ -50,7 +55,7 @@ pub async fn post_run(State(app): State<AppState>) -> impl IntoResponse {
         _ => None,
     };
 
-    // Create a fresh broadcast channel for this run
+    // Fresh broadcast channel for this run
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
     {
         let mut cell = app.progress.write().unwrap();
@@ -67,13 +72,25 @@ pub async fn post_run(State(app): State<AppState>) -> impl IntoResponse {
     };
     let _ = resume::save(&start);
 
-    // Kick off steps (resuming if needed)
+    // Spawn the run; capture app so we can flip to Serving on success
+    let app_for_task = app.clone();
     tokio::spawn(async move {
-        if let Err(e) = crate::install::steps::run_all_from(plan, tx.clone(), resume_from).await {
-            let _ = tx.send(crate::install::progress::Msg::Fail("Install", format!("{e}")));
-            let _ = tx.send(crate::install::progress::Msg::Done);
+        match crate::install::steps::run_all_from(plan, tx.clone(), resume_from).await {
+            Ok(()) => {
+                // Flip runtime state to Serving (meets acceptance #3)
+                app_for_task.set_installed(true);
+
+                // Signal SSE clients
+                let _ = tx.send(crate::install::progress::Msg::Success("Install"));
+                let _ = tx.send(crate::install::progress::Msg::Done);
+            }
+            Err(e) => {
+                let _ = tx.send(crate::install::progress::Msg::Fail("Install", format!("{e}")));
+                let _ = tx.send(crate::install::progress::Msg::Done);
+            }
         }
-        // Drop progress channel at end so a new run can start later
+        // Allow future runs: drop the sender from shared state
+        let _ = app_for_task.progress.write().unwrap().take();
     });
 
     axum::http::StatusCode::NO_CONTENT.into_response()
