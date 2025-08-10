@@ -5,17 +5,18 @@ use axum::{
 };
 use time::format_description::well_known::Rfc3339;
 
-use crate::install::progress::Msg;
-use crate::install::steps::{parse_step, run_all_from, step_name};
-use crate::phase::Phase;
-use crate::state::AppState;
+use crate::{
+    phase::Phase,
+    plan::InstallForm,
+    progress::Msg,
+    state::OperState,
+    steps::{parse_step, run_all_from, step_name},
+};
 use infra::install::resume;
-
-use super::plan::InstallForm;
 
 /// Accept form input, validate, and stage the plan (no plaintext persisted beyond memory).
 #[tracing::instrument(skip_all)]
-pub async fn post_config(State(app): State<AppState>, Form(form): Form<InstallForm>) -> Response {
+pub async fn post_config(State(app): State<OperState>, Form(form): Form<InstallForm>) -> Response {
     match form.validate_into_plan() {
         Ok(plan) => {
             // Overwrite any previous plan; avoid cloning secrets.
@@ -41,7 +42,7 @@ pub async fn post_config(State(app): State<AppState>, Form(form): Form<InstallFo
 /// Start (or resume) the installation run.
 /// Assumes we're in the Install phase (router is only mounted then).
 #[tracing::instrument(skip_all)]
-pub async fn post_run(State(app): State<AppState>) -> Response {
+pub async fn post_run(State(app): State<OperState>) -> Response {
     // Single-run guard
     if app.progress.read().unwrap().is_some() {
         return (StatusCode::CONFLICT, "install already running").into_response();

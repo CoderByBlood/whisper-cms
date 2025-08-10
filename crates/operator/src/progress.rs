@@ -17,7 +17,7 @@ pub enum Msg {
 
 #[tracing::instrument(skip_all)]
 pub async fn sse_progress(
-    axum::extract::State(app): axum::extract::State<crate::state::AppState>,
+    axum::extract::State(app): axum::extract::State<crate::state::OperState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // If no run in progress, create a dummy channel and emit a short note.
     let rx = match app.progress.read().unwrap().as_ref() {

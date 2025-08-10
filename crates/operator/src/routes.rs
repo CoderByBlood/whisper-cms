@@ -1,4 +1,3 @@
-use crate::state::AppState;
 use askama::Template;
 use askama_web::WebTemplate;
 use axum::{
@@ -8,6 +7,8 @@ use axum::{
 };
 
 use infra::install::resume;
+
+use crate::state::OperState;
 
 #[derive(Template, WebTemplate)]
 #[template(path = "page/install_config.html")]
@@ -29,7 +30,7 @@ struct Maint;
 /// - If a run is resumable/active -> jump to /install/run
 /// - Else -> start at /install/config
 #[tracing::instrument(skip_all)]
-pub async fn get_welcome(State(app): State<AppState>) -> Response {
+pub async fn get_welcome(State(app): State<OperState>) -> Response {
     tracing::debug!("welcome");
     let has_active = app.progress.read().unwrap().is_some();
     let has_resume = resume::load().ok().flatten().is_some();
@@ -49,19 +50,19 @@ pub async fn get_maint() -> Response {
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn get_config(State(_): State<AppState>) -> Response {
+pub async fn get_config(State(_): State<OperState>) -> Response {
     tracing::debug!("configure");
     InstallConfig.into_response()
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn get_run(State(_): State<AppState>) -> Response {
+pub async fn get_run(State(_): State<OperState>) -> Response {
     tracing::debug!("run");
     InstallRun.into_response()
 }
 
 #[tracing::instrument(skip_all)]
-pub async fn get_done(State(_): State<AppState>) -> Response {
+pub async fn get_done(State(_): State<OperState>) -> Response {
     tracing::debug!("done");
     // This page is reachable only during the Install phase; once we transition to Serve,
     // the entire install router is unmounted (no extra guards here).

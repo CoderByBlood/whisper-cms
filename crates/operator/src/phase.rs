@@ -4,12 +4,12 @@ use tokio::sync::RwLock;
 use tower::ServiceExt as TowerServiceExt;
 use tower_http::services::ServeDir; // for .oneshot()
 
-use crate::install::{
+use crate::{
     actions::{post_config, post_run},
     progress::sse_progress,
     routes::{get_config, get_done, get_home, get_maint, get_run, get_welcome},
 };
-use crate::state::AppState;
+use crate::state::OperState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -27,7 +27,7 @@ enum Handler {
 
 impl Handler {
     #[tracing::instrument(skip_all)]
-    async fn router(&self, app: &AppState) -> Router {
+    async fn router(&self, app: &OperState) -> Router {
         match self {
             Handler::Noop => Router::new(),
             Handler::Boot => boot_router(),
@@ -36,11 +36,11 @@ impl Handler {
         }
     }
     #[tracing::instrument(skip_all)]
-    async fn on_enter(&mut self, _app: &AppState) -> anyhow::Result<()> {
+    async fn on_enter(&mut self, _app: &OperState) -> anyhow::Result<()> {
         Ok(())
     }
     #[tracing::instrument(skip_all)]
-    async fn on_exit(&mut self, _app: &AppState) -> anyhow::Result<()> {
+    async fn on_exit(&mut self, _app: &OperState) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -54,7 +54,7 @@ fn boot_router() -> Router {
 }
 
 #[tracing::instrument(skip_all)]
-fn install_router(app: &AppState) -> Router {
+fn install_router(app: &OperState) -> Router {
     Router::new()
         .nest_service("/static", ServeDir::new("crates/app/static"))
         .route("/install", get(get_welcome).post(post_run))
@@ -68,7 +68,7 @@ fn install_router(app: &AppState) -> Router {
 }
 
 #[tracing::instrument(skip_all)]
-fn serve_router(app: &AppState) -> Router {
+fn serve_router(app: &OperState) -> Router {
     Router::new()
         .nest_service("/static", ServeDir::new("crates/app/static"))
         .route("/", get(get_home))
@@ -91,7 +91,7 @@ impl PhaseState {
 
     /// One-way swap of the active router; no dynamic dispatch; no awaits under the lock.
     #[tracing::instrument(skip_all)]
-    pub async fn transition_to(&self, app: &AppState, next: Phase) -> anyhow::Result<()> {
+    pub async fn transition_to(&self, app: &OperState, next: Phase) -> anyhow::Result<()> {
         // Swap to Noop quickly, then drop the lock before awaiting.
         let mut guard = self.handler.write().await;
         let mut old = std::mem::replace(&mut *guard, Handler::Noop);
@@ -115,7 +115,7 @@ impl PhaseState {
     #[tracing::instrument(skip_all)]
     pub async fn dispatch(
         &self,
-        app: AppState,
+        app: OperState,
         req: axum::http::Request<axum::body::Body>,
     ) -> axum::response::Response {
         let router = {

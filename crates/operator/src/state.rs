@@ -1,21 +1,22 @@
-use crate::install::progress::Msg;
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast::Sender;
 
+use crate::{phase::PhaseState, progress::Msg};
+
 #[derive(Clone)]
-pub struct AppState {
+pub struct OperState {
     pub plan: Arc<RwLock<Option<types::InstallPlan>>>,
     pub progress: Arc<RwLock<Option<Sender<Msg>>>>,
-    pub phase: Arc<crate::phase::PhaseState>, // NEW
+    pub phase: Arc<PhaseState>,
 }
 
-impl Default for AppState {
+impl OperState {
     #[tracing::instrument(skip_all)]
-    fn default() -> Self {
+    pub fn new() -> Self {
         Self {
             plan: Arc::new(RwLock::new(None)),
             progress: Arc::new(RwLock::new(None)),
-            phase: crate::phase::PhaseState::new(),
+            phase: PhaseState::new(),
         }
     }
 }
