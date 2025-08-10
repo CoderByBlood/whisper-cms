@@ -1,13 +1,16 @@
 use std::fs::File;
 
-use axum::{middleware::from_fn_with_state, ServiceExt}; // <-- bring the ext trait into scope
+use axum::{body::Body, middleware::from_fn, ServiceExt as _}; // <-- bring the ext trait into scope
 use tower::Layer;
 use tower_http::normalize_path::NormalizePathLayer;
 use tracing_flame::FlameLayer;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
 
+use crate::phase::Phase;
+
 mod install;
 mod middleware;
+mod phase;
 mod router;
 mod state;
 
@@ -33,19 +36,29 @@ async fn main() -> anyhow::Result<()> {
 
     let probed = install::probe::probe()?;
     let app_state = state::AppState::default();
-    if matches!(probed, types::InstallState::Complete) {
-        app_state.set_installed(true);
+    match probed {
+        types::InstallState::Complete => {
+            app_state
+                .phase
+                .transition_to(&app_state, Phase::Serve)
+                .await?;
+        }
+        _ => {
+            app_state
+                .phase
+                .transition_to(&app_state, Phase::Install)
+                .await?;
+        }
     }
 
     let routes = router::build(app_state.clone());
 
-    // 1) Maintenance gate (inner)
-    let routes = from_fn_with_state(app_state.clone(), middleware::maint::gate).layer(routes);
+    // 1) Anything first (even a no-op) locks in Body type
+    let routes = from_fn(pass_through).layer(routes);
 
-    // 2) Normalize paths (outermost; trims "/install/" → "/install" BEFORE routing)
+    // 2) Then normalize (runs first at runtime)
     let routes = NormalizePathLayer::trim_trailing_slash().layer(routes);
 
-    // 3) Convert to MakeService (method-style; no turbofish)
     let app = routes.into_make_service();
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
@@ -55,4 +68,10 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn pass_through(req: axum::http::Request<Body>, next: axum::middleware::Next) 
+    -> axum::response::Response 
+{ 
+    next.run(req).await 
 }

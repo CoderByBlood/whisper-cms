@@ -5,9 +5,22 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
-use infra::install::resume;
 
 use crate::state::AppState;
+use infra::install::resume;
+
+/// We no longer render a welcome placeholder:
+/// - If a run is resumable/active -> jump to /install/run
+/// - Else -> start at /install/config
+pub async fn get_welcome(State(app): State<AppState>) -> Response {
+    let has_active = app.progress.read().unwrap().is_some();
+    let has_resume = resume::load().ok().flatten().is_some();
+
+    if has_active || has_resume {
+        return Redirect::to("/install/run").into_response();
+    }
+    Redirect::to("/install/config").into_response()
+}
 
 #[derive(Template, WebTemplate)]
 #[template(path = "page/install_config.html")]
@@ -25,40 +38,26 @@ struct InstallDone;
 #[template(path = "page/maint.html")]
 struct Maint;
 
-pub async fn get_welcome(State(app): State<AppState>) -> Response {
-    tracing::debug!("GET_WELCOME");
-    if app.is_installed() {
-        return Redirect::to("/").into_response();
-    }
-
-    // If a run is active or a resume file exists, continue the run
-    if app.progress.read().unwrap().is_some() || resume::load().ok().flatten().is_some() {
-        return Redirect::to("/install/run").into_response();
-    }
-
-    // Otherwise, start the wizard at the config step
-    Redirect::to("/install/config").into_response()
+/// Maintenance page used during the Install phase.
+/// Always returns 503 so proxies/CDNs don’t cache it as a success.
+pub async fn get_maint() -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, Maint).into_response()
 }
-pub async fn get_config() -> Response {
-    tracing::debug!("GET_CONFIG");
+
+pub async fn get_config(State(_): State<AppState>) -> Response {
     InstallConfig.into_response()
 }
-pub async fn get_run() -> Response {
-    tracing::debug!("GET_RUN");
+
+pub async fn get_run(State(_): State<AppState>) -> Response {
     InstallRun.into_response()
 }
-pub async fn get_done() -> Response {
-    tracing::debug!("GET_DONE");
+
+pub async fn get_done(State(_): State<AppState>) -> Response {
+    // This page is reachable only during the Install phase; once we transition to Serve,
+    // the entire install router is unmounted (no extra guards here).
     InstallDone.into_response()
 }
 
-pub async fn get_home(State(app): State<AppState>) -> Response {
-    tracing::debug!("GET_HOME");
-    if app.is_installed() {
-        // Serving mode – swap this out for your real homepage later.
-        "WhisperCMS is running.".into_response()
-    } else {
-        // Installing – show maintenance page with 503.
-        (StatusCode::SERVICE_UNAVAILABLE, Maint).into_response()
-    }
+pub async fn get_home() -> Response {
+    "WhisperCMS is running.".into_response()
 }

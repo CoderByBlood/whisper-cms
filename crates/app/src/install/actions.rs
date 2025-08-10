@@ -1,51 +1,56 @@
 use axum::{
     extract::{Form, State},
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
 };
+use time::format_description::well_known::Rfc3339;
+
+use crate::install::progress::Msg;
+use crate::install::steps::{parse_step, run_all_from, step_name};
+use crate::phase::Phase;
 use crate::state::AppState;
-use super::plan::InstallForm;
-use std::sync::RwLockWriteGuard;
-
 use infra::install::resume;
-use types::InstallStep;
 
-pub async fn post_config(
-    State(app): State<AppState>,
-    Form(form): Form<InstallForm>,
-) -> Response {
+use super::plan::InstallForm;
+
+/// Accept form input, validate, and stage the plan (no plaintext persisted beyond memory).
+pub async fn post_config(State(app): State<AppState>, Form(form): Form<InstallForm>) -> Response {
     match form.validate_into_plan() {
         Ok(plan) => {
-            let mut slot: RwLockWriteGuard<'_, Option<_>> = app.plan.write().unwrap();
-            *slot = Some(plan);
+            // Overwrite any previous plan; avoid cloning secrets.
+            app.plan.write().unwrap().replace(plan);
             Redirect::to("/install/run").into_response()
         }
         Err(errs) => {
-            let body = format!(
-                "Configuration errors:\n{}",
-                errs.into_iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n")
-            );
-            (axum::http::StatusCode::BAD_REQUEST, body).into_response()
+            // Keep it simple for now; you can render a template with errors later.
+            let body = errs
+                .into_iter()
+                .map(|e| format!("- {e}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Configuration errors:\n{body}"),
+            )
+                .into_response()
         }
     }
 }
 
+/// Start (or resume) the installation run.
+/// Assumes we're in the Install phase (router is only mounted then).
 pub async fn post_run(State(app): State<AppState>) -> Response {
-    // Optional: already installed? Nothing to run.
-    if app.is_installed() {
-        return (axum::http::StatusCode::GONE, "already installed").into_response();
-    }
-
-    // Run guard: only one install at a time.
+    // Single-run guard
     if app.progress.read().unwrap().is_some() {
-        return (axum::http::StatusCode::CONFLICT, "install already running").into_response();
+        return (StatusCode::CONFLICT, "install already running").into_response();
     }
 
-    // Get the plan (move it out; don't clone secrets)
+    // Move the plan out (preserve secret ownership; do not clone).
     let plan = {
         let mut slot = app.plan.write().unwrap();
         match slot.take() {
             Some(p) => p,
-            None => return (axum::http::StatusCode::BAD_REQUEST, "no plan set").into_response(),
+            None => return (StatusCode::BAD_REQUEST, "no plan set").into_response(),
         }
     };
 
@@ -57,64 +62,46 @@ pub async fn post_run(State(app): State<AppState>) -> Response {
 
     // Fresh broadcast channel for this run
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
-    {
-        let mut cell = app.progress.write().unwrap();
-        *cell = Some(tx.clone());
-    }
+    app.progress.write().unwrap().replace(tx.clone());
 
     // Seed/overwrite resume file with a start marker (no sensitive data)
+    let started_at = time::OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "now".into());
+
     let start = resume::Resume {
-        last_step: resume_from.map(step_name_str).or(Some("Start".into())),
-        started_at: time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "now".into()),
+        last_step: resume_from
+            .map(|s| step_name(s).into())
+            .or(Some("Start".into())),
+        started_at,
+        // lightweight fingerprint; avoids secrets
         plan_fingerprint: format!("{}|{}|{}", plan.site_name, plan.base_url, plan.timezone),
     };
     let _ = resume::save(&start);
 
-    // Spawn the run; capture app so we can flip to Serving on success
+    // Kick off steps (resuming if needed)
     let app_for_task = app.clone();
     tokio::spawn(async move {
-        match crate::install::steps::run_all_from(plan, tx.clone(), resume_from).await {
+        match run_all_from(plan, tx.clone(), resume_from).await {
             Ok(()) => {
-                // Flip runtime state to Serving (meets acceptance #3)
-                app_for_task.set_installed(true);
+                let _ = tx.send(Msg::Success("Install"));
+                let _ = tx.send(Msg::Done);
 
-                // Signal SSE clients
-                let _ = tx.send(crate::install::progress::Msg::Success("Install"));
-                let _ = tx.send(crate::install::progress::Msg::Done);
+                // 🔁 One-way, no-branch swap to the Serving router
+                let _ = app_for_task
+                    .phase
+                    .transition_to(&app_for_task, Phase::Serve)
+                    .await;
             }
             Err(e) => {
-                let _ = tx.send(crate::install::progress::Msg::Fail("Install", format!("{e}")));
-                let _ = tx.send(crate::install::progress::Msg::Done);
+                let _ = tx.send(Msg::Fail("Install", format!("{e}")));
+                let _ = tx.send(Msg::Done);
             }
         }
-        // Allow future runs: drop the sender from shared state
+
+        // Allow future runs only if we ever reintroduce them (kept for symmetry)
         let _ = app_for_task.progress.write().unwrap().take();
     });
 
-    axum::http::StatusCode::NO_CONTENT.into_response()
-}
-
-fn parse_step(s: &str) -> Option<InstallStep> {
-    use InstallStep::*;
-    match s {
-        "GenerateSecrets"   => Some(GenerateSecrets),
-        "WriteCoreConfigs"  => Some(WriteCoreConfigs),
-        "MigrateDb"         => Some(MigrateDb),
-        "SeedBaseline"      => Some(SeedBaseline),
-        "WriteAdminConfig"  => Some(WriteAdminConfig),
-        "FlipInstalledTrue" => Some(FlipInstalledTrue),
-        _ => None,
-    }
-}
-fn step_name_str(s: InstallStep) -> String {
-    match s {
-        InstallStep::GenerateSecrets   => "GenerateSecrets",
-        InstallStep::WriteCoreConfigs  => "WriteCoreConfigs",
-        InstallStep::MigrateDb         => "MigrateDb",
-        InstallStep::SeedBaseline      => "SeedBaseline",
-        InstallStep::WriteAdminConfig  => "WriteAdminConfig",
-        InstallStep::FlipInstalledTrue => "FlipInstalledTrue",
-    }.to_string()
+    StatusCode::NO_CONTENT.into_response()
 }

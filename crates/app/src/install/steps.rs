@@ -109,7 +109,7 @@ pub async fn run_all_from(
 }
 
 // helper (unchanged)
-fn step_name(s: InstallStep) -> &'static str {
+pub fn step_name(s: InstallStep) -> &'static str {
     match s {
         InstallStep::GenerateSecrets => "GenerateSecrets",
         InstallStep::WriteCoreConfigs => "WriteCoreConfigs",
@@ -117,5 +117,50 @@ fn step_name(s: InstallStep) -> &'static str {
         InstallStep::SeedBaseline => "SeedBaseline",
         InstallStep::WriteAdminConfig => "WriteAdminConfig",
         InstallStep::FlipInstalledTrue => "FlipInstalledTrue",
+    }
+}
+
+// Parse a stored (or user-provided) step name back into an InstallStep.
+// Accepts the canonical CamelCase plus common aliases.
+pub fn parse_step(name: &str) -> Option<InstallStep> {
+    let raw = name.trim();
+
+    // Fast path: exact canonical names (what we write via `step_name`)
+    match raw {
+        "GenerateSecrets"   => return Some(InstallStep::GenerateSecrets),
+        "WriteCoreConfigs"  => return Some(InstallStep::WriteCoreConfigs),
+        "WriteAdminConfig"  => return Some(InstallStep::WriteAdminConfig),
+        "MigrateDb"         => return Some(InstallStep::MigrateDb),
+        "SeedBaseline"      => return Some(InstallStep::SeedBaseline),
+        "FlipInstalledTrue" => return Some(InstallStep::FlipInstalledTrue),
+        "Start"             => return None, // treat "Start" as no specific step (fresh run)
+        _ => {}
+    }
+
+    // Flexible aliases: kebab/snake/collapsed + case-insensitive
+    let key = raw
+        .to_ascii_lowercase()
+        .replace([' ', '_'], "-");        // normalize separators
+
+    match key.as_str() {
+        "generatesecrets" | "generate-secrets" => Some(InstallStep::GenerateSecrets),
+
+        "writecoreconfigs" | "write-core-configs" | "core" | "core-configs" =>
+            Some(InstallStep::WriteCoreConfigs),
+
+        "writeadminconfig" | "write-admin-config" | "admin" | "admin-config" =>
+            Some(InstallStep::WriteAdminConfig),
+
+        "migratedb" | "migrate-db" | "migrate" | "db-migrate" =>
+            Some(InstallStep::MigrateDb),
+
+        "seedbaseline" | "seed-baseline" | "seed" | "baseline" =>
+            Some(InstallStep::SeedBaseline),
+
+        "flipinstalledtrue" | "flip-installed-true" | "finalize" | "complete" | "done" =>
+            Some(InstallStep::FlipInstalledTrue),
+
+        "start" => None,
+        _ => None,
     }
 }
