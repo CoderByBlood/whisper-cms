@@ -1,15 +1,13 @@
 # WhisperCMS Architecture
 
 This document describes the architecture of **WhisperCMS**, a multi-site,
-Rust-based content management system (CMS) with a Wordpress inspired plugin and
-theme system.
+Rust-based content management system (CMS) with a plugin and theme system
+inspired by WordPress, but designed with Rust's safety, performance, and modern
+tooling in mind.
 
 ---
 
 ## 📜 Introduction to the C4 Model
-
-This architecture document is written using the **C4 Model**, a simple,
-structured approach to documenting software architecture.
 
 ### ✅ What is the C4 Model?
 
@@ -29,7 +27,7 @@ system is built and how it works**, from high-level goals to low-level
 internals.
 
 👉 For more details, see the official site:  
-🔗 [https://c4model.com/](https://c4model.com/)
+🔗 [Learn more about the C4 Model](https://c4model.com/)
 
 ### ✅ Why Use the C4 Model in Open Source?
 
@@ -61,19 +59,19 @@ contributors—to understand how WhisperCMS works and how to extend it.
 
 ---
 
-## Naming Conventions
+## 📌 Naming Conventions
 
-- Roles are lowercase
-- Systems, contains, and components are capitalized
-- Relationship should be verbs and lowercase
-- Use `*SPI` suffixes for system, containers, and components that specify
-  interfaces that 3rd parties must implement
-- Use `*API` suffixes for systems, containers, and components that implement
-  contracts
+- Use lowercase for roles (e.g. `admin`, `su`).
+- Capitalize Systems, Containers, and Components.
+- Use `*SPI` for interfaces, `*API` for implementing contracts.
+- Use verbs for relationships.
+- Use `ThemeSPI`, `AdminAPI`, etc., to clarify purpose.
 
 ---
 
 ## 📌 System Context
+
+### System Overview
 
 ### System Overview Diagram
 
@@ -85,22 +83,25 @@ contributors—to understand how WhisperCMS works and how to extend it.
 
 **Actors:**
 
-- **Admin**: A human who manages content, sites, users, plugins, and themes.
+- **admin** – Manages content, users, themes, plugins.
+- **su** – Starts the system and performs first-time setup.
 
-**Software System:**
+**System:**
 
-- **WhisperCMS**: A multi-site Rust CMS that supports theming, plugins, and rich
-  administrative features.
+- **WhisperCMS** – A plugin/theme-enabled CMS written in Rust.
 
-**Main External System:**
+**External Systems:**
 
-- **Nginx**: Acts as a secure reverse proxy for HTTPS traffic.
+- **Nginx** – External HTTPS reverse proxy.
+- **LibSQL** – Embedded database for structured data.
 
 ---
 
 ## 📌 Container Diagram
 
-WhisperCMS is composed of several **containers**, each with a clear role:
+### Overview
+
+WhisperCMS is organized into the following major containers:
 
 ### Containers Diagram
 
@@ -110,211 +111,162 @@ WhisperCMS is composed of several **containers**, each with a clear role:
 
 ![Containers Overview Key](./diagrams/structurizr-WhisperCMS-Containers-key.svg)
 
-### 1️⃣ Kernel
+1. **Core** – The Rust backend, managing plugins, themes, static/dynamic
+   content.
+2. **AdminTheme** – A JavaScript SPA used for administration.
+3. **Nginx** – The secure HTTPS reverse proxy.
+4. **LibSQL** – The embedded SQL database.
 
-> The core Rust server application that handles all dynamic CMS logic.
+### 📦 Core
 
-**Responsibilities:**
+- Written in **Rust**
+- Contains key services:
+  - `RequestManager` – Main router, delegates to internal services
+  - `ContentService` – Handles dynamic page rendering
+  - `StaticService` – Serves static content (e.g. themes, admin SPA)
+  - `StartupManager` – Coordinates setup and initialization
+  - `ThemeManager` – Fetches themes from Git
+  - `DataService` – Executes SQL and migrations
+- Uses:
+  - `Pingora` – For static file serving
+  - `Git2` – Git operations for themes
+  - `Axum` – For routing dynamic requests
+  - `Argon2` – For config encryption
 
-- Plugin and theme interfaces
-- Admin API
-- Serving static assets
-- Configuration management
-- Initial setup
-- Routing requests
-- Managing themes
+### 📦 AdminTheme
 
-**Key technologies:**
+- Built as a **SPA** in JavaScript
+- Served by `StaticService`
+- Implements the `ThemeSPI`
+- Communicates via `AdminAPI`
 
-- Rust
-- Async runtime
-- Libraries: Pingora, Git2
+### 📦 Nginx
 
----
+- External reverse proxy
+- Handles TLS termination
+- Proxies admin and content requests to `RequestManager`
 
-### 2️⃣ AdminTheme
+### 📦 LibSQL
 
-> The administrative user experience for site management.
-
-**Characteristics:**
-
-- Implemented as an SPA (Single-Page Application) in JavaScript.
-- Interacts with the Kernel via the AdminAPI.
-- Implements the shared ThemeSPI.
-
-**Responsibilities:**
-
-- Providing UI for content management
-- Managing plugins, themes, and users
-
----
-
-### 3️⃣ Nginx
-
-> An external reverse proxy used for secure HTTPS access.
-
-**Responsibilities:**
-
-- TLS termination
-- Routing requests to the Kernel
-- Serving admin console securely
+- Used by `DataService`
+- Provides a fast, embedded SQL engine
+- Supports full-text search, JSON, and high safety guarantees
 
 ---
 
-## 📌 Detailed Containers & Relationships
+## 📌 Component View (Core)
 
-### ✅ Kernel
+### Components
 
-The _Kernel_ is the heart of WhisperCMS. It includes:
+### Core Component Diagram
 
-### Kernel Component Diagram
+![Kernel Component Overview](./diagrams/structurizr-WhisperCMS-Component-Core.svg)
 
-![Kernel Component Overview](./diagrams/structurizr-WhisperCMS-Component-Kernel.svg)
+#### Core Component Diagram Key
 
-#### Kernel Component Diagram Key
+![Kernel Component Overview Key](./diagrams/structurizr-WhisperCMS-Component-Core-key.svg)
 
-![Kernel Component Overview Key](./diagrams/structurizr-WhisperCMS-Component-Kernel-key.svg)
+- **ThemeSPI** – Interface all themes must implement
+- **AdminAPI** – REST API for AdminTheme
+- **RequestManager** – Routes all requests and controls flow
+- **StaticService** – Serves static files using Pingora
+- **ContentService** – Renders pages, routes using Axum
+- **StartupManager** – Handles initial config and installation flow
+- **DataService** – Executes SQL statements via LibSQL
+- **ThemeManager** – Downloads and manages themes from Git
 
-- **ThemeSPI** _(interface)_
+### Libraries
 
-  - Contract that all themes must implement.
-
-- **AdminAPI** _(api)_
-
-  - The HTTP API used by the AdminTheme.
-
-- **StaticService** _(service)_
-
-  - Serves static content like the Admin UI bundle or theme assets.
-
-- **SettingsService** _(service)_
-
-  - Manages configuration not stored in the database.
-
-- **SetupService** _(service)_
-
-  - Handles first-time setup and initialization.
-
-- **RequestManager** _(service, router)_
-
-  - Central router for all content requests.
-  - Coordinates services and checks settings.
-
-- **ThemeManager** _(service)_
-
-  - CRUD operations for themes (pulled from git).
-
-- **Pingora** _(library)_
-
-  - High-performance Rust-based reverse proxy used as an internal library.
-
-- **Git2** _(library)_
-  - Rust bindings for in-process Git operations.
-
-**Kernel Relationships:**
-
-- SetupService → ThemeManager (loads themes during setup)
-- RequestManager → SettingsService (checks settings)
-- RequestManager → SetupService (starts setup flow)
-- RequestManager → StaticService (forwards static requests)
-- StaticService → Pingora (uses for high-performance serving)
-- ThemeManager → Git2 (for managing themes from Git)
+- **Pingora** – Used internally by StaticService
+- **Git2** – Used by ThemeManager
+- **Axum** – Used by ContentService
+- **Argon2** – Used by StartupManager for encryption
 
 ---
 
-### ✅ AdminTheme
+## 📌 Dynamic Views
 
-Represents the **Admin UI** for site management.
+### System Startup Diagram
 
-### AdminTheme Component Diagram
+![System Startup](./diagrams/structurizr-WhisperCMS-Startup-Sequence.svg)
 
-![AdminTheme Component Overview](./diagrams/structurizr-WhisperCMS-Component-AdminTheme.svg)
+#### System Startup Diagram Key
 
-#### AdminTheme Component Diagram Key
+![System Startup Key](./diagrams/structurizr-WhisperCMS-Startup-Sequence-key.svg)
 
-![AdminTheme Component Overview Key](./diagrams/structurizr-WhisperCMS-Component-AdminTheme-key.svg)
+#### System Startup UML Diagram
 
-**Components:**
+![System Startup UML](./diagrams/UML-WhisperCMS-Startup-Sequence.svg)
 
-- **AdminSPA** (Javascript UI)
-  - Single-Page App for managing content, plugins, themes, and sites.
+### System Installation Diagram
 
-**Relationships:**
+![System Installation](./diagrams/structurizr-WhisperCMS-Installation-Sequence.svg)
 
-- AdminTheme → ThemeSPI (implements)
-- AdminTheme → AdminAPI (calls for data)
-- StaticService → AdminSPA (serves static assets)
-- ThemeManager → AdminTheme (installs themes)
+#### System Installation Diagram Key
 
----
+![System Installation Key](./diagrams/structurizr-WhisperCMS-Installation-Sequence-key.svg)
 
-### ✅ Nginx
+#### System Installation UML Diagram
 
-External reverse proxy used to secure and route traffic.
-
-**Responsibilities:**
-
-- Terminates HTTPS connections from Admins.
-- Forwards requests to Kernel's RequestManager.
-- Returns responses securely to the Admin.
-
-**Relationships:**
-
-- Admin → Nginx ("uses console securely" via HTTPS)
-- Nginx → RequestManager (forwards requests)
-- RequestManager → Nginx (returns responses)
+![System Installation UML](./diagrams/UML-WhisperCMS-Installation-Sequence.svg)
 
 ---
 
-## 📌 📜 Architecture Highlights
+## 📌 Key Design Decisions
 
-✅ **Reverse Proxy Layer:**
+### Plugins and Themes
 
-- Nginx for TLS, routing, and security.
-- Pingora used internally in StaticService for high-performance serving.
+- Loaded via **crates.io** using naming conventions
+- Must implement `*SPI` interfaces
+- Statically compiled for **maximum safety**
+- Additions require **rebuild and restart**
 
-✅ **Admin UI:**
+### Configuration
 
-- Served as static SPA.
-- Consumes AdminAPI exposed by the Kernel.
+- StartupManager loads config using Argon2 for encryption
+- Plugins and themes provide configuration via code, not files
+- Updates only affect **new incoming requests**
 
-✅ **Rust Kernel:**
+### Database
 
-- Core CMS logic.
-- Static file serving, plugin/theme management.
-- Extensible via interfaces (ThemeSPI).
+- Uses **LibSQL**, a fork of SQLite with:
+  - Embedded transactions
+  - Native JSON
+  - Full-text search
+  - Compile-time safety with SQLx
 
-✅ **Git Integration:**
+### i18n/l10n
 
-- Uses Git2 for fetching themes from repositories.
-
-✅ **Separation of Concerns:**
-
-- AdminTheme (UI)
-- Kernel (API and services)
-- Nginx (proxy)
+- Provided via an **official plugin**
+- Balances flexibility and user experience
+- Not built-in to avoid unnecessary complexity for mono-lingual users
 
 ---
 
-## 📌 📜 Technology Stack Summary
+## 📌 Technology Summary
 
-- **Rust**: Core Kernel, StaticService, AdminAPI, Plugin/Theme management.
-- **Javascript**: Admin SPA.
-- **Nginx**: Reverse Proxy, HTTPS termination.
-- **Git2**: Managing themes from Git.
-- **Pingora**: High-performance static file serving (Rust library integration).
+| Layer          | Technology     |
+| -------------- | -------------- |
+| Web Proxy      | Nginx          |
+| Static Serving | Pingora (Rust) |
+| Dynamic Routes | Axum (Rust)    |
+| Database       | LibSQL         |
+| SCM            | Git2 (Rust)    |
+| Encryption     | Argon2         |
+| Frontend       | Vue 3 SPA      |
+| Plugin Host    | Rust Crates    |
 
 ---
 
 ## 📌 Conclusion
 
-WhisperCMS is architected for:
+WhisperCMS is:
 
-⭐ Secure, multi-site administration  
-⭐ Plugin and theme extensibility  
-⭐ High-performance static and dynamic serving  
-⭐ Clear separation between UI and API  
-⭐ Modern Rust design with powerful libraries
+- Built for **safety-first** using static typing and Rust
+- Optimized for **performance** using minimal, embedded services
+- Extensible via **compile-time plugins/themes**
+- Designed for **usability** across admin, author, and editor roles
 
-This design balances **developer experience**, **performance**, and
-**flexibility** for running multiple CMS-powered sites securely and efficiently.
+By using C4 and modern architectural principles, WhisperCMS offers a
+well-documented, maintainable, and secure platform for developers and end users
+alike.

@@ -1,0 +1,1 @@
+// InstallError stub

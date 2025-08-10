@@ -10,8 +10,24 @@ target
 .env
 .env.*
 
+# Ignore encrypted files
+*.enc
+
+# Ignore flame folded files
+*.folded
+*flamegraph.svg
+
 # But don't ignore example files
 !.env.example
+!*.enc.example
+
+# ignore generated config files
+/config/admin.toml
+/config/core.toml
+/config/install.json
+
+# ignore operational data files
+/data/
 
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb

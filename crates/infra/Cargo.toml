@@ -1,0 +1,18 @@
+
+[package]
+name = "infra"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+time = { workspace = true }
+secrecy = { workspace = true }
+tracing = { workspace = true }
+libsql = { workspace = true }
+serde_json = {workspace = true}
+tempfile = {workspace = true}
+domain = { path = "../domain" }
+types = { path = "../types" }
