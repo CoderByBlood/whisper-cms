@@ -1,1 +1,2 @@
-pub mod install; pub mod telemetry;
+pub mod install;
+pub mod telemetry;

@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::{fs, path::Path};
 
 /// Execute every `*.sql` in `migrations/ops` in name order, each as a transaction.
+#[tracing::instrument(skip_all)]
 pub async fn run(conn: &Conn) -> Result<()> {
     let dir = Path::new("migrations/ops");
     if !dir.exists() {

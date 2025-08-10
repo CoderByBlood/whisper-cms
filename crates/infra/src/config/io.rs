@@ -7,6 +7,7 @@ use std::path::Path;
 use std::os::unix::fs::PermissionsExt;
 
 /// Atomic write: write to .tmp, fsync, set 0600 (unix), rename.
+#[tracing::instrument(skip_all)]
 pub fn write_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -35,12 +36,14 @@ pub fn write_atomic<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
 }
 
 /// Convenience: write TOML using `write_atomic`.
+#[tracing::instrument(skip_all)]
 pub fn write_toml<P: AsRef<Path>, T: serde::Serialize>(path: P, value: &T) -> Result<()> {
     let s = toml::to_string_pretty(value)?;
     write_atomic(path, s.as_bytes())
 }
 
 /// Read whole file into String (Ok(None) if missing).
+#[tracing::instrument(skip_all)]
 pub fn read_to_string_opt<P: AsRef<Path>>(path: P) -> Result<Option<String>> {
     let path = path.as_ref();
     if !path.exists() {
@@ -54,6 +57,7 @@ pub fn read_to_string_opt<P: AsRef<Path>>(path: P) -> Result<Option<String>> {
 }
 
 /// Read TOML into type (Ok(None) if missing).
+#[tracing::instrument(skip_all)]
 pub fn read_toml_opt<P: AsRef<Path>, T: serde::de::DeserializeOwned>(path: P) -> Result<Option<T>> {
     if let Some(s) = read_to_string_opt(path)? {
         let v = toml::from_str(&s)?;

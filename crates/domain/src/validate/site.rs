@@ -1,6 +1,7 @@
 use url::{Host, Url};
 
 /// Require http/https scheme and a host.
+#[tracing::instrument(skip_all)]
 pub fn validate_base_url(s: &str) -> Result<(), String> {
     let url = Url::parse(s).map_err(|e| e.to_string())?;
 
@@ -27,6 +28,7 @@ pub fn validate_base_url(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub fn validate_site_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("site name empty".into());
@@ -38,6 +40,7 @@ pub fn validate_site_name(name: &str) -> Result<(), String> {
 }
 
 /// MVP: non-empty. (You can tighten later with a curated IANA list or a tz crate.)
+#[tracing::instrument(skip_all)]
 pub fn validate_timezone(tz: &str) -> Result<(), String> {
     if tz.trim().is_empty() {
         return Err("timezone empty".into());

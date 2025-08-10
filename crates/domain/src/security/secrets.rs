@@ -1,6 +1,7 @@
 use crate::types::Secrets;
 use rand_core::{OsRng, RngCore};
 
+#[tracing::instrument(skip_all)]
 pub fn generate() -> Secrets {
     let mut hmac_key = vec![0u8; 32];
     let mut csrf_salt = vec![0u8; 16];

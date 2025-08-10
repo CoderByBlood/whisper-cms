@@ -1,6 +1,6 @@
+use secrecy::SecretString;
 use serde::Deserialize;
 use types::InstallPlan;
-use secrecy::SecretString;
 
 #[derive(Debug, Deserialize)]
 pub struct InstallForm {
@@ -11,6 +11,7 @@ pub struct InstallForm {
 }
 
 impl InstallForm {
+    #[tracing::instrument(skip_all)]
     pub fn validate_into_plan(self) -> Result<InstallPlan, Vec<String>> {
         let mut errs = Vec::new();
 

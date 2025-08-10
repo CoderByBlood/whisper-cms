@@ -1,7 +1,8 @@
-use anyhow::Result;
 use crate::db::Conn;
+use anyhow::Result;
 
 /// Lightweight readiness check: run a trivial SELECT successfully.
+#[tracing::instrument(skip_all)]
 pub async fn ready(conn: &Conn) -> Result<()> {
     let mut rows = conn.query("SELECT 1", ()).await?;
     // touch the first row to force execution
@@ -11,6 +12,7 @@ pub async fn ready(conn: &Conn) -> Result<()> {
 
 /// Optional: deeper file integrity check (slower than `ready`).
 #[allow(dead_code)]
+#[tracing::instrument(skip_all)]
 pub async fn quick_check(conn: &Conn) -> Result<()> {
     let mut rows = conn.query("PRAGMA quick_check", ()).await?;
     // `quick_check` returns one or more rows; "ok" means healthy

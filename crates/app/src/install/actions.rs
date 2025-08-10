@@ -14,6 +14,7 @@ use infra::install::resume;
 use super::plan::InstallForm;
 
 /// Accept form input, validate, and stage the plan (no plaintext persisted beyond memory).
+#[tracing::instrument(skip_all)]
 pub async fn post_config(State(app): State<AppState>, Form(form): Form<InstallForm>) -> Response {
     match form.validate_into_plan() {
         Ok(plan) => {
@@ -39,6 +40,7 @@ pub async fn post_config(State(app): State<AppState>, Form(form): Form<InstallFo
 
 /// Start (or resume) the installation run.
 /// Assumes we're in the Install phase (router is only mounted then).
+#[tracing::instrument(skip_all)]
 pub async fn post_run(State(app): State<AppState>) -> Response {
     // Single-run guard
     if app.progress.read().unwrap().is_some() {

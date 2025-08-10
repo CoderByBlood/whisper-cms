@@ -15,6 +15,7 @@ pub enum Msg {
     Done,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn sse_progress(
     axum::extract::State(app): axum::extract::State<crate::state::AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

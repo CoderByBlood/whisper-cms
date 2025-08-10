@@ -1,35 +1,51 @@
+use axum::{routing::get, Router};
 use std::sync::Arc;
-use axum::{Router, routing::get};
 use tokio::sync::RwLock;
-use tower_http::services::ServeDir;
-use tower::ServiceExt as TowerServiceExt; // for .oneshot()
+use tower::ServiceExt as TowerServiceExt;
+use tower_http::services::ServeDir; // for .oneshot()
 
-use crate::state::AppState;
 use crate::install::{
     actions::{post_config, post_run},
-    routes::{get_welcome, get_config, get_home, get_maint, get_run, get_done},
     progress::sse_progress,
+    routes::{get_config, get_done, get_home, get_maint, get_run, get_welcome},
 };
+use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase { Install, Serve }
-
-#[derive(Debug)]
-enum Handler { Noop, Boot, Install, Serve }
-
-impl Handler {
-    async fn router(&self, app: &AppState) -> Router {
-        match self {
-            Handler::Noop    => Router::new(),
-            Handler::Boot    => boot_router(),
-            Handler::Install => install_router(app),
-            Handler::Serve   => serve_router(app),
-        }
-    }
-    async fn on_enter(&mut self, _app: &AppState) -> anyhow::Result<()> { Ok(()) }
-    async fn on_exit (&mut self, _app: &AppState) -> anyhow::Result<()> { Ok(()) }
+pub enum Phase {
+    Install,
+    Serve,
 }
 
+#[derive(Debug)]
+enum Handler {
+    Noop,
+    Boot,
+    Install,
+    Serve,
+}
+
+impl Handler {
+    #[tracing::instrument(skip_all)]
+    async fn router(&self, app: &AppState) -> Router {
+        match self {
+            Handler::Noop => Router::new(),
+            Handler::Boot => boot_router(),
+            Handler::Install => install_router(app),
+            Handler::Serve => serve_router(app),
+        }
+    }
+    #[tracing::instrument(skip_all)]
+    async fn on_enter(&mut self, _app: &AppState) -> anyhow::Result<()> {
+        Ok(())
+    }
+    #[tracing::instrument(skip_all)]
+    async fn on_exit(&mut self, _app: &AppState) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[tracing::instrument(skip_all)]
 fn boot_router() -> Router {
     Router::new()
         .nest_service("/static", ServeDir::new("crates/app/static"))
@@ -37,19 +53,21 @@ fn boot_router() -> Router {
         .fallback(get(get_maint))
 }
 
+#[tracing::instrument(skip_all)]
 fn install_router(app: &AppState) -> Router {
     Router::new()
         .nest_service("/static", ServeDir::new("crates/app/static"))
-        .route("/install",          get(get_welcome).post(post_run))
-        .route("/install/config",   get(get_config).post(post_config))
-        .route("/install/run",      get(get_run).post(post_run))
+        .route("/install", get(get_welcome).post(post_run))
+        .route("/install/config", get(get_config).post(post_config))
+        .route("/install/run", get(get_run).post(post_run))
         .route("/install/progress", get(sse_progress))
-        .route("/install/done",     get(get_done))
+        .route("/install/done", get(get_done))
         .route("/", get(get_maint))
         .fallback(get(get_maint))
         .with_state(app.clone())
 }
 
+#[tracing::instrument(skip_all)]
 fn serve_router(app: &AppState) -> Router {
     Router::new()
         .nest_service("/static", ServeDir::new("crates/app/static"))
@@ -64,11 +82,15 @@ pub struct PhaseState {
 }
 
 impl PhaseState {
+    #[tracing::instrument(skip_all)]
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { handler: RwLock::new(Handler::Boot) })
+        Arc::new(Self {
+            handler: RwLock::new(Handler::Boot),
+        })
     }
 
     /// One-way swap of the active router; no dynamic dispatch; no awaits under the lock.
+    #[tracing::instrument(skip_all)]
     pub async fn transition_to(&self, app: &AppState, next: Phase) -> anyhow::Result<()> {
         // Swap to Noop quickly, then drop the lock before awaiting.
         let mut guard = self.handler.write().await;
@@ -79,7 +101,7 @@ impl PhaseState {
 
         let mut new = match next {
             Phase::Install => Handler::Install,
-            Phase::Serve   => Handler::Serve,
+            Phase::Serve => Handler::Serve,
         };
         new.on_enter(app).await?;
 
@@ -90,6 +112,7 @@ impl PhaseState {
 
     /// Dispatch a request to the current phase’s router.
     /// Read-lock is released before awaiting the inner service.
+    #[tracing::instrument(skip_all)]
     pub async fn dispatch(
         &self,
         app: AppState,
@@ -99,6 +122,9 @@ impl PhaseState {
             let h = self.handler.read().await;
             h.router(&app).await
         };
-        router.oneshot(req).await.expect("phase router should be infallible")
+        router
+            .oneshot(req)
+            .await
+            .expect("phase router should be infallible")
     }
 }

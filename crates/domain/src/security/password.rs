@@ -10,6 +10,7 @@ pub enum PasswordError {
     Hash(#[from] password_hash::Error),
 }
 
+#[tracing::instrument(skip_all)]
 pub fn validate_policy(pw: &str) -> Result<(), PasswordError> {
     if pw.len() < 12 {
         return Err(PasswordError::Weak);
@@ -17,6 +18,7 @@ pub fn validate_policy(pw: &str) -> Result<(), PasswordError> {
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub fn hash_password(pw: &str) -> Result<String, PasswordError> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -24,6 +26,7 @@ pub fn hash_password(pw: &str) -> Result<String, PasswordError> {
 }
 
 #[allow(dead_code)]
+#[tracing::instrument(skip_all)]
 pub fn verify_password(pw: &str, hash: &str) -> Result<bool, PasswordError> {
     let parsed = PasswordHash::new(hash)?;
     Ok(Argon2::default()
