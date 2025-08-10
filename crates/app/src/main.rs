@@ -1,6 +1,6 @@
 use std::fs::File;
 
-use axum::{body::Body, middleware::from_fn, ServiceExt as _}; // <-- bring the ext trait into scope
+use axum::body::Body;
 use tower::Layer;
 use tower_http::normalize_path::NormalizePathLayer;
 use tracing_flame::FlameLayer;
@@ -52,14 +52,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let routes = router::build(app_state.clone());
-
-    // 1) Anything first (even a no-op) locks in Body type
-    let routes = from_fn(pass_through).layer(routes);
-
-    // 2) Then normalize (runs first at runtime)
     let routes = NormalizePathLayer::trim_trailing_slash().layer(routes);
-
-    let app = routes.into_make_service();
+    let app = axum::ServiceExt::<axum::http::Request<Body>>::into_make_service(routes);
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -70,8 +64,32 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn pass_through(req: axum::http::Request<Body>, next: axum::middleware::Next) 
-    -> axum::response::Response 
-{ 
-    next.run(req).await 
+#[cfg(test)]
+mod tests {
+    use axum::{body::Body, http::Request};
+    use tower::{Layer, ServiceExt as _}; // oneshot
+    use tower_http::normalize_path::NormalizePathLayer;
+
+    #[tokio::test]
+    async fn install_trailing_slash_normalizes() {
+        // Build the service under test
+        let app_state = crate::state::AppState::default();
+        let svc = crate::router::build(app_state);
+        let svc = NormalizePathLayer::trim_trailing_slash().layer(svc);
+
+        // Drive it with two requests and compare the responses
+        let resp_a = svc
+            .clone()
+            .oneshot(Request::get("/install").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let resp_b = svc
+            .clone()
+            .oneshot(Request::get("/install/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp_a.status(), resp_b.status());
+    }
 }
