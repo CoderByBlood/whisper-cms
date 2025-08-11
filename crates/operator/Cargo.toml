@@ -27,6 +27,11 @@ futures-core = { workspace = true }
 clap = { workspace = true }
 notify = { workspace = true }
 which = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+rustls-pemfile = { workspace = true }
+percent-encoding = { workspace = true }
+base64 = { workspace = true }
 
 domain = { path = "../domain" }
 infra  = { path = "../infra" }

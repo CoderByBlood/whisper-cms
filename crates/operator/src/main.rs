@@ -19,6 +19,7 @@ mod progress;
 mod routes; // install routes (config/run/done/…)
 mod state;
 mod steps; // OperState (installer state)
+mod auth;
 
 /// CLI entrypoint
 #[derive(Parser)]
@@ -36,12 +37,17 @@ struct Cli {
 enum Cmd {
     /// Launch the GUI installer
     Gui {
-        /// Bind address, e.g. 127.0.0.1:8080
-        #[arg(long, default_value = "127.0.0.1:8080")]
+        /// Bind address, e.g. 127.0.0.1:8081
+        #[arg(long, default_value = "127.0.0.1:8081")]
         bind: String,
 
         /// Site root directory (configs, data/, content/, etc.)
-        #[arg(long, default_value = ".")]
+        #[arg(
+            long,
+            env = "WHISPERCMS_SITE_DIR",
+            default_value_os = ".",
+            value_hint = clap::ValueHint::DirPath
+        )]
         site: PathBuf,
     },
 
@@ -106,8 +112,12 @@ async fn run_gui(bind: String, site: PathBuf) -> anyhow::Result<()> {
     // Make site dir visible to infra (paths resolve under this root).
     std::env::set_var("WHISPERCMS_SITE_DIR", &site);
 
+    tracing::debug!("WHISPERCMS_SITE_DIR={0:?}", std::env::var("WHISPERCMS_SITE_DIR"));
+    tracing::debug!("WHISPERCMS_AUTH_DIR={0:?}", std::env::var("WHISPERCMS_AUTH_DIR"));
+    tracing::debug!("WHISPERCMS_INTERNAL_SECRET={0:?}", std::env::var("WHISPERCMS_INTERNAL_SECRET"));
+
     // Build installer state
-    let app = state::OperState::new();
+    let app = state::OperState::new(&site);
 
     // Initial phase based on installed flag (simple probe)
     if probe_installed().unwrap_or(false) {

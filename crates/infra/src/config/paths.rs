@@ -2,20 +2,20 @@ use std::path::PathBuf;
 
 #[tracing::instrument(skip_all)]
 pub fn core_toml() -> PathBuf {
-    PathBuf::from("config/core.toml")
+    site_root().join("config/core.toml")
 }
 
 #[tracing::instrument(skip_all)]
 pub fn admin_toml() -> PathBuf {
-    PathBuf::from("config/admin.toml")
+    site_root().join("config/admin.toml")
 }
 
 #[tracing::instrument(skip_all)]
 pub fn install_json() -> PathBuf {
-    PathBuf::from("config/install.json")
+    site_root().join("config/install.json")
 }
 
-#[allow(dead_code)]
+// Make this pub(crate) if other modules need it too.
 #[tracing::instrument(skip_all)]
 fn site_root() -> PathBuf {
     std::env::var_os("WHISPERCMS_SITE_DIR")

@@ -34,7 +34,7 @@ notify = "8.2"
 which  = "8.0"
 
 # Command Line
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Web
 axum = "0.8.4"
@@ -54,6 +54,11 @@ tracing-flame = "0.2"
 # Security
 password-hash = { version = "0.5", features = ["std"] }
 argon2        = { version = "0.5", features = ["std"] }
+hex = "0.4"
+sha2 = "0.10"
+rustls-pemfile = "2"
+percent-encoding = "2"
+base64 = "0.22"
 
 # DB (switch via crate features in infra)
 libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }

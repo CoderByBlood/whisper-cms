@@ -1036,6 +1036,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "home"
 version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1835,15 +1841,20 @@ dependencies = [
  "askama",
  "askama_web",
  "axum",
+ "base64 0.22.1",
  "clap",
  "domain",
  "futures-core",
+ "hex",
  "infra",
  "kit",
  "notify",
+ "percent-encoding",
+ "rustls-pemfile",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.12",
  "time",
  "tokio",
@@ -2382,6 +2393,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2531,6 +2551,17 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
