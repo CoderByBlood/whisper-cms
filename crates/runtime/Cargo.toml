@@ -11,7 +11,7 @@ tracing = { workspace = true }
 time = { workspace = true }
 axum = { workspace = true }
 askama = { workspace = true }
-askama_web = { workspace = true }
+askama_axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }

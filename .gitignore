@@ -29,6 +29,9 @@ target
 # ignore operational data files
 /data/
 
+# ignore secret files
+/secrets/
+
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 

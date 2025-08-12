@@ -150,10 +150,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[tracing::instrument(skip_all)]
 fn read_user(dir: &Path, fp_hex: &str) -> anyhow::Result<Option<FingerUser>> {
     let path: PathBuf = dir.join(format!("{fp_hex}.toml"));
+    tracing::debug!(?path);
     if !path.exists() {
+        tracing::debug!("Returning NONE");
         return Ok(None);
     }
     let text = fs::read_to_string(path)?;
+    tracing::debug!(text);
     let u: FingerUser = toml::from_str(&text)?;
     Ok(Some(u))
 }

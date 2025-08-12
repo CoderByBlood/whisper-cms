@@ -124,15 +124,55 @@ dependencies = [
 
 [[package]]
 name = "askama"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b79091df18a97caea757e28cd2d5fda49c6cd4bd01ddffd7ff01ace0c0ad2c28"
+dependencies = [
+ "askama_derive 0.12.5",
+ "askama_escape",
+ "humansize",
+ "num-traits",
+ "percent-encoding",
+]
+
+[[package]]
+name = "askama"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f75363874b771be265f4ffe307ca705ef6f3baa19011c149da8674a87f1b75c4"
 dependencies = [
- "askama_derive",
+ "askama_derive 0.14.0",
  "itoa",
  "percent-encoding",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "askama_axum"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a41603f7cdbf5ac4af60760f17253eb6adf6ec5b6f14a7ed830cf687d375f163"
+dependencies = [
+ "askama 0.12.1",
+ "axum-core 0.4.5",
+ "http 1.3.1",
+]
+
+[[package]]
+name = "askama_derive"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19fe8d6cb13c4714962c072ea496f3392015f0989b1a2847bb4b2d9effd71d83"
+dependencies = [
+ "askama_parser 0.2.1",
+ "basic-toml",
+ "mime",
+ "mime_guess",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
 ]
 
 [[package]]
@@ -141,7 +181,7 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "129397200fe83088e8a68407a8e2b1f826cf0086b21ccdb866a722c8bcd3a94f"
 dependencies = [
- "askama_parser",
+ "askama_parser 0.14.0",
  "basic-toml",
  "memchr",
  "proc-macro2",
@@ -150,6 +190,21 @@ dependencies = [
  "serde",
  "serde_derive",
  "syn",
+]
+
+[[package]]
+name = "askama_escape"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "619743e34b5ba4e9703bba34deac3427c72507c7159f5fd030aea8cac0cfe341"
+
+[[package]]
+name = "askama_parser"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acb1161c6b64d1c3d83108213c2a2533a342ac225aabd0bda218278c2ddb00c0"
+dependencies = [
+ "nom",
 ]
 
 [[package]]
@@ -162,31 +217,6 @@ dependencies = [
  "serde",
  "serde_derive",
  "winnow",
-]
-
-[[package]]
-name = "askama_web"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50dcd7d2caaff31b91ef5d112ed10416344e23a33db9e7eea7ba695d2a97a88a"
-dependencies = [
- "askama",
- "askama_web_derive",
- "axum-core",
- "bytes",
- "http 1.3.1",
- "tracing",
-]
-
-[[package]]
-name = "askama_web_derive"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34921de3d57974069bad483fdfe0ec65d88c4ff892edd1ab4d8b03be0dda1b9b"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -254,7 +284,7 @@ version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "021e862c184ae977658b36c4500f7feac3221ca5da43e3f25bd04ab6c79a29b5"
 dependencies = [
- "axum-core",
+ "axum-core 0.5.2",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -280,6 +310,26 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "rustversion",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]
@@ -731,6 +781,7 @@ dependencies = [
 name = "domain"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "argon2",
  "password-hash",
  "rand_core 0.6.4",
@@ -975,9 +1026,9 @@ checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
 name = "glob"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8d1add55171497b4705a648c6b583acafb01d58050a51727785f0b2c8e0a2b2"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "h2"
@@ -1123,6 +1174,15 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humansize"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb51c9a029ddc91b07a787f1d86b53ccfa49b0e86688c946ebe8d3555685dd7"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "hyper"
@@ -1342,6 +1402,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1357,15 +1436,18 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "domain",
+ "include_dir",
  "libsql",
  "secrecy",
  "serde",
  "serde_json",
  "tempfile",
  "time",
+ "tokio",
  "toml",
  "tracing",
  "types",
+ "url",
 ]
 
 [[package]]
@@ -1493,9 +1575,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.174"
+version = "0.2.175"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
+checksum = "6a82ae493e598baaea5209805c49bbf2ea7de956d50d7da0da1164f9c6d28543"
 
 [[package]]
 name = "libloading"
@@ -1506,6 +1588,12 @@ dependencies = [
  "cfg-if",
  "windows-targets 0.53.3",
 ]
+
+[[package]]
+name = "libm"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "libsql"
@@ -1768,6 +1856,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
 
 [[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "object"
 version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1838,8 +1935,8 @@ version = "0.0.0"
 dependencies = [
  "actors",
  "anyhow",
- "askama",
- "askama_web",
+ "askama 0.14.0",
+ "askama_axum",
  "axum",
  "base64 0.22.1",
  "clap",
@@ -1854,7 +1951,9 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha2",
+ "tempfile",
  "thiserror 2.0.12",
  "time",
  "tokio",
@@ -2035,9 +2134,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.95"
+version = "1.0.96"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02b3e5e68a3a1a02aad3ec490a98007cbc13c37cbe84a3cd7b8e406d76e7f778"
+checksum = "beef09f85ae72cea1ef96ba6870c51e6382ebfa4f0e85b643459331f3daa5be0"
 dependencies = [
  "unicode-ident",
 ]
@@ -3364,8 +3463,8 @@ version = "0.0.0"
 dependencies = [
  "actors",
  "anyhow",
- "askama",
- "askama_web",
+ "askama 0.14.0",
+ "askama_axum",
  "axum",
  "domain",
  "infra",

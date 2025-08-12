@@ -1,44 +1,64 @@
 {% extends "layout/base.html" %}
-{% block title %}Install — Running{% endblock %}
-{% block content %}
-<h1 class="text-2xl font-bold mb-4">Installing…</h1>
 
-<ol id="log" class="space-y-1 text-sm">
-  <li>Starting…</li>
-</ol>
+{% block title %}Install · Run{% endblock %}
+
+{% block content %}
+<div x-data="InstallRun()" x-init="init()" class="card bg-white shadow-sm">
+  <h1 class="text-xl font-semibold mb-1">Install progress</h1>
+  <p class="text-slate-600 mb-4">Kick off the install and watch progress in real time.</p>
+
+  <div class="flex items-center gap-3">
+    <button class="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-white disabled:opacity-60"
+      :disabled="started" hx-post="/install/run" hx-target="#content" hx-swap="outerHTML" hx-push-url="true"
+      @click="start()">
+      Start installation
+      <span
+        class="htmx-indicator inline-block h-4 w-4 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin"></span>
+    </button>
+
+    <template x-if="done">
+      <a href="/install/done" class="rounded-lg bg-emerald-600 text-white px-3 py-2">Continue</a>
+    </template>
+  </div>
+
+  <div class="mt-5">
+    <h2 class="text-sm font-semibold text-slate-700 mb-2">Events</h2>
+    <div class="rounded-lg border border-slate-200 bg-slate-50 p-3 max-h-72 overflow-auto">
+      <template x-if="events.length === 0">
+        <div class="text-slate-500 text-sm">No events yet.</div>
+      </template>
+      <ul class="space-y-1 text-sm">
+        <template x-for="(e, idx) in events" :key="idx">
+          <li class="font-mono text-slate-800" x-text="e"></li>
+        </template>
+      </ul>
+    </div>
+  </div>
+</div>
 
 <script>
-// 1) Kick off the run (idempotent server-side)
-fetch("/install/run", { method: "POST" }).catch(()=>{});
-
-// 2) Connect to SSE and append messages
-const log = document.getElementById("log");
-const es  = new EventSource("/install/progress");
-
-es.onmessage = (ev) => {
-  try {
-    const msg = JSON.parse(ev.data);
-    let text = "";
-    switch (msg.type) {
-      case "Begin": text = `▶ ${msg.data}`; break;
-      case "Ok":    text = `✔ ${msg.data}`; break;
-      case "Info":  text = `… ${msg.data}`; break;
-      case "Fail":  text = `✖ ${msg.data[0]} — ${msg.data[1]}`; break;
-      case "Done":
-        text = "🎉 Install complete"; 
-        // Optionally redirect to Done page:
-        setTimeout(() => { window.location.href = "/install/done"; }, 600);
-        break;
-      default: text = ev.data;
+  function InstallRun() {
+    return {
+      started: false,
+      done: false,
+      events: [],
+      start() { this.started = true; /* hx-post will actually start the run */ },
+      init() {
+        // Always connect so we can display progress if a run is already active or resumable
+        const es = new EventSource('/install/progress');
+        es.onmessage = (evt) => {
+          this.events.push(evt.data);
+          if (evt.data === 'Done') {
+            this.done = true;
+            this.started = true;
+            // Keep the stream open; harmless if the server closes it
+          }
+        };
+        es.onerror = () => {
+          // network hiccup; keep UI intact
+        };
+      }
     }
-    const li = document.createElement("li");
-    li.textContent = text;
-    log.appendChild(li);
-  } catch {
-    const li = document.createElement("li");
-    li.textContent = ev.data;
-    log.appendChild(li);
   }
-};
 </script>
 {% endblock %}

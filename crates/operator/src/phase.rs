@@ -1,15 +1,18 @@
+use axum::middleware::from_fn_with_state;
 use axum::{routing::get, Router};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower::ServiceExt as TowerServiceExt;
 use tower_http::services::ServeDir; // for .oneshot()
 
-use crate::{
-    actions::{post_config, post_run},
-    progress::sse_progress,
-    routes::{get_config, get_done, get_home, get_maint, get_run, get_welcome},
-};
+use crate::auth;
 use crate::state::OperState;
+use crate::{
+    actions::{post_db, post_lang, post_run, post_site},
+    progress::sse_progress,
+    routes::{get_db, get_done, get_home, get_lang, get_maint, get_run, get_site, get_welcome},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -45,10 +48,14 @@ impl Handler {
     }
 }
 
+fn operator_static_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static")
+}
+
 #[tracing::instrument(skip_all)]
 fn boot_router() -> Router {
     Router::new()
-        .nest_service("/static", ServeDir::new("crates/app/static"))
+        .nest_service("/static", ServeDir::new(operator_static_dir()))
         .route("/", get(get_maint))
         .fallback(get(get_maint))
 }
@@ -56,21 +63,32 @@ fn boot_router() -> Router {
 #[tracing::instrument(skip_all)]
 fn install_router(app: &OperState) -> Router {
     Router::new()
-        .nest_service("/static", ServeDir::new("crates/app/static"))
-        .route("/install", get(get_welcome).post(post_run))
-        .route("/install/config", get(get_config).post(post_config))
+        .nest_service("/static", ServeDir::new(operator_static_dir()))
+        // Welcome / entry
+        .route("/install", get(get_welcome))
+        // Step 1: language
+        .route("/install/lang", get(get_lang).post(post_lang))
+        // Step 2: database
+        .route("/install/db", get(get_db).post(post_db))
+        // Step 3: site info (+admin)
+        .route("/install/site", get(get_site).post(post_site))
+        // Execute + observe + finish
         .route("/install/run", get(get_run).post(post_run))
         .route("/install/progress", get(sse_progress))
         .route("/install/done", get(get_done))
+        // Everything else shows maintenance during install
         .route("/", get(get_maint))
         .fallback(get(get_maint))
         .with_state(app.clone())
+        // 🔐 Apply your auth middleware to everything
+        .layer(from_fn_with_state(app.clone(), auth::gate))
+        // ^ `auth::require(State(app), req, next)` pattern
 }
 
 #[tracing::instrument(skip_all)]
 fn serve_router(app: &OperState) -> Router {
     Router::new()
-        .nest_service("/static", ServeDir::new("crates/app/static"))
+        .nest_service("/static", ServeDir::new(operator_static_dir()))
         .route("/", get(get_home))
         .fallback(get(get_home))
         .with_state(app.clone())
@@ -92,7 +110,6 @@ impl PhaseState {
     /// One-way swap of the active router; no dynamic dispatch; no awaits under the lock.
     #[tracing::instrument(skip_all)]
     pub async fn transition_to(&self, app: &OperState, next: Phase) -> anyhow::Result<()> {
-        // Swap to Noop quickly, then drop the lock before awaiting.
         let mut guard = self.handler.write().await;
         let mut old = std::mem::replace(&mut *guard, Handler::Noop);
         drop(guard);
@@ -111,7 +128,6 @@ impl PhaseState {
     }
 
     /// Dispatch a request to the current phase’s router.
-    /// Read-lock is released before awaiting the inner service.
     #[tracing::instrument(skip_all)]
     pub async fn dispatch(
         &self,

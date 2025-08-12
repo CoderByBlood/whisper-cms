@@ -1,25 +1,17 @@
-//! whisperctl (operator): CLI + GUI installer entrypoint.
-
 use std::{fs::File, net::SocketAddr, path::PathBuf};
 
 use anyhow::Context;
 use axum::body::Body; // NOTE: axum::ServiceExt for into_make_service
 use clap::{Parser, Subcommand};
 use domain::config::core::CoreConfig;
-use tower::Layer;
-use tower_http::normalize_path::NormalizePathLayer;
+use infra::config::paths::{with_paths, Paths};
+use operator::{
+    app_router,
+    phase::{self},
+    state::{self},
+};
 use tracing_flame::FlameLayer;
 use tracing_subscriber::{layer::SubscriberExt, Registry};
-
-mod actions; // install actions (post_config/post_run/…)
-mod gui; // dispatcher + .fallback(dispatch)
-mod phase; // Phase enum + PhaseState (no dyn)
-mod plan;
-mod progress;
-mod routes; // install routes (config/run/done/…)
-mod state;
-mod steps; // OperState (installer state)
-mod auth;
 
 /// CLI entrypoint
 #[derive(Parser)]
@@ -112,37 +104,51 @@ async fn run_gui(bind: String, site: PathBuf) -> anyhow::Result<()> {
     // Make site dir visible to infra (paths resolve under this root).
     std::env::set_var("WHISPERCMS_SITE_DIR", &site);
 
-    tracing::debug!("WHISPERCMS_SITE_DIR={0:?}", std::env::var("WHISPERCMS_SITE_DIR"));
-    tracing::debug!("WHISPERCMS_AUTH_DIR={0:?}", std::env::var("WHISPERCMS_AUTH_DIR"));
-    tracing::debug!("WHISPERCMS_INTERNAL_SECRET={0:?}", std::env::var("WHISPERCMS_INTERNAL_SECRET"));
+    tracing::debug!(
+        "WHISPERCMS_SITE_DIR={0:?}",
+        std::env::var("WHISPERCMS_SITE_DIR")
+    );
+    tracing::debug!(
+        "WHISPERCMS_AUTH_DIR={0:?}",
+        std::env::var("WHISPERCMS_AUTH_DIR")
+    );
+    tracing::debug!(
+        "WHISPERCMS_INTERNAL_SECRET={0:?}",
+        std::env::var("WHISPERCMS_INTERNAL_SECRET")
+    );
 
     // Build installer state
-    let app = state::OperState::new(&site);
+    with_paths(Paths::new(&site), async {
+        let app_state = state::OperState::new(&site);
 
-    // Initial phase based on installed flag (simple probe)
-    if probe_installed().unwrap_or(false) {
-        app.phase.transition_to(&app, phase::Phase::Serve).await?;
-    } else {
-        app.phase.transition_to(&app, phase::Phase::Install).await?;
-    }
+        // Initial phase based on installed flag (simple probe)
+        if probe_installed().unwrap_or(false) {
+            app_state
+                .phase
+                .transition_to(&app_state, phase::Phase::Serve)
+                .await?;
+        } else {
+            app_state
+                .phase
+                .transition_to(&app_state, phase::Phase::Install)
+                .await?;
+        }
 
-    // Build the dispatcher router for the current phase
-    let routes = gui::build(app.clone());
+        // Build router via lib helpers
+        let routes = app_router(app_state.clone());
+        let app = axum::ServiceExt::<axum::http::Request<Body>>::into_make_service(routes);
 
-    // Outermost: normalize paths BEFORE routing so "/install/" == "/install"
-    let routes = NormalizePathLayer::trim_trailing_slash().layer(routes);
-
-    // Convert Service<Request<Body>> -> MakeService (Axum 0.8 trait-qualified form)
-    let app = axum::ServiceExt::<axum::http::Request<Body>>::into_make_service(routes);
-
-    // Bind + serve
-    let addr: SocketAddr = bind.parse().context("invalid --bind address")?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(
-        "whisperctl GUI listening on http://{}",
-        listener.local_addr()?
-    );
-    axum::serve(listener, app).await?;
+        // Bind + serve
+        let addr: SocketAddr = bind.parse().context("invalid --bind address")?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!(
+            "whisperctl GUI listening on http://{}",
+            listener.local_addr()?
+        );
+        axum::serve(listener, app).await?;
+        anyhow::Ok(())
+    })
+    .await?;
     Ok(())
 }
 
