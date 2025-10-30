@@ -2,7 +2,7 @@ env_files = [".env"]
 
 [env]
 PLANTUML_OUTPUT = "docs/diagrams"
-PLANTUML_INTERMEDIATE = "docs/diagrams/plantuml"
+PLANTUML_INTERMEDIATE = "docs/diagrams/.plantuml"
 
 [tasks.generate-diagrams]
 workspace = false
@@ -23,7 +23,7 @@ script = [
     "python scripts/generate-sequence-diagrams.py docs/workspace.json ${PLANTUML_INTERMEDIATE}",
 
     "echo '🔹 Copying UML Diagrams to Intermediate Folder...'",
-    "cp docs/*.puml ${PLANTUML_INTERMEDIATE}",
+    "if ls docs/*.puml >/dev/null 2>&1; then cp docs/*.puml ${PLANTUML_INTERMEDIATE}; else echo '   (none found, skipping)'; fi",
 
     "echo '🔹 Rendering PlantUML diagrams to SVG...'",
     "java -jar ${PLANTUML_JAR} -tsvg ${PLANTUML_INTERMEDIATE}/*.puml -o ../"

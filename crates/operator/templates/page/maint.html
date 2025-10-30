@@ -1,0 +1,42 @@
+{% extends "layout/base.html" %}
+
+{% block title %}Maintenance{% endblock %}
+
+{% block content %}
+<div class="bg-white shadow-sm rounded-xl p-6 text-center space-y-4">
+  <div class="mx-auto inline-flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-700">
+    <!-- warning icon -->
+    <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path
+        d="M12 2.25c.3 0 .58.16.73.42l9 15.75a.84.84 0 0 1-.73 1.26H3a.84.84 0 0 1-.73-1.26l9-15.75c.15-.26.43-.42.73-.42zM12 9a.75.75 0 0 0-.75.75v4.5a.75.75 0 1 0 1.5 0v-4.5A.75.75 0 0 0 12 9zm0 8a1 1 0 1 0 0 2 1 1 0 0 0 0-2z" />
+    </svg>
+  </div>
+
+  <h1 class="text-xl font-semibold">We’re performing setup</h1>
+  <p class="text-slate-600 max-w-prose mx-auto">
+    WhisperCMS is currently installing and preparing your site. Please check back shortly.
+  </p>
+
+  <div class="flex items-center justify-center gap-3">
+    <!-- Retry button (progressive enhancement with HTMX) -->
+    <a href="/" hx-get="/" hx-target="#content" hx-swap="outerHTML"
+      class="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-white">
+      Retry now
+      <span
+        class="htmx-indicator inline-block h-4 w-4 rounded-full border-2 border-slate-200 border-t-white animate-spin"></span>
+    </a>
+
+    <!-- Optional: if you are the operator -->
+    <span class="text-slate-500 text-sm">
+      If you’re the operator, continue at <a href="/install" class="underline hover:text-slate-900">/install</a>.
+    </span>
+  </div>
+
+  <!-- Gentle auto-retry every 10s; remove this div to disable -->
+  <div class="hidden" hx-get="/" hx-trigger="every 10s" hx-target="#content" hx-swap="outerHTML"></div>
+
+  <p class="text-slate-400 text-xs">
+    HTTP 503 • Maintenance
+  </p>
+</div>
+{% endblock %}

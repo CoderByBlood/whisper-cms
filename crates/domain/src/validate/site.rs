@@ -1,3 +1,4 @@
+use anyhow::Result;
 use url::{Host, Url};
 
 /// Require http/https scheme and a host.

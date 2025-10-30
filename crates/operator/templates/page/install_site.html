@@ -1,0 +1,56 @@
+{% extends "layout/base.html" %}
+
+{% block title %}Install · Site{% endblock %}
+
+{% block content %}
+<div class="card bg-white shadow-sm">
+  <h1 class="text-xl font-semibold mb-1">Site information</h1>
+  <p class="text-slate-600 mb-4">
+    These settings are written to <code>config/core.toml</code> and <code>config/admin.toml</code>.
+    Passwords are stored as secure hashes.
+  </p>
+
+  <form action="/install/site" method="post" hx-post="/install/site" hx-push-url="true" class="space-y-4">
+    <div>
+      <label for="site_name" class="block text-sm font-medium text-slate-800 mb-1">Site name</label>
+      <input type="text" id="site_name" name="site_name" placeholder="My WhisperCMS Site" required
+        class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900">
+    </div>
+
+    <div>
+      <label for="base_url" class="block text-sm font-medium text-slate-800 mb-1">Base URL</label>
+      <input type="text" id="base_url" name="base_url" placeholder="https://example.com" required
+        class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900">
+      <p class="text-slate-500 text-sm mt-1">Must include scheme and host (e.g., <code>https://example.com</code>).</p>
+    </div>
+
+    <div>
+      <label for="timezone" class="block text-sm font-medium text-slate-800 mb-1">Timezone</label>
+      <select id="timezone" name="timezone"
+        class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900">
+        <option value="UTC" selected>UTC</option>
+        <option value="America/New_York">America/New_York</option>
+        <option value="America/Los_Angeles">America/Los_Angeles</option>
+        <option value="Europe/London">Europe/London</option>
+        <option value="Europe/Berlin">Europe/Berlin</option>
+        <option value="Asia/Tokyo">Asia/Tokyo</option>
+      </select>
+    </div>
+
+    <div>
+      <label for="admin_password" class="block text-sm font-medium text-slate-800 mb-1">Admin password</label>
+      <input type="password" id="admin_password" name="admin_password" required
+        class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900">
+    </div>
+
+    <div class="flex items-center gap-3">
+      <a href="/install/db" class="text-slate-600 hover:text-slate-900">Back</a>
+      <button type="submit" class="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-white">
+        Continue
+        <span
+          class="htmx-indicator inline-block h-4 w-4 rounded-full border-2 border-slate-200 border-t-slate-900 animate-spin"></span>
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

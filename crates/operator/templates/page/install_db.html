@@ -1,0 +1,112 @@
+{% extends "layout/base.html" %} {% block title %}Install · Database{% endblock
+%} {% block head %}
+<style>
+  [x-cloak] {
+    display: none !important;
+  }
+</style>
+{% endblock %} {% block content %}
+<div class="card bg-white shadow-sm" x-data="{ kind: 'embedded', split: true }">
+  <h1 class="text-xl font-semibold mb-1">Database configuration</h1>
+  <p class="text-slate-600 mb-4">
+    Use embedded files for simplicity or a remote libsql endpoint. You can keep
+    content indexing in a separate DB for easy rebuilds.
+  </p>
+
+  <form action="/install/db" method="post" hx-post="/install/db" hx-push-url="true" class="space-y-5">
+    <fieldset class="space-y-2">
+      <legend class="text-sm font-medium text-slate-800">Storage mode</legend>
+      <div class="flex flex-wrap items-center gap-6">
+        <label class="inline-flex items-center gap-2">
+          <input type="radio" name="db_kind" value="embedded" x-model="kind" checked
+            class="h-4 w-4 text-slate-900 border-slate-300" />
+          <span>Embedded (SQLite files)</span>
+        </label>
+        <label class="inline-flex items-center gap-2">
+          <input type="radio" name="db_kind" value="remote" x-model="kind"
+            class="h-4 w-4 text-slate-900 border-slate-300" />
+          <span>Remote (libsql over HTTPS)</span>
+        </label>
+      </div>
+    </fieldset>
+
+    <div x-show="kind === 'remote'" x-cloak class="mt-2">
+      <label class="inline-flex items-center gap-2">
+        <input type="checkbox" id="split_content" name="split_content" value="true" x-model="split" checked
+          class="h-4 w-4 text-slate-900 border-slate-300" />
+        <span>Use a <strong>separate</strong> database for content indexing</span>
+      </label>
+    </div>
+
+    <!-- Embedded -->
+    <fieldset x-show="kind === 'embedded'" x-cloak class="space-y-3">
+      <legend class="text-sm font-medium text-slate-800">Embedded paths</legend>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="ops_path" class="block text-sm font-medium text-slate-800 mb-1">Ops DB path</label>
+          <input type="text" id="ops_path" name="ops_path" value="data/ops.db" :disabled="kind !== 'embedded'"
+            class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" />
+        </div>
+        <div>
+          <label for="content_path" class="block text-sm font-medium text-slate-800 mb-1">Content DB path</label>
+          <input type="text" id="content_path" name="content_path" value="data/content.db"
+            :disabled="kind !== 'embedded'"
+            class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" />
+        </div>
+      </div>
+      <p class="text-slate-500 text-sm">
+        Paths are relative to your site directory.
+      </p>
+    </fieldset>
+
+    <!-- Remote -->
+    <fieldset x-show="kind === 'remote'" x-cloak class="space-y-3">
+      <legend class="text-sm font-medium text-slate-800">Remote libsql</legend>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label for="ops_url" class="block text-sm font-medium text-slate-800 mb-1">Ops DB URL</label>
+          <input type="text" id="ops_url" name="ops_url" placeholder="libsql://example.turso.io"
+            :disabled="kind !== 'remote'"
+            class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" />
+        </div>
+        <div>
+          <label for="ops_token" class="block text-sm font-medium text-slate-800 mb-1">Ops token</label>
+          <input type="password" id="ops_token" name="ops_token" placeholder="token…" :disabled="kind !== 'remote'"
+            class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" />
+        </div>
+
+        <template x-if="split">
+          <div>
+            <label for="content_url" class="block text-sm font-medium text-slate-800 mb-1">Content DB URL</label>
+            <input type="text" id="content_url" name="content_url" placeholder="libsql://example.turso.io"
+              :disabled="kind !== 'remote' || !split"
+              class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" />
+          </div>
+        </template>
+
+        <template x-if="split">
+          <div>
+            <label for="content_token" class="block text-sm font-medium text-slate-800 mb-1">Content token</label>
+            <input type="password" id="content_token" name="content_token" placeholder="token…"
+              :disabled="kind !== 'remote' || !split"
+              class="block w-full rounded-lg border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-900" />
+          </div>
+        </template>
+      </div>
+      <p class="text-slate-500 text-sm">
+        Tokens are stored under <code>secrets/libsql/</code> with 0600
+        permissions.
+      </p>
+    </fieldset>
+
+    <div class="flex items-center gap-3">
+      <a href="/install/lang" class="text-slate-600 hover:text-slate-900">Back</a>
+      <button type="submit" class="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-white">
+        Continue
+        <span
+          class="htmx-indicator inline-block h-4 w-4 rounded-full border-2 border-slate-200 border-top-slate-900 animate-spin"></span>
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

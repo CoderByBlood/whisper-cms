@@ -29,6 +29,9 @@ target
 # ignore operational data files
 /data/
 
+# ignore secret files
+/secrets/
+
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
@@ -164,7 +167,11 @@ Desktop.ini
 docs/workspace.json
 
 # Ignore PlantUML exports
-docs/diagrams/plantuml/
+docs/diagrams/.plantuml/
+
+# Ignore AsciiDoc exports
+docs/.asciidoc/
+docs/WhisperCMS Architecture.pdf
 
 # But keep SVGs
 !docs/diagrams/*.svg
