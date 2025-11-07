@@ -1,0 +1,20 @@
+[package]
+name = "edge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+notify = { workspace = true }
+tokio = { workspace = true }
+leptos_reactive = { workspace = true }
+rayon = { workspace = true }
+walkdir = { workspace = true }
+same-file = { workspace = true }
+snafu = { workspace = true }
+ractor = { workspace = true }
+sqlx = { workspace = true }
+async-trait = { workspace = true }
+adapt = { path = "../adapt" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

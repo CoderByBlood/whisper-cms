@@ -1,70 +1,28 @@
-
 [workspace]
 resolver = "2"
 members = [
-  "crates/operator",
-  "crates/runtime",
-  "crates/domain",
-  "crates/infra",
-  "crates/actors",
-  "crates/types",
-  "crates/kit",
+  "crates/edge",
+  "crates/adapt",
+  "crates/serve",
+  "crates/core",
 ]
 
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [workspace.dependencies]
-anyhow = "1"
-thiserror = "2.0.12"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.9.5"
-url = {version = "2", features = ["serde"]}
-time = { version = "0.3", features = ["macros", "serde", "formatting"] }
-secrecy = "0.10.3"
-rand_core = { version = "0.6", features = ["getrandom"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-futures-core = "0.3"
-include_dir = "0.7.4"
-
-# Detect, Compile, and Reload
-notify = "8.2"
-which  = "8.0"
-
-# Command Line
-clap = { version = "4", features = ["derive", "env"] }
-
-# Web
-axum = "0.8.4"
-axum-extra = { version = "0.10.1", features = ["cookie"] }
-askama = "0.14"
-askama_axum = { version = "0.4" }
-tower = "0.5"
-tower-http = { version = "0.6.6", features = ["trace", "limit", "fs", "normalize-path"] }
-serde_urlencoded = "0.7"
-
-# Actors / telemetry
-ractor = "0.15.7"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-attributes = "0.1.30"
-tracing-flame = "0.2"
-
-# Security
-password-hash = { version = "0.5", features = ["std"] }
-argon2        = { version = "0.5", features = ["std"] }
-hex = "0.4"
-sha2 = "0.10"
-rustls-pemfile = "2"
-percent-encoding = "2"
-base64 = "0.22"
-
-# DB (switch via crate features in infra)
-libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }
-
-# Test
-reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "cookies", "rustls-tls"] }
-tempfile = "3"
+notify = "8.1.0"
+tempfile = "3.3.0"
+# leptos = "0.8.12"
+leptos_reactive = "0.6.15"
+tokio = { version = "1.48.0", features = ["full"] }
+rayon = "1.11.0"
+walkdir = "2.5"
+same-file = "1.0.0"
+snafu = "0.8.9"
+ractor = { version = "0.15.9", features = ["async-trait"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+mockall = "0.13.1"
+sea-query = "0.32.7"
+async-trait = "0.1.89"
