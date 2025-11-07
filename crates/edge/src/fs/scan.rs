@@ -1,9 +1,22 @@
 //! ScannedFolder — parallel directory scan + lazy (re)reads on demand, no caching.
 //!
-//! Uses rayon 1.11 docs: https://docs.rs/rayon/1.11.0/rayon/
-//! Uses walkdir 2.5 docs: https://docs.rs/walkdir/2.5.0/walkdir/
+//! - Coalesces hard links (same physical file ⇒ one `Arc<File>`) via `same-file`.
+//! - Optional regex filters for directory names (to prune traversal) and file names.
+//! - `refresh()` remembers and reapplies the filters used to build the store.
+//!
+//! Docs:
+//! • rayon 1.11:   https://docs.rs/rayon/1.11.0/rayon/
+//! • walkdir 2.5:  https://docs.rs/walkdir/2.5.0/walkdir/
+//!
+//! Add to Cargo.toml:
+//! [dependencies]
+//! rayon = "1.11"
+//! walkdir = "2.5"
+//! same-file = "1.0"
+//! regex = "1.11"
 
 use rayon::prelude::*;
+use regex::Regex;
 use same_file::Handle;
 use std::{
     collections::HashMap,
@@ -13,6 +26,10 @@ use std::{
 };
 use walkdir::{DirEntry, WalkDir};
 
+/// A single file known to the store. It knows both its absolute (canonical) and
+/// relative (to the store root) paths, and can read/write itself.
+///
+/// NOTE: Reading never caches; each call re-reads from disk.
 #[derive(Debug)]
 pub struct File {
     abs: PathBuf, // canonical absolute path
@@ -20,9 +37,12 @@ pub struct File {
 }
 
 impl File {
+    /// Canonical absolute filesystem path of this file.
     pub fn absolute_path(&self) -> &Path {
         &self.abs
     }
+
+    /// Path of this file relative to the store root.
     pub fn relative_path(&self) -> &Path {
         &self.rel
     }
@@ -42,7 +62,7 @@ impl File {
     /// Overwrite file with given bytes.
     pub fn write_bytes(&self, data: &[u8]) -> io::Result<()> {
         if let Some(parent) = self.abs.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?; // ensure parent exists
         }
         fs::write(&self.abs, data)
     }
@@ -68,31 +88,51 @@ pub struct ScanReport {
     pub errors: Vec<ScanError>,
 }
 
+/// In-memory index of files under a root directory. Lookups by relative or
+/// absolute path return the same `Arc<File>` instance when they refer to the
+/// same canonical file / same physical file (hard-link coalescing).
+///
+/// - Scanning is done once (in parallel).
+/// - Reads are lazy and uncached (performed by `File` methods).
 #[derive(Debug)]
 pub struct ScannedFolder {
     root: PathBuf, // canonical absolute root
     files: Vec<Arc<File>>,
     by_abs: HashMap<PathBuf, Arc<File>>, // key: canonical absolute path
     by_rel: HashMap<PathBuf, Arc<File>>, // key: relative path from root
+
+    // Remember filters used to build this instance so refresh() can reuse them.
+    dir_name_re: Option<Regex>,
+    file_name_re: Option<Regex>,
 }
 
 impl ScannedFolder {
+    /// Re-scan the directory and return a refreshed store using the SAME filters.
     pub fn refresh(&self) -> io::Result<Self> {
-        // Discard report like the simple `scan_folder` does.
-        scan_folder(&self.root)
+        let (store, _report) = scan_folder_with_report_and_filters(
+            &self.root,
+            self.dir_name_re.as_ref(),
+            self.file_name_re.as_ref(),
+        )?;
+        Ok(store)
     }
 
+    /// Root directory (canonical absolute).
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// All files (as `Arc<File>`). Order is not guaranteed.
     pub fn files(&self) -> &[Arc<File>] {
         &self.files
     }
 
+    /// Lookup by relative path (from the store root).
     pub fn get_by_relative(&self, rel: impl AsRef<Path>) -> Option<Arc<File>> {
         self.by_rel.get(rel.as_ref()).cloned()
     }
 
+    /// Lookup by absolute path (any absolute); will be canonicalized.
     pub fn get_by_absolute(&self, abs: impl AsRef<Path>) -> io::Result<Option<Arc<File>>> {
         match fs::canonicalize(abs.as_ref()) {
             Ok(canon) => Ok(self.by_abs.get(&canon).cloned()),
@@ -102,31 +142,75 @@ impl ScannedFolder {
     }
 }
 
-/// Entry point preserving your original signature. Scans and discards the report.
-/// Call `scan_folder_with_report` if you want details about skipped/failed entries.
+/// Entry point preserving the original signature (no filters). Scans and discards the report.
+/// Call `scan_folder_with_report`/`scan_folder_with_filters` for advanced scenarios.
 pub fn scan_folder(root_dir: impl AsRef<Path>) -> io::Result<ScannedFolder> {
-    let (store, _report) = scan_folder_with_report(root_dir)?;
+    let (store, _report) = scan_folder_with_report_and_filters(root_dir, None, None)?;
     Ok(store)
 }
 
-/// Full scan with an accompanying `ScanReport`.
+/// Full scan with an accompanying `ScanReport` (no filters).
 pub fn scan_folder_with_report(
     root_dir: impl AsRef<Path>,
 ) -> io::Result<(ScannedFolder, ScanReport)> {
-    let root = fs::canonicalize(root_dir.as_ref())?;
-    let walker = WalkDir::new(&root).follow_links(false).into_iter();
+    scan_folder_with_report_and_filters(root_dir, None, None)
+}
 
+/// Filtered scan.
+/// - `dir_name_re`: optional regex applied to directory *names* (final component). Non-matching
+///   directories are **not** descended into.
+/// - `file_name_re`: optional regex applied to file *names*. Non-matching files are not indexed.
+pub fn scan_folder_with_filters(
+    root_dir: impl AsRef<Path>,
+    dir_name_re: Option<&Regex>,
+    file_name_re: Option<&Regex>,
+) -> io::Result<ScannedFolder> {
+    let (store, _report) =
+        scan_folder_with_report_and_filters(root_dir, dir_name_re, file_name_re)?;
+    Ok(store)
+}
+
+/// Filtered scan that also returns a `ScanReport`.
+pub fn scan_folder_with_report_and_filters(
+    root_dir: impl AsRef<Path>,
+    dir_name_re: Option<&Regex>,
+    file_name_re: Option<&Regex>,
+) -> io::Result<(ScannedFolder, ScanReport)> {
+    let root = fs::canonicalize(root_dir.as_ref())?;
     let mut report = ScanReport::default();
 
-    // Collect candidate DirEntries first (recording per-entry errors).
-    // We keep this single-threaded collection of entries (WalkDir itself
-    // is single-threaded), but parallelize the *per-entry processing* below.
+    // Use WalkDir's filter_entry to prune subtrees by directory name.
+    // IMPORTANT: always allow depth()==0 (the root), or nothing will be traversed.
+    let walker = WalkDir::new(&root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // Always traverse the root
+            if e.depth() == 0 {
+                return true;
+            }
+            if let Some(re) = dir_name_re {
+                if e.file_type().is_dir() {
+                    let name = e.file_name().to_string_lossy();
+                    return re.is_match(&name);
+                }
+            }
+            true
+        });
+
+    // Collect candidate DirEntries (files only), recording walk errors.
     let mut entries: Vec<DirEntry> = Vec::new();
     for item in walker {
         match item {
             Ok(e) => {
                 report.entries_seen += 1;
                 if e.file_type().is_file() {
+                    if let Some(re) = file_name_re {
+                        let name = e.file_name().to_string_lossy();
+                        if !re.is_match(&name) {
+                            continue; // file excluded by name filter
+                        }
+                    }
                     entries.push(e);
                 }
             }
@@ -150,7 +234,7 @@ pub fn scan_folder_with_report(
         }
     }
 
-    // Process each entry in parallel:
+    // Process each file entry in parallel.
     #[derive(Debug)]
     struct Item {
         abs: PathBuf,
@@ -162,7 +246,7 @@ pub fn scan_folder_with_report(
     let items: Vec<Item> = entries
         .into_par_iter()
         .map(|e| {
-            // Canonicalize
+            // Canonicalize file path
             let abs = match fs::canonicalize(e.path()) {
                 Ok(p) => p,
                 Err(err) => {
@@ -197,11 +281,10 @@ pub fn scan_folder_with_report(
             };
 
             // Obtain a handle for hard-link / same-file coalescing.
-            // If it fails, we still index by absolute path.
+            // If it fails, we still index by absolute path (non-fatal).
             let handle = match Handle::from_path(&abs) {
                 Ok(h) => Some(h),
                 Err(err) => {
-                    // Treat as non-fatal; just record the error and proceed without a handle.
                     return Item {
                         abs: abs.clone(),
                         rel: rel.clone(),
@@ -248,18 +331,13 @@ pub fn scan_folder_with_report(
                 by_handle.insert(h, f.clone());
                 f
             }
+        } else if let Some(existing) = by_abs.get(&it.abs) {
+            existing.clone()
         } else {
-            // Fall back to absolute-path-based identity
-            match by_abs.get(&it.abs) {
-                Some(existing) => existing.clone(),
-                None => {
-                    let f = Arc::new(File {
-                        abs: it.abs.clone(),
-                        rel: it.rel.clone(),
-                    });
-                    f
-                }
-            }
+            Arc::new(File {
+                abs: it.abs.clone(),
+                rel: it.rel.clone(),
+            })
         };
 
         // Insert into abs map; only push into `files` if we haven't seen this abs before.
@@ -278,6 +356,8 @@ pub fn scan_folder_with_report(
         files,
         by_abs,
         by_rel,
+        dir_name_re: dir_name_re.cloned(),
+        file_name_re: file_name_re.cloned(),
     };
     Ok((store, report))
 }
@@ -480,6 +560,100 @@ mod tests {
 
         let has_walk_error = report.errors.iter().any(|e| e.stage == "walkdir");
         assert!(has_walk_error, "expected a 'walkdir' stage error");
+
+        Ok(())
+    }
+    #[test]
+    fn file_name_filter_includes_only_matching_files() -> io::Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        fs::create_dir_all(root.join("docs"))?;
+        fs::create_dir_all(root.join("images"))?;
+        fs::write(root.join("docs/readme.md"), b"# hello")?;
+        fs::write(root.join("docs/todo.txt"), b"todo")?;
+        fs::write(root.join("images/logo.png"), b"\x89PNG")?;
+
+        let re = Regex::new(r"(?i)\.md$").unwrap();
+        let store = scan_folder_with_filters(root, None, Some(&re))?;
+
+        let rels: std::collections::HashSet<_> = store
+            .files()
+            .iter()
+            .map(|f| f.relative_path().to_path_buf())
+            .collect();
+
+        assert!(rels.contains(Path::new("docs/readme.md")));
+        assert!(!rels.contains(Path::new("docs/todo.txt")));
+        assert!(!rels.contains(Path::new("images/logo.png")));
+        Ok(())
+    }
+
+    #[test]
+    fn dir_name_filter_limits_traversal() -> io::Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        fs::create_dir_all(root.join("keep/sub"))?;
+        fs::create_dir_all(root.join("skip/sub"))?;
+        fs::write(root.join("keep/sub/a.txt"), b"a")?;
+        fs::write(root.join("skip/sub/b.txt"), b"b")?;
+
+        // Only descend into directories named exactly "keep" or "sub"
+        let dir_re = Regex::new(r"^(keep|sub)$").unwrap();
+        let store = scan_folder_with_filters(root, Some(&dir_re), None)?;
+
+        let rels: std::collections::HashSet<_> = store
+            .files()
+            .iter()
+            .map(|f| f.relative_path().to_path_buf())
+            .collect();
+
+        // We should see keep/sub/a.txt but not skip/sub/b.txt (skip wasn't traversed)
+        assert!(rels.contains(Path::new("keep/sub/a.txt")));
+        assert!(!rels.contains(Path::new("skip/sub/b.txt")));
+        Ok(())
+    }
+    #[test]
+    fn refresh_reuses_filters() -> io::Result<()> {
+        use regex::Regex;
+        let dir = tempdir()?;
+        let root = dir.path();
+
+        // Structure:
+        // keep/a.md      keep/b.txt
+        // skip/c.md
+        fs::create_dir_all(root.join("keep"))?;
+        fs::create_dir_all(root.join("skip"))?;
+        fs::write(root.join("keep/a.md"), b"a")?;
+        fs::write(root.join("keep/b.txt"), b"b")?;
+        fs::write(root.join("skip/c.md"), b"c")?;
+
+        let dir_re = Regex::new(r"^keep$").unwrap();
+        let file_re = Regex::new(r"(?i)\.md$").unwrap();
+
+        let store = scan_folder_with_filters(root, Some(&dir_re), Some(&file_re))?;
+        let listed: std::collections::HashSet<_> = store
+            .files()
+            .iter()
+            .map(|f| f.relative_path().to_path_buf())
+            .collect();
+
+        assert!(listed.contains(Path::new("keep/a.md")));
+        assert!(!listed.contains(Path::new("keep/b.txt")));
+        assert!(!listed.contains(Path::new("skip/c.md"))); // pruned by dir filter
+
+        // Add a new matching file under "keep" and a non-matching one under "skip"
+        fs::write(root.join("keep/new.md"), b"n")?;
+        fs::write(root.join("skip/new.md"), b"x")?;
+
+        let store2 = store.refresh()?; // should reuse same filters
+        let listed2: std::collections::HashSet<_> = store2
+            .files()
+            .iter()
+            .map(|f| f.relative_path().to_path_buf())
+            .collect();
+
+        assert!(listed2.contains(Path::new("keep/new.md"))); // included
+        assert!(!listed2.contains(Path::new("skip/new.md"))); // still excluded by dir filter
 
         Ok(())
     }
