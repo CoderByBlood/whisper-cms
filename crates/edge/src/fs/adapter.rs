@@ -1,9 +1,18 @@
-use crate::fs::scan::File;
-use adapt::fm::{parse_front_matter, ContentSource};
+use crate::fs::scan::{scan_folder_with_filters, File};
+use adapt::{
+    filter::SourceFinder,
+    fm::{parse_front_matter, ContentSource},
+};
 use std::sync::Arc;
 
 struct FileContentSource {
     file: Arc<File>,
+}
+
+impl FileContentSource {
+    pub fn new(file: Arc<File>) -> Self {
+        Self { file }
+    }
 }
 
 impl ContentSource for FileContentSource {
@@ -13,6 +22,22 @@ impl ContentSource for FileContentSource {
 
     fn try_parse(&self) -> Result<adapt::fm::Parsed, Box<dyn std::error::Error + Send + Sync>> {
         Ok(parse_front_matter(self)?)
+    }
+}
+
+struct ScannedFolderSourceFinder;
+
+impl SourceFinder for ScannedFolderSourceFinder {
+    fn collect<P: AsRef<std::path::Path>>(
+        &self,
+        root: P,
+        name_filter: Option<&regex::Regex>,
+    ) -> Result<Vec<Box<dyn ContentSource>>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(scan_folder_with_filters(root, None, name_filter)?
+            .files()
+            .iter()
+            .map(|f| Box::new(FileContentSource::new(f.clone())) as Box<dyn ContentSource>)
+            .collect())
     }
 }
 
