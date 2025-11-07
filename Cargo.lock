@@ -9,6 +9,7 @@ dependencies = [
  "async-trait",
  "gray_matter",
  "mockall",
+ "regex",
  "sea-query",
  "serde",
  "serde_json",
