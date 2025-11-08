@@ -1,25 +1,19 @@
-use snafu::Snafu;
 use std::collections::HashMap;
-use std::error::Error;
+use std::error::Error as StdError;
+use thiserror::Error;
 
-/// Errors (SNAFU)
-#[derive(Debug, Snafu)]
+#[derive(Debug, Error)]
 pub enum DatabaseError {
-    #[snafu(display("Call failed: {msg}"))]
-    Message { msg: String },
-    // A generic catch-all that preserves the source error and backtrace
-    #[snafu(display("{source}"))]
-    Mapped {
-        #[snafu(source)]
-        source: Box<dyn Error + Send + Sync + 'static>,
-        // Enable SNAFU backtraces with the "backtrace" feature in Cargo.toml:
-        // snafu = { version = "0.8.9", features = ["backtraces"] }
-        //#[snafu(backtrace)]
-        //backtrace: snafu::Backtrace,
-    },
+    /// A simple message-only error.
+    #[error("Call failed: {0}")]
+    Message(String),
+
+    /// Generic catch-all that preserves the original error’s display text and chain.
+    #[error(transparent)]
+    Mapped(#[from] Box<dyn StdError + Send + Sync + 'static>),
 }
 
-pub trait DbError: Error + Send + Sync + 'static {}
+pub trait DbError: StdError + Send + Sync + 'static {}
 
 // Blanket conversion: lets `?` lift *any* error into TheirError::Other
 impl<E> From<E> for DatabaseError
@@ -27,9 +21,7 @@ where
     E: DbError,
 {
     fn from(e: E) -> Self {
-        DatabaseError::Mapped {
-            source: Box::new(e),
-        }
+        DatabaseError::Mapped(Box::new(e))
     }
 }
 
@@ -98,7 +90,7 @@ mod tests {
             write!(f, "my-err")
         }
     }
-    impl std::error::Error for MyErr {}
+    impl StdError for MyErr {}
     impl super::DbError for MyErr {}
 
     fn mk_db(
@@ -181,7 +173,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_propagates_message_error() {
         fn upsert_err(_db_url: &str, _stmts: Vec<(String, Vec<SqlValue>)>) -> super::Result<usize> {
-            Err(super::DatabaseError::Message { msg: "boom".into() })
+            Err(super::DatabaseError::Message("boom".into()))
         }
         fn fetch_noop(_db_url: &str, _stmt: (String, Vec<SqlValue>)) -> super::Result<Rows> {
             Ok(Vec::<HashMap<String, SqlValue>>::new())
@@ -192,7 +184,7 @@ mod tests {
 
         let db = mk_db("mem:///db", upsert_err, fetch_noop, ckpt_noop);
         match db.upsert_batch(vec![]).await.unwrap_err() {
-            super::DatabaseError::Message { msg } => assert_eq!(msg, "boom"),
+            super::DatabaseError::Message(msg) => assert_eq!(msg, "boom"),
             other => panic!("unexpected error: {:?}", other),
         }
     }
@@ -250,14 +242,12 @@ mod tests {
             Ok(Vec::<HashMap<String, SqlValue>>::new())
         }
         fn ckpt_err(_db_url: &str) -> super::Result<()> {
-            Err(super::DatabaseError::Message {
-                msg: "ckpt-fail".into(),
-            })
+            Err(super::DatabaseError::Message("ckpt-fail".into()))
         }
 
         let db = mk_db("mem:///db", upsert_noop, fetch_noop, ckpt_err);
         match db.checkpoint_wal().await.unwrap_err() {
-            super::DatabaseError::Message { msg } => assert_eq!(msg, "ckpt-fail"),
+            super::DatabaseError::Message(msg) => assert_eq!(msg, "ckpt-fail"),
             other => panic!("unexpected error: {:?}", other),
         }
     }

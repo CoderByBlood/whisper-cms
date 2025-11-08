@@ -1,9 +1,9 @@
 // src/source_filter.rs
 use crate::fm::ContentSource;
 use regex::Regex;
-use snafu::{ResultExt, Snafu};
 use std::error::Error as StdError;
 use std::path::Path;
+use thiserror::Error;
 
 /// De-facto “pure Rust convertible” content extensions we support.
 /// Markdown, AsciiDoc, reStructuredText, Org, plus passthrough HTML/TXT.
@@ -16,25 +16,58 @@ pub const DEFAULT_CONTENT_EXTS: &[&str] = &[
     "txt", "text", // Plain text
 ];
 
-#[derive(Debug, Snafu)]
+#[derive(Debug, Error)]
 pub enum BuildError {
-    #[snafu(display("No valid extensions were provided"))]
+    #[error("No valid extensions were provided")]
     Empty,
 
-    #[snafu(display("Failed to compile filename regex: {source}"))]
-    Regex { source: regex::Error },
+    #[error("Failed to compile filename regex: {0}")]
+    Regex(#[from] regex::Error),
+
+    /// Generic catch-all that preserves the original error’s Display and source chain.
+    #[error(transparent)]
+    Other(#[from] Box<dyn StdError + Send + Sync + 'static>),
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Debug, Error)]
 pub enum FindError {
-    #[snafu(display("Could not build filename regex: {source}"))]
-    Build { source: BuildError },
+    #[error("Could not build filename regex: {0}")]
+    Build(#[from] BuildError),
 
-    #[snafu(display("Could not collect sources: {source}"))]
-    Collect {
-        source: Box<dyn StdError + Send + Sync>,
-    },
+    // Note: we do NOT mark this with #[from] because it would conflict
+    // with the transparent catch-all below (same inner type).
+    #[error("Could not collect sources: {0}")]
+    Collect(Box<dyn StdError + Send + Sync>),
+
+    /// Generic catch-all for mapping arbitrary errors into FindError.
+    #[error(transparent)]
+    Other(#[from] Box<dyn StdError + Send + Sync + 'static>),
 }
+
+//pub trait FilterError: StdError + Send + Sync + 'static {}
+
+// Blanket conversion: lets `?` lift *any* error into TheirError::Other
+// impl<E> From<E> for BuildError
+// where
+//     E: FilterError,
+// {
+//     fn from(e: E) -> Self {
+//         BuildError::Mapped {
+//             source: Box::new(e),
+//         }
+//     }
+// }
+
+// impl<E> From<E> for FindError
+// where
+//     E: FilterError,
+// {
+//     fn from(e: E) -> Self {
+//         FindError::Mapping {
+//             source: Box::new(e),
+//         }
+//     }
+// }
 
 /// A trait for locating “content sources” within a directory tree.
 ///

@@ -5,7 +5,6 @@
 
 use adapt::db::DbError;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
-use snafu::{ResultExt, Snafu};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     ConnectOptions, SqliteConnection, SqlitePool,
@@ -16,33 +15,33 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
+use thiserror::Error;
 use tokio::sync::OnceCell;
 
-/// Errors (SNAFU)
-#[derive(Debug, Snafu)]
+#[derive(Debug, Error)]
 pub enum SqliteDbError {
-    #[snafu(display("Connection failed"))]
-    Connect { source: sqlx::Error },
+    #[error("Connection failed: {0}")]
+    Connect(#[from] sqlx::Error),
 
-    #[snafu(display("Setup/migration failed"))]
-    Setup { source: sqlx::Error },
+    #[error("Setup/migration failed: {0}")]
+    Setup(sqlx::Error),
 
-    #[snafu(display("SQL execution failed"))]
-    Execute { source: sqlx::Error },
+    #[error("SQL execution failed: {0}")]
+    Execute(sqlx::Error),
 
-    #[snafu(display("Actor call failed: {msg}"))]
-    ActorCall { msg: String },
+    #[error("Actor call failed: {0}")]
+    ActorCall(String),
 
-    #[snafu(display("Error message: {msg}"))]
-    Message { msg: String },
+    #[error("Error message: {0}")]
+    Message(String),
 }
 
 impl SqliteDbError {
-    pub fn with_source(source: sqlx::Error) -> Self {
-        SqliteDbError::Execute { source }
+    pub fn src(source: sqlx::Error) -> Self {
+        SqliteDbError::Execute(source)
     }
-    pub fn with_message(msg: String) -> Self {
-        SqliteDbError::Message { msg }
+    pub fn msg(msg: String) -> Self {
+        SqliteDbError::Message(msg)
     }
 }
 

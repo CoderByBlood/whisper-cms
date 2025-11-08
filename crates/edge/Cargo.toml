@@ -10,7 +10,7 @@ leptos_reactive = { workspace = true }
 rayon = { workspace = true }
 walkdir = { workspace = true }
 same-file = { workspace = true }
-snafu = { workspace = true }
+thiserror = { workspace = true }
 ractor = { workspace = true }
 sqlx = { workspace = true }
 async-trait = { workspace = true }

@@ -20,7 +20,7 @@ tokio = { version = "1.48.0", features = ["full"] }
 rayon = "1.11.0"
 walkdir = "2.5"
 same-file = "1.0.0"
-snafu = "0.8.9"
+thiserror = "2.0.17"
 ractor = { version = "0.15.9", features = ["async-trait"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
 mockall = "0.13.1"
