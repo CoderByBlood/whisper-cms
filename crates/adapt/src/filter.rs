@@ -116,7 +116,7 @@ where
 
     // Basename only: no path separators; requires a dot + one of the extensions.
     let pattern = format!(r"(?i)^[^/\\]+\.({})$", alts);
-    Regex::new(&pattern).context(RegexSnafu)
+    Ok(Regex::new(&pattern)?)
 }
 
 /// Module-level helper:
@@ -126,10 +126,8 @@ pub fn find_sources(
     finder: &impl SourceFinder,
     root: &Path,
 ) -> Result<Vec<Box<dyn ContentSource>>, FindError> {
-    let re = build_filename_regex(DEFAULT_CONTENT_EXTS).context(BuildSnafu)?;
-    finder
-        .collect(root, Some(&re))
-        .map_err(|e| FindError::Collect { source: e })
+    let re = build_filename_regex(DEFAULT_CONTENT_EXTS)?;
+    finder.collect(root, Some(&re)).map_err(FindError::Collect)
 }
 
 #[cfg(test)]
@@ -308,7 +306,7 @@ mod tests {
         };
 
         match err {
-            FindError::Collect { source } => {
+            FindError::Collect(source) => {
                 assert!(
                     source.to_string().contains("boom"),
                     "unexpected error: {source:?}"
