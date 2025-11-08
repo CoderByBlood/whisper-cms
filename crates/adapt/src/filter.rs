@@ -140,7 +140,7 @@ mod tests {
     use tempfile::tempdir;
 
     // Bring in-crate FM for the DummySource implementation.
-    use crate::fm;
+    use crate::fm::{self, FrontMatterError};
 
     // -------------------------
     // Minimal ContentSource used by the mock return values
@@ -148,11 +148,11 @@ mod tests {
     struct DummySource(String);
 
     impl fm::ContentSource for DummySource {
-        fn read_to_string(&self) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        fn read_to_string(&self) -> Result<String, FrontMatterError> {
             Ok(self.0.clone())
         }
 
-        fn try_parse(&self) -> Result<fm::Parsed, Box<dyn StdError + Send + Sync>> {
+        fn try_parse(&self) -> Result<fm::Parsed, FrontMatterError> {
             Ok(fm::parse_front_matter(self)?)
         }
     }
