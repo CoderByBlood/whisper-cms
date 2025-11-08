@@ -3,6 +3,7 @@
 //! - Single writer actor per DB URL executing batched SQL in one IMMEDIATE txn.
 //! - Public API hides actor details; consumers use exec_batch_write()/checkpoint_wal().
 
+use adapt::db::DbError;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use snafu::{ResultExt, Snafu};
 use sqlx::{
@@ -19,7 +20,7 @@ use tokio::sync::OnceCell;
 
 /// Errors (SNAFU)
 #[derive(Debug, Snafu)]
-pub enum DbError {
+pub enum SqliteDbError {
     #[snafu(display("Connection failed"))]
     Connect { source: sqlx::Error },
 
@@ -31,9 +32,23 @@ pub enum DbError {
 
     #[snafu(display("Actor call failed: {msg}"))]
     ActorCall { msg: String },
+
+    #[snafu(display("Error message: {msg}"))]
+    Message { msg: String },
 }
 
-pub type Result<T, E = DbError> = std::result::Result<T, E>;
+impl SqliteDbError {
+    pub fn with_source(source: sqlx::Error) -> Self {
+        SqliteDbError::Execute { source }
+    }
+    pub fn with_message(msg: String) -> Self {
+        SqliteDbError::Message { msg }
+    }
+}
+
+impl DbError for SqliteDbError {}
+
+pub type Result<T, E = SqliteDbError> = std::result::Result<T, E>;
 
 /// ─────────────────────────────────────────────────────────────────────────────
 /// Read-only pools (singleton per DB URL)
@@ -44,7 +59,7 @@ static READ_POOLS: LazyLock<Mutex<HashMap<String, Arc<OnceCell<SqlitePool>>>>> =
 
 async fn build_read_only_pool_inner(db_url: &str) -> Result<SqlitePool> {
     let opts = SqliteConnectOptions::from_str(db_url.strip_prefix("sqlite://").unwrap_or(db_url))
-        .map_err(|e| DbError::ActorCall { msg: e.to_string() })?
+        .map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?
         .read_only(true)
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
@@ -62,7 +77,7 @@ async fn build_read_only_pool_inner(db_url: &str) -> Result<SqlitePool> {
 }
 
 /// Public: get (lazily create) the shared **read-only** pool for this `db_url`.
-pub async fn get_read_only_pool(db_url: &str) -> Result<SqlitePool> {
+pub(crate) async fn get_read_only_pool(db_url: &str) -> Result<SqlitePool> {
     let cell_arc = {
         let mut map = READ_POOLS.lock().unwrap();
         map.entry(db_url.to_string())
@@ -182,7 +197,7 @@ impl Actor for WriterActor {
                         .execute(&mut state.conn)
                         .await
                         .context(ExecuteSnafu)?;
-                    Ok::<(), DbError>(())
+                    Ok::<(), SqliteDbError>(())
                 }
                 .await;
                 if let Some(rp) = reply {
@@ -227,7 +242,7 @@ async fn exec_batch(
             Err(e) => {
                 // Best-effort rollback; surface the original error
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                return Err(DbError::Execute { source: e });
+                return Err(SqliteDbError::Execute { source: e });
             }
         }
     }
@@ -257,8 +272,8 @@ pub(crate) async fn ensure_writer(db_url: &str) -> Result<ActorRef<DbWriteMsg>> 
         .get_or_try_init(|| async {
             let (ar, _jh) = ractor::spawn::<WriterActor>(db_url.to_string())
                 .await
-                .map_err(|e| DbError::ActorCall { msg: e.to_string() })?;
-            Ok::<ActorRef<DbWriteMsg>, DbError>(ar)
+                .map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?;
+            Ok::<ActorRef<DbWriteMsg>, SqliteDbError>(ar)
         })
         .await?;
 
@@ -273,7 +288,8 @@ pub async fn exec_batch_write(db_url: &str, statements: Vec<(String, Vec<Bind>)>
         statements,
         reply: Some(rp)
     });
-    let inner: Result<usize> = outer.map_err(|e| DbError::ActorCall { msg: e.to_string() })?;
+    let inner: Result<usize> =
+        outer.map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?;
     inner
 }
 
@@ -281,8 +297,35 @@ pub async fn exec_batch_write(db_url: &str, statements: Vec<(String, Vec<Bind>)>
 pub async fn checkpoint_wal(db_url: &str) -> Result<()> {
     let actor = ensure_writer(db_url).await?;
     let outer = ractor::call!(actor, |rp| DbWriteMsg::CheckpointWal { reply: Some(rp) });
-    let inner: Result<()> = outer.map_err(|e| DbError::ActorCall { msg: e.to_string() })?;
+    let inner: Result<()> = outer.map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?;
     inner
+}
+
+/// Public: execute a batch of SQL statements **atomically** for the given DB URL.
+pub async fn exec_fetch_all(
+    db_url: &str,
+    statement: (String, Vec<Bind>),
+) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+    let (sql, binds) = statement;
+    let mut q = sqlx::query(&sql);
+    for b in binds {
+        q = match b {
+            Bind::Text(s) => q.bind(s),
+            Bind::Integer(i) => q.bind(i),
+            Bind::Real(r) => q.bind(r),
+            Bind::Blob(b) => q.bind(b),
+            Bind::Null => {
+                let none: Option<i32> = None;
+                q.bind(none)
+            }
+        };
+    }
+
+    let pool = get_read_only_pool(db_url).await?;
+    match q.fetch_all(&pool).await {
+        Ok(rows) => Ok(rows),
+        Err(e) => Err(SqliteDbError::Execute { source: e }),
+    }
 }
 
 /// Small helper to convert any displayable error into ActorProcessingErr.
@@ -317,7 +360,7 @@ mod tests {
         // Prepare schema with a writable connection (create file + WAL/PRAGMAs).
         {
             let mut conn = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)
-                .map_err(|e| DbError::ActorCall { msg: e.to_string() })?
+                .map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?
                 .create_if_missing(true)
                 .foreign_keys(true)
                 .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -431,7 +474,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(res, Err(DbError::Execute { .. })));
+        assert!(matches!(res, Err(SqliteDbError::Execute { .. })));
 
         let pool = get_read_only_pool(&db_url).await?;
         let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
@@ -510,7 +553,7 @@ mod tests {
 
         let joined = timeout(Duration::from_secs(10), async { tokio::join!(f1, f2, f3) })
             .await
-            .map_err(|_| DbError::ActorCall {
+            .map_err(|_| SqliteDbError::ActorCall {
                 msg: "timeout waiting for bursts".into(),
             })?;
 
