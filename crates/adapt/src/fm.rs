@@ -6,13 +6,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json as json;
 use serde_yml as yml;
-use snafu::{ResultExt, Snafu};
+use std::error::Error as StdError;
+use thiserror::Error;
 use toml;
+
+pub type Result<T> = std::result::Result<T, FrontMatterError>;
 
 /// Abstract source of UTF-8 text (no direct fs:: usage required).
 pub trait ContentSource {
-    fn read_to_string(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
-    fn try_parse(&self) -> Result<Parsed, Box<dyn std::error::Error + Send + Sync>>;
+    fn read_to_string(&self) -> Result<String>;
+    fn try_parse(&self) -> Result<Parsed>;
 }
 
 /// Which format (if any) was detected.
@@ -40,31 +43,50 @@ pub struct Parsed {
     pub body: String,
 }
 
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(display("Failed to read content: {source}"))]
-    Read {
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+#[derive(Debug, Error)]
+pub enum FrontMatterError {
+    /// Underlying I/O while reading the file.
+    #[error("I/O error while reading: {0}")]
+    Io(#[from] std::io::Error),
 
-    #[snafu(display("YAML front matter parse error: {source}"))]
-    Yaml { source: yml::Error },
+    /// YAML front matter parse error.
+    #[error("YAML front matter parse error: {0}")]
+    Yaml(#[from] serde_yml::Error),
 
-    #[snafu(display("TOML front matter parse error: {source}"))]
-    Toml { source: toml::de::Error },
+    /// TOML front matter parse error.
+    #[error("TOML front matter parse error: {0}")]
+    Toml(#[from] toml::de::Error),
 
-    #[snafu(display("JSON front matter parse error: {source}"))]
-    Json { source: json::Error },
+    /// JSON front matter parse error.
+    #[error("JSON front matter parse error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// Transparent catch-all for any other error you want to bubble up.
+    /// Keeps the original Display/Debug and source chain intact.
+    #[error(transparent)]
+    Other(#[from] Box<dyn StdError + Send + Sync>),
 }
+
+//pub trait FmError: StdError + Send + Sync + 'static {}
+
+// Blanket conversion: lets `?` lift *any* error into TheirError::Other
+// impl<E> From<E> for FrontMatterError
+// where
+//     E: FmError,
+// {
+//     fn from(e: E) -> Self {
+//         FrontMatterError::Mapped {
+//             source: Box::new(e),
+//         }
+//     }
+// }
 
 /// Parse a document with optional **YAML/TOML/JSON** front matter.
 /// - YAML: top-of-file `---` fence … closing `---`
 /// - TOML: top-of-file `+++` fence … closing `+++`
 /// - JSON: first non-whitespace is `{` (parses one balanced top-level object)
-pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed, Error> {
-    let mut text = src
-        .read_to_string()
-        .map_err(|e| Error::Read { source: e })?;
+pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed> {
+    let mut text = src.read_to_string()?;
 
     // Strip UTF-8 BOM if present
     if text.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -77,7 +99,7 @@ pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed, Error> {
         .or_else(|| text.strip_prefix("---\r\n"))
     {
         if let Some((fm, body)) = take_until_fence(rest, "---") {
-            let val: yml::Value = yml::from_str(fm).context(YamlSnafu)?;
+            let val: yml::Value = yml::from_str(fm)?;
             return Ok(Parsed {
                 format: Some(FrontFormat::Yaml),
                 front_matter: Some(FrontValue::Yaml(val)),
@@ -99,7 +121,7 @@ pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed, Error> {
         .or_else(|| text.strip_prefix("+++\r\n"))
     {
         if let Some((fm, body)) = take_until_fence(rest, "+++") {
-            let val: toml::Value = toml::from_str(fm).context(TomlSnafu)?;
+            let val: toml::Value = toml::from_str(fm)?;
             return Ok(Parsed {
                 format: Some(FrontFormat::Toml),
                 front_matter: Some(FrontValue::Toml(val)),
@@ -117,7 +139,7 @@ pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed, Error> {
     // JSON: first non-WS must be '{' and we parse one top-level object; body follows it.
     if first_non_ws_is_lbrace(&text) {
         if let Some((json_str, body)) = slice_top_level_json_object(&text) {
-            let val: json::Value = json::from_str(json_str).context(JsonSnafu)?;
+            let val: json::Value = json::from_str(json_str)?;
             return Ok(Parsed {
                 format: Some(FrontFormat::Json),
                 front_matter: Some(FrontValue::Json(val)),
@@ -125,9 +147,9 @@ pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed, Error> {
             });
         } else {
             // Looks like JSON but not a balanced object → try parse to return a proper error
-            let res: Result<json::Value, _> = json::from_str(&text);
+            let res: std::result::Result<json::Value, _> = json::from_str(&text);
             if let Err(source) = res {
-                return Err(Error::Json { source });
+                return Err(FrontMatterError::Json(source));
             }
             // If it (unexpectedly) parses, treat as no front matter
             return Ok(Parsed {
