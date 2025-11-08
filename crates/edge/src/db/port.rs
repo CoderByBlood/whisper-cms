@@ -76,7 +76,7 @@ fn exec_fetch_all(
                 let name = col.name();
 
                 // 1) NULL short-circuit
-                let raw = row.try_get_raw(name).map_err(SqliteDbError::with_source)?;
+                let raw = row.try_get_raw(name).map_err(SqliteDbError::src)?;
                 if raw.is_null() {
                     row_map.insert(name.to_string(), SqlValue::Null);
                     continue;
@@ -97,7 +97,7 @@ fn exec_fetch_all(
 
                 // 4) Decode
                 let val: SqlValue = if declared_is_bool {
-                    let b: bool = row.try_get(name).map_err(SqliteDbError::with_source)?;
+                    let b: bool = row.try_get(name).map_err(SqliteDbError::src)?;
                     SqlValue::Bool(b)
                 } else if <i64 as Type<Sqlite>>::compatible(&runtime) {
                     // INTEGER affinity in SQLite
@@ -106,27 +106,26 @@ fn exec_fetch_all(
                         match row.try_get::<i32, _>(name) {
                             Ok(v32) => SqlValue::Int(v32),
                             Err(_) => {
-                                let v64: i64 =
-                                    row.try_get(name).map_err(SqliteDbError::with_source)?;
+                                let v64: i64 = row.try_get(name).map_err(SqliteDbError::src)?;
                                 SqlValue::Long(v64)
                             }
                         }
                     } else {
                         // BIGINT, or id/PK-like, or any other case → i64
-                        let v64: i64 = row.try_get(name).map_err(SqliteDbError::with_source)?;
+                        let v64: i64 = row.try_get(name).map_err(SqliteDbError::src)?;
                         SqlValue::Long(v64)
                     }
                 } else if <f64 as Type<Sqlite>>::compatible(&runtime) {
-                    let f: f64 = row.try_get(name).map_err(SqliteDbError::with_source)?;
+                    let f: f64 = row.try_get(name).map_err(SqliteDbError::src)?;
                     SqlValue::Double(f)
                 } else if <String as Type<Sqlite>>::compatible(&runtime) {
-                    let s: String = row.try_get(name).map_err(SqliteDbError::with_source)?;
+                    let s: String = row.try_get(name).map_err(SqliteDbError::src)?;
                     SqlValue::Text(s)
                 } else if <Vec<u8> as Type<Sqlite>>::compatible(&runtime) {
-                    let b: Vec<u8> = row.try_get(name).map_err(SqliteDbError::with_source)?;
+                    let b: Vec<u8> = row.try_get(name).map_err(SqliteDbError::src)?;
                     SqlValue::Blob(b)
                 } else {
-                    return Err(SqliteDbError::with_message(format!(
+                    return Err(SqliteDbError::msg(format!(
                         "unhandled SQLite type for column `{}`: declared={:?}, runtime={:?}",
                         name, declared, runtime
                     ))

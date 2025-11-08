@@ -57,8 +57,7 @@ static READ_POOLS: LazyLock<Mutex<HashMap<String, Arc<OnceCell<SqlitePool>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 async fn build_read_only_pool_inner(db_url: &str) -> Result<SqlitePool> {
-    let opts = SqliteConnectOptions::from_str(db_url.strip_prefix("sqlite://").unwrap_or(db_url))
-        .map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?
+    let opts = SqliteConnectOptions::from_str(db_url.strip_prefix("sqlite://").unwrap_or(db_url))?
         .read_only(true)
         .journal_mode(SqliteJournalMode::Wal)
         .foreign_keys(true)
@@ -69,8 +68,7 @@ async fn build_read_only_pool_inner(db_url: &str) -> Result<SqlitePool> {
         .max_connections(3) // SQLite likes small pools
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(opts)
-        .await
-        .context(ConnectSnafu)?;
+        .await?;
 
     Ok(pool)
 }
@@ -163,16 +161,13 @@ impl Actor for WriterActor {
         // Note: use best-effort; if they fail, bubble via SetupSnafu.
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&mut conn)
-            .await
-            .context(SetupSnafu)?;
+            .await?;
         sqlx::query("PRAGMA temp_store = MEMORY")
             .execute(&mut conn)
-            .await
-            .context(SetupSnafu)?;
+            .await?;
         sqlx::query("PRAGMA foreign_keys = ON")
             .execute(&mut conn)
-            .await
-            .context(SetupSnafu)?;
+            .await?;
 
         Ok(WriterState { conn })
     }
@@ -194,8 +189,7 @@ impl Actor for WriterActor {
                 let res = async {
                     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
                         .execute(&mut state.conn)
-                        .await
-                        .context(ExecuteSnafu)?;
+                        .await?;
                     Ok::<(), SqliteDbError>(())
                 }
                 .await;
@@ -216,10 +210,7 @@ async fn exec_batch(
     let mut total = 0usize;
 
     // Acquire the write lock up-front.
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut *conn)
-        .await
-        .context(ExecuteSnafu)?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
     for (sql, binds) in statements {
         let mut q = sqlx::query(&sql);
@@ -241,15 +232,12 @@ async fn exec_batch(
             Err(e) => {
                 // Best-effort rollback; surface the original error
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                return Err(SqliteDbError::Execute { source: e });
+                return Err(SqliteDbError::Execute(e));
             }
         }
     }
 
-    sqlx::query("COMMIT")
-        .execute(&mut *conn)
-        .await
-        .context(ExecuteSnafu)?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
 
     Ok(total)
 }
@@ -271,7 +259,7 @@ pub(crate) async fn ensure_writer(db_url: &str) -> Result<ActorRef<DbWriteMsg>> 
         .get_or_try_init(|| async {
             let (ar, _jh) = ractor::spawn::<WriterActor>(db_url.to_string())
                 .await
-                .map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?;
+                .map_err(|e| SqliteDbError::ActorCall(e.to_string()))?;
             Ok::<ActorRef<DbWriteMsg>, SqliteDbError>(ar)
         })
         .await?;
@@ -287,8 +275,7 @@ pub async fn exec_batch_write(db_url: &str, statements: Vec<(String, Vec<Bind>)>
         statements,
         reply: Some(rp)
     });
-    let inner: Result<usize> =
-        outer.map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?;
+    let inner: Result<usize> = outer.map_err(|e| SqliteDbError::ActorCall(e.to_string()))?;
     inner
 }
 
@@ -296,7 +283,7 @@ pub async fn exec_batch_write(db_url: &str, statements: Vec<(String, Vec<Bind>)>
 pub async fn checkpoint_wal(db_url: &str) -> Result<()> {
     let actor = ensure_writer(db_url).await?;
     let outer = ractor::call!(actor, |rp| DbWriteMsg::CheckpointWal { reply: Some(rp) });
-    let inner: Result<()> = outer.map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?;
+    let inner: Result<()> = outer.map_err(|e| SqliteDbError::ActorCall(e.to_string()))?;
     inner
 }
 
@@ -323,7 +310,7 @@ pub async fn exec_fetch_all(
     let pool = get_read_only_pool(db_url).await?;
     match q.fetch_all(&pool).await {
         Ok(rows) => Ok(rows),
-        Err(e) => Err(SqliteDbError::Execute { source: e }),
+        Err(e) => Err(SqliteDbError::Execute(e)),
     }
 }
 
@@ -335,7 +322,6 @@ fn to_actor_err(e: impl std::fmt::Display) -> ActorProcessingErr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use snafu::ResultExt;
     use sqlx::Executor;
     use tempfile::tempdir;
     use tokio::time::{timeout, Duration};
@@ -358,20 +344,14 @@ mod tests {
 
         // Prepare schema with a writable connection (create file + WAL/PRAGMAs).
         {
-            let mut conn = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)
-                .map_err(|e| SqliteDbError::ActorCall { msg: e.to_string() })?
+            let mut conn = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)?
                 .create_if_missing(true)
                 .foreign_keys(true)
                 .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
                 .connect()
-                .await
-                .context(ConnectSnafu)?;
-            conn.execute("PRAGMA journal_mode = WAL")
-                .await
-                .context(ExecuteSnafu)?;
-            conn.execute("PRAGMA foreign_keys = ON")
-                .await
-                .context(ExecuteSnafu)?;
+                .await?;
+            conn.execute("PRAGMA journal_mode = WAL").await?;
+            conn.execute("PRAGMA foreign_keys = ON").await?;
         }
 
         // Get the read-only pool (singleton)
@@ -381,12 +361,10 @@ mod tests {
         // Both pools can read
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
             .fetch_one(&pool)
-            .await
-            .context(ExecuteSnafu)?;
+            .await?;
         let count2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master")
             .fetch_one(&pool2)
-            .await
-            .context(ExecuteSnafu)?;
+            .await?;
         assert_eq!(count, count2);
 
         // Writes via the read-only pool should fail
@@ -436,8 +414,7 @@ mod tests {
         let pool = get_read_only_pool(&db_url).await?;
         let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM docs")
             .fetch_one(&pool)
-            .await
-            .context(ExecuteSnafu)?;
+            .await?;
         assert_eq!(cnt, 1);
 
         Ok(())
@@ -478,8 +455,7 @@ mod tests {
         let pool = get_read_only_pool(&db_url).await?;
         let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
             .fetch_one(&pool)
-            .await
-            .context(ExecuteSnafu)?;
+            .await?;
         assert_eq!(cnt, 0);
 
         Ok(())
@@ -552,9 +528,7 @@ mod tests {
 
         let joined = timeout(Duration::from_secs(10), async { tokio::join!(f1, f2, f3) })
             .await
-            .map_err(|_| SqliteDbError::ActorCall {
-                msg: "timeout waiting for bursts".into(),
-            })?;
+            .map_err(|_| SqliteDbError::ActorCall("timeout waiting for bursts".into()))?;
 
         let (r1, r2, r3) = joined;
         assert_eq!(r1?, 100);
@@ -564,8 +538,7 @@ mod tests {
         let pool = get_read_only_pool(&db_url).await?;
         let cnt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t")
             .fetch_one(&pool)
-            .await
-            .context(ExecuteSnafu)?;
+            .await?;
         assert_eq!(cnt, 300);
 
         Ok(())
@@ -605,8 +578,7 @@ mod tests {
         let (a, b, c, d_len, e_is_null): (String, i64, f64, i64, Option<String>) =
             sqlx::query_as("SELECT a, b, c, length(d), e FROM v")
                 .fetch_one(&pool)
-                .await
-                .context(ExecuteSnafu)?;
+                .await?;
         assert_eq!(a, "hello");
         assert_eq!(b, 42);
         assert!((c - 3.14).abs() < 1e-9);
