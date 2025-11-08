@@ -1,11 +1,11 @@
 use crate::fs::scan::{scan_folder_with_filters, File};
 use adapt::{
     filter::SourceFinder,
-    fm::{parse_front_matter, ContentSource},
+    fm::{parse_front_matter, ContentSource, FrontMatterError},
 };
 use std::sync::Arc;
 
-struct FileContentSource {
+pub struct FileContentSource {
     file: Arc<File>,
 }
 
@@ -16,16 +16,16 @@ impl FileContentSource {
 }
 
 impl ContentSource for FileContentSource {
-    fn read_to_string(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_to_string(&self) -> Result<String, FrontMatterError> {
         Ok(self.file.read_string()?)
     }
 
-    fn try_parse(&self) -> Result<adapt::fm::Parsed, Box<dyn std::error::Error + Send + Sync>> {
+    fn try_parse(&self) -> Result<adapt::fm::Parsed, FrontMatterError> {
         Ok(parse_front_matter(self)?)
     }
 }
 
-struct ScannedFolderSourceFinder;
+pub struct ScannedFolderSourceFinder;
 
 impl SourceFinder for ScannedFolderSourceFinder {
     fn collect<P: AsRef<std::path::Path>>(
