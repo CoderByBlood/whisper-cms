@@ -249,15 +249,14 @@ fn slice_top_level_json_object<'a>(s: &'a str) -> Option<(&'a str, &'a str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error as StdError;
 
     struct InMem(&'static str);
     impl ContentSource for InMem {
-        fn read_to_string(&self) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        fn read_to_string(&self) -> Result<String> {
             Ok(self.0.to_string())
         }
 
-        fn try_parse(&self) -> Result<Parsed, Box<dyn StdError + Send + Sync>> {
+        fn try_parse(&self) -> Result<Parsed> {
             Ok(parse_front_matter(self)?)
         }
     }
