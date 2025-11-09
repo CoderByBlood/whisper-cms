@@ -69,15 +69,8 @@ impl Service<CliReq> for Dispatcher {
 }
 
 /// Run the dispatcher through Tower layers
-pub async fn run_cli(cmd: Commands) -> ExitCode {
-    let start = match &cmd {
-        Commands::Start(start) => start,
-    };
-
-    let req = CliReq {
-        ctx: AppCtx::new(start.dir.clone()),
-        cmd,
-    };
+pub async fn run_cli(ctx: AppCtx, cmd: Commands) -> ExitCode {
+    let req = CliReq { ctx, cmd };
 
     let svc = ServiceBuilder::new()
         .layer(ConcurrencyLimitLayer::new(1))
@@ -110,23 +103,59 @@ mod tests {
     use clap::Parser;
     use std::sync::{Mutex, OnceLock};
     use std::{
+        collections::HashMap,
         env,
-        path::PathBuf,
+        path::{Path, PathBuf},
+        sync::Arc,
         task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     };
     use tempfile::{tempdir, NamedTempFile};
     use tokio; // for #[tokio::test]
 
-    // ───────────────────────────────────────────────────────────────
-    // Env serialization (prevents parallel tests from racing on env)
-    // ───────────────────────────────────────────────────────────────
+    // Import the file types to build a minimal FileService for AppCtx::new
+    use serve::file::{File, FileService, ScanReport, ScannedFolder};
+
+    // ── Minimal FileService (uses real fs for read/write; empty scan) ─────────
+    fn fs_read(p: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(p)
+    }
+    fn fs_write(p: &Path, data: &[u8]) -> std::io::Result<()> {
+        std::fs::write(p, data)
+    }
+    fn fs_lookup(
+        by_abs: &HashMap<PathBuf, Arc<File>>,
+        abs: &Path,
+    ) -> std::io::Result<Option<Arc<File>>> {
+        Ok(by_abs.get(abs).cloned())
+    }
+    fn fs_scan(
+        root: &Path,
+        _dir_re: Option<&regex::Regex>,
+        _file_re: Option<&regex::Regex>,
+    ) -> std::io::Result<(ScannedFolder, ScanReport)> {
+        let svc = test_service(); // folder must hold a service; reuse this
+        let folder = ScannedFolder::new(
+            root.to_path_buf(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            None,
+            None,
+            svc,
+        );
+        Ok((folder, ScanReport::default()))
+    }
+    fn test_service() -> FileService {
+        FileService::from_fns(fs_read, fs_write, fs_scan, fs_lookup)
+    }
+
+    // ── Env serialization (avoid races on WHISPERCMS_DIR) ────────────────────
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
-
     fn with_env_var<F: FnOnce() -> T, T>(key: &str, val: Option<&str>, f: F) -> T {
-        let _g = env_lock().lock().unwrap(); // serialize env mutations
+        let _g = env_lock().lock().unwrap();
         let prev = env::var_os(key);
         match val {
             Some(v) => env::set_var(key, v),
@@ -140,9 +169,7 @@ mod tests {
         out
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // Minimal noop waker (avoid bringing in `futures` as a dev-dep)
-    // ───────────────────────────────────────────────────────────────
+    // ── Minimal noop waker (no futures crate needed) ─────────────────────────
     fn noop_waker() -> Waker {
         fn no_op(_: *const ()) {}
         fn clone(_: *const ()) -> RawWaker {
@@ -157,9 +184,7 @@ mod tests {
         unsafe { Waker::from_raw(raw_waker()) }
     }
 
-    // ─────────────────────────────
-    // dir_must_exist (unit tests)
-    // ─────────────────────────────
+    // ── dir_must_exist (unit) ────────────────────────────────────────────────
     #[test]
     fn dir_validator_ok_for_existing_dir() {
         let td = tempdir().expect("tmpdir");
@@ -186,9 +211,7 @@ mod tests {
         assert!(err.to_lowercase().contains("not a directory"));
     }
 
-    // ─────────────────────────────
-    // StartCmd parsing (clap derive)
-    // ─────────────────────────────
+    // ── StartCmd parsing (derive) ────────────────────────────────────────────
     #[test]
     fn startcmd_parses_with_positional_dir() {
         let td = tempdir().unwrap();
@@ -242,29 +265,29 @@ mod tests {
         assert!(err.to_string().to_lowercase().contains("not found"));
     }
 
-    // ─────────────────────────────
-    // Dispatcher / run_cli
-    // ─────────────────────────────
+    // ── Dispatcher / run_cli (build AppCtx with our test service) ────────────
     #[tokio::test]
     async fn run_cli_returns_success_on_valid_dir() {
         let td = tempdir().unwrap();
+        let ctx = AppCtx::new(td.path(), test_service());
         let cmd = Commands::Start(StartCmd {
             dir: td.path().to_path_buf(),
         });
-        let code = run_cli(cmd).await;
+        let code = run_cli(ctx, cmd).await;
         assert_eq!(code, ExitCode::SUCCESS);
     }
 
     #[tokio::test]
     async fn run_cli_returns_nonzero_on_bogus_dir() {
-        // Construct a bogus path directly to bypass clap validation.
+        // Build ctx with a bogus root; the business logic should fail and map to non-zero.
         let bogus: PathBuf = if cfg!(windows) {
             r"C:\__definitely__\__not__\__here__".into()
         } else {
             "/definitely/not/here/__whispercms__".into()
         };
+        let ctx = AppCtx::new(&bogus, test_service());
         let cmd = Commands::Start(StartCmd { dir: bogus });
-        let code = run_cli(cmd).await;
+        let code = run_cli(ctx, cmd).await;
         assert_ne!(code, ExitCode::SUCCESS, "expected non-zero exit on failure");
     }
 

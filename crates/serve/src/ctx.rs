@@ -1,18 +1,30 @@
-use std::path::{Path, PathBuf};
+use crate::file::FileService;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use thiserror::Error;
 
 /// Shared app context and error
 pub struct AppCtx {
-    dir: PathBuf,
+    root: PathBuf,
+    file_service: Arc<FileService>,
 }
 
 impl AppCtx {
-    pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+    pub fn new(root_dir: &Path, file_service: FileService) -> Self {
+        Self {
+            root: root_dir.to_path_buf(),
+            file_service: Arc::new(file_service),
+        }
     }
 
     pub fn root_dir(&self) -> &Path {
-        &self.dir.as_path()
+        &self.root.as_path()
+    }
+
+    pub fn file_service(&self) -> &FileService {
+        &self.file_service
     }
 }
 

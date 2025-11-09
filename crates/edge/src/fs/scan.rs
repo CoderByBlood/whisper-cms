@@ -13,7 +13,7 @@ use std::{
 };
 use walkdir::{DirEntry, WalkDir};
 
-const SRV: FileService = FileService::from_fns(
+pub(crate) const SRV: FileService = FileService::from_fns(
     read_file_bytes,
     write_file_bytes,
     scan_folder_with_report_and_filters,
