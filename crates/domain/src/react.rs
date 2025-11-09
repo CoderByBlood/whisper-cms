@@ -280,3 +280,332 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    // -------- test helpers --------
+
+    /// Spin until `pred()` returns true or `timeout` elapses.
+    fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if pred() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Returns (initial_seq, initial_last, initial_dirty) snapshot.
+    fn snapshot<T: Clone + Eq + Hash + Send + 'static>(
+        q: &ReactiveQueue<T>,
+    ) -> (u64, Option<T>, bool) {
+        (q.read_seq(), q.read_last_item(), q.read_dirty())
+    }
+
+    // -------- tests --------
+
+    /// Effects register and run (initial run occurs), but we only count *post-initial* ticks.
+    #[test]
+    fn effect_registers_and_fires_on_single_enqueue() {
+        let q = ReactiveQueue::<String>::start();
+
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+        static SEEN_INITIAL: AtomicBool = AtomicBool::new(false);
+
+        // Observe seq/last; count only post-initial runs.
+        q.effect(move || {
+            let _s = q.seq.get();
+            let _l = q.last_item.get();
+            if !SEEN_INITIAL.swap(true, Ordering::Relaxed) {
+                return; // ignore initial effect run
+            }
+            HITS.fetch_add(1, Ordering::Relaxed);
+        });
+
+        // Enqueue a single item.
+        q.enqueue("a".to_string());
+
+        // We should see at least one post-initial run within a reasonable window.
+        let ok = wait_until(Duration::from_millis(400), || {
+            HITS.load(Ordering::Relaxed) >= 1
+        });
+        assert!(ok, "effect should have fired after a single enqueue");
+
+        // Clean shutdown is synchronous.
+        q.stop();
+    }
+
+    /// Bursty duplicates get coalesced while queued; do not assert exact counts.
+    /// We only assert the seq advanced, and *likely* fewer than total duplicate sends.
+    #[test]
+    fn bursty_duplicates_are_coalesced_non_deterministically() {
+        let q = ReactiveQueue::<String>::start();
+        let (s0, _, _) = snapshot(&q);
+
+        // Send the same item several times back-to-back.
+        for _ in 0..5 {
+            q.enqueue("dup".to_string());
+        }
+
+        // Eventually, seq should advance by at least 1.
+        let ok = wait_until(Duration::from_millis(500), || q.read_seq() > s0);
+        assert!(ok, "sequence should advance after burst");
+
+        // Non-deterministic upper bound: it should not exceed the number of sends,
+        // but we don't assert exact coalescing factor, just that it's <= 5.
+        let advanced_by = q.read_seq().saturating_sub(s0);
+        assert!(
+            advanced_by <= 5,
+            "non-deterministic coalescing: seq advanced by {} (expected <= 5)",
+            advanced_by
+        );
+
+        q.stop();
+    }
+
+    /// Multiple distinct items should all eventually appear as last_item,
+    /// and seq should advance by at least the number of distinct items (within time).
+    #[test]
+    fn multiple_distinct_items_eventually_dispatch() {
+        let q = ReactiveQueue::<String>::start();
+        let (s0, _, _) = snapshot(&q);
+
+        let items = vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "gamma".to_string(),
+            "delta".to_string(),
+        ];
+        for it in &items {
+            q.enqueue(it.clone());
+        }
+
+        // Wait until seq has advanced by at least the number of distinct items.
+        let want = items.len() as u64;
+        let ok = wait_until(Duration::from_secs(2), || {
+            q.read_seq().saturating_sub(s0) >= want
+        });
+        assert!(
+            ok,
+            "expected seq to advance by >= {} after enqueuing {} distinct items (start seq: {})",
+            want,
+            items.len(),
+            s0
+        );
+
+        // last_item should be one of the enqueued items at the end.
+        if let Some(li) = q.read_last_item() {
+            assert!(
+                items.contains(&li),
+                "last_item should be one of the sent items; got: {:?}",
+                li
+            );
+        } else {
+            panic!("last_item should be Some after dispatch");
+        }
+
+        q.stop();
+    }
+
+    /// Dirty flag invariants: becomes true when queue receives items, eventually false when drained.
+    #[test]
+    fn dirty_flag_behaves_reasonably() {
+        let q = ReactiveQueue::<String>::start();
+
+        // Initially, likely false (empty).
+        let (_, _, d0) = snapshot(&q);
+        assert!(!d0, "dirty should start false");
+
+        // Enqueue several items.
+        for i in 0..3 {
+            q.enqueue(format!("x{}", i));
+        }
+
+        // Dirty should eventually be true.
+        let went_dirty = wait_until(Duration::from_millis(200), || q.read_dirty());
+        assert!(went_dirty, "dirty should become true after enqueues");
+
+        // Then eventually false again after draining.
+        let went_clean = wait_until(Duration::from_secs(2), || !q.read_dirty());
+        assert!(
+            went_clean,
+            "dirty should eventually return to false after draining"
+        );
+
+        q.stop();
+    }
+
+    /// Panic inside the user effect must not crash the reactive thread; subsequent enqueues still dispatch.
+    #[test]
+    fn effect_panic_is_contained_and_processing_continues() {
+        let q = ReactiveQueue::<String>::start();
+
+        static PANIC_ONCE: AtomicBool = AtomicBool::new(false);
+        static PROGRESS: AtomicUsize = AtomicUsize::new(0);
+
+        // Register an effect that will panic exactly once (post-initial),
+        // then continue to count subsequent ticks.
+        q.effect(move || {
+            let _ = q.seq.get();
+            if !PANIC_ONCE.swap(true, Ordering::Relaxed) {
+                // First post-initial run: induce a panic the effect code catches internally.
+                panic!("intentional effect panic");
+            } else {
+                PROGRESS.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        // Kick the system to run several ticks.
+        for i in 0..3 {
+            q.enqueue(format!("p{}", i));
+        }
+
+        // We should see progress after the panic (i.e., ticks recorded).
+        let ok = wait_until(Duration::from_secs(1), || {
+            PROGRESS.load(Ordering::Relaxed) >= 1
+        });
+        assert!(
+            ok,
+            "effect panic should be contained; expected subsequent progress but saw none"
+        );
+
+        q.stop();
+    }
+
+    /// `stop(&self)` is idempotent and safe to call multiple times.
+    #[test]
+    fn stop_is_idempotent() {
+        let q = ReactiveQueue::<String>::start();
+
+        // Drive some activity
+        q.enqueue("a".into());
+        wait_until(Duration::from_millis(300), || q.read_seq() >= 1);
+
+        // Multiple stops shouldn't panic.
+        q.stop();
+        q.stop();
+        q.stop();
+    }
+
+    /// Enqueue from many threads concurrently; we assert lower bounds (>= unique items),
+    /// but do not assume any exact ordering or perfect coalescing.
+    #[test]
+    fn concurrent_enqueues_are_processed() {
+        let q = Arc::new(ReactiveQueue::<String>::start());
+        let (s0, _, _) = (q.read_seq(), q.read_last_item(), q.read_dirty());
+
+        let threads = 8usize;
+        let per_thread = 10usize;
+
+        let mut handles = Vec::new();
+        for tid in 0..threads {
+            let qc = q.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    qc.enqueue(format!("t{}_i{}", tid, i));
+                }
+                // Also enqueue a few duplicates per thread.
+                for _ in 0..5 {
+                    qc.enqueue(format!("dup_t{}", tid));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // We enqueued `threads * per_thread` distinct items plus duplicates.
+        // We assert we get at least the distinct count within a reasonable time.
+        let distinct = (threads * per_thread) as u64;
+        let ok = wait_until(Duration::from_secs(3), || {
+            q.read_seq().saturating_sub(s0) >= distinct
+        });
+        assert!(
+            ok,
+            "expected at least {} dispatches; got {} (start seq: {})",
+            distinct,
+            q.read_seq(),
+            s0
+        );
+
+        q.stop();
+    }
+
+    /// Reading APIs should be safe at any time, including immediately after start,
+    /// between enqueues, and after stop. This test samples around the lifecycle.
+    #[test]
+    fn reads_are_safe_across_lifecycle() {
+        let q = ReactiveQueue::<String>::start();
+
+        // Immediately readable
+        let _ = q.read_seq();
+        let _ = q.read_last_item();
+        let _ = q.read_dirty();
+
+        // During activity
+        q.enqueue("z1".into());
+        wait_until(Duration::from_millis(400), || q.read_seq() >= 1);
+        let _ = q.read_seq();
+        let _ = q.read_last_item();
+        let _ = q.read_dirty();
+
+        // After stop, reads still return safely (Drop already joins too).
+        q.stop();
+        let _ = q.read_seq();
+        let _ = q.read_last_item();
+        let _ = q.read_dirty();
+    }
+
+    /// Effects created via `effect(...)` are intentionally tracked on (seq, dirty, last),
+    /// so they re-run on dispatch. We assert that it runs at least once after enqueues.
+    #[test]
+    fn tracked_effect_re_runs_on_changes() {
+        let q = ReactiveQueue::<String>::start();
+        static HITS: AtomicUsize = AtomicUsize::new(0);
+
+        // This effect body itself doesn't read signals, but the API tracks (seq, dirty, last)
+        // before invoking the user closure, so it will re-run on queue dispatches.
+        q.effect(|| {
+            HITS.fetch_add(1, Ordering::Relaxed);
+        });
+
+        // Give time for the initial run
+        thread::sleep(std::time::Duration::from_millis(50));
+        let initial = HITS.load(Ordering::Relaxed);
+        assert!(
+            initial >= 1,
+            "effect should run at least once on registration"
+        );
+
+        // Enqueue a few items; the effect should run again (tracked re-run)
+        q.enqueue("a".into());
+        q.enqueue("b".into());
+
+        let ok = {
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_millis(500);
+            let mut ok = false;
+            while start.elapsed() < timeout {
+                if HITS.load(Ordering::Relaxed) > initial {
+                    ok = true;
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            ok
+        };
+        assert!(ok, "tracked effect should re-run after enqueues");
+
+        q.stop();
+    }
+}

@@ -1,14 +1,14 @@
 mod sqlite;
 
-use serve::db::{DatabaseError, SqlValue};
+use serve::db::{DatabaseError, DatabaseService, SqlValue};
 use sqlite::{Bind, SqliteDbError};
 use sqlx::{Column, Row, Sqlite, Type, TypeInfo, ValueRef};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::LazyLock;
 
-//const SRV: DatabaseService =
-//    DatabaseService::from_fns(exec_batch_write, exec_fetch_all, checkpoint_wal);
+const _SRV: DatabaseService =
+    DatabaseService::from_fns(exec_batch_write, exec_fetch_all, checkpoint_wal);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Robust sync bridge: a private global current-thread runtime
@@ -351,5 +351,68 @@ mod tests {
         let path = db_url.trim_start_matches("sqlite://");
         let meta = fs::metadata(path).expect("db file exists");
         assert!(meta.len() > 0);
+    }
+
+    #[test]
+    fn non_pk_integer_widens_when_out_of_i32_range() {
+        let (_dir, db_url) = temp_db_url("port_widen_nonpk");
+
+        exec_batch_write(
+            &db_url,
+            vec![(
+                "CREATE TABLE IF NOT EXISTS t(n INTEGER NOT NULL)".to_string(),
+                vec![],
+            )],
+        )
+        .expect("create ok");
+
+        // value just beyond i32::MAX should come back as Long
+        let wide = (i32::MAX as i64) + 1;
+        exec_batch_write(
+            &db_url,
+            vec![(
+                "INSERT INTO t(n) VALUES (?)".to_string(),
+                vec![SqlValue::Long(wide)],
+            )],
+        )
+        .expect("insert ok");
+
+        let rows = exec_fetch_all(&db_url, ("SELECT n FROM t".to_string(), vec![])).expect("fetch");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("n"), Some(&SqlValue::Long(wide)));
+    }
+
+    #[test]
+    fn boolean_declared_column_maps_to_bool_but_integer_0_1_stays_numeric() {
+        let (_dir, db_url) = temp_db_url("port_bool_vs_int");
+
+        exec_batch_write(
+            &db_url,
+            vec![(
+                "CREATE TABLE IF NOT EXISTS t(b BOOLEAN, i INTEGER)".to_string(),
+                vec![],
+            )],
+        )
+        .expect("create ok");
+
+        exec_batch_write(
+            &db_url,
+            vec![(
+                "INSERT INTO t(b,i) VALUES (?,?)".to_string(),
+                vec![SqlValue::Bool(true), SqlValue::Int(1)],
+            )],
+        )
+        .expect("insert ok");
+
+        let rows =
+            exec_fetch_all(&db_url, ("SELECT b,i FROM t".to_string(), vec![])).expect("fetch");
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+
+        // Declared BOOLEAN should be decoded as Bool(true)
+        assert_eq!(r.get("b"), Some(&SqlValue::Bool(true)));
+
+        // Declared INTEGER with 0/1 should remain numeric, not Bool
+        assert_eq!(r.get("i"), Some(&SqlValue::Int(1)));
     }
 }
