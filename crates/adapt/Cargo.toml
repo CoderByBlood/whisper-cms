@@ -14,8 +14,12 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 serde_yml = { workspace = true }
 regex = { workspace = true }
+tower = { workspace = true }
+clap = { workspace = true }
 domain = { path = "../domain" }
+serve = { path = "../serve" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 mockall = { workspace = true }
+futures = { workspace = true }

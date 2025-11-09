@@ -15,6 +15,7 @@ ractor = { workspace = true }
 sqlx = { workspace = true }
 async-trait = { workspace = true }
 regex = { workspace = true }
+clap = { workspace = true }
 domain = { path = "../domain" }
 adapt = { path = "../adapt" }
 serve = { path = "../serve" }
