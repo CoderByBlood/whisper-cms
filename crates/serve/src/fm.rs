@@ -3,20 +3,15 @@
 //! - TOML: `+++` (fenced, closing `+++`)
 //! - JSON: first non-whitespace is `{` (unfenced top-level object)
 
+use domain::doc::DocumentError;
 use serde::{Deserialize, Serialize};
 use serde_json as json;
-use serde_yml as yml;
+use serde_yml::{self as yml};
 use std::error::Error as StdError;
 use thiserror::Error;
 use toml;
 
 pub type Result<T> = std::result::Result<T, FrontMatterError>;
-
-/// Abstract source of UTF-8 text (no direct fs:: usage required).
-pub trait ContentSource {
-    fn read_to_string(&self) -> Result<String>;
-    fn try_parse(&self) -> Result<Parsed>;
-}
 
 /// Which format (if any) was detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,32 +56,22 @@ pub enum FrontMatterError {
     #[error("JSON front matter parse error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Document front matter parse error.
+    #[error("Document front matter parse error: {0}")]
+    Doc(#[from] DocumentError),
+
     /// Transparent catch-all for any other error you want to bubble up.
     /// Keeps the original Display/Debug and source chain intact.
     #[error(transparent)]
-    Other(#[from] Box<dyn StdError + Send + Sync>),
+    Mapped(#[from] Box<dyn StdError + Send + Sync>),
 }
-
-//pub trait FmError: StdError + Send + Sync + 'static {}
-
-// Blanket conversion: lets `?` lift *any* error into TheirError::Other
-// impl<E> From<E> for FrontMatterError
-// where
-//     E: FmError,
-// {
-//     fn from(e: E) -> Self {
-//         FrontMatterError::Mapped {
-//             source: Box::new(e),
-//         }
-//     }
-// }
 
 /// Parse a document with optional **YAML/TOML/JSON** front matter.
 /// - YAML: top-of-file `---` fence … closing `---`
 /// - TOML: top-of-file `+++` fence … closing `+++`
 /// - JSON: first non-whitespace is `{` (parses one balanced top-level object)
-pub fn parse_front_matter(src: &impl ContentSource) -> Result<Parsed> {
-    let mut text = src.read_to_string()?;
+pub fn parse_front_matter(txt: String) -> Result<Parsed> {
+    let mut text = txt;
 
     // Strip UTF-8 BOM if present
     if text.as_bytes().starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -251,13 +236,13 @@ mod tests {
     use super::*;
 
     struct InMem(&'static str);
-    impl ContentSource for InMem {
+    impl InMem {
         fn read_to_string(&self) -> Result<String> {
             Ok(self.0.to_string())
         }
 
         fn try_parse(&self) -> Result<Parsed> {
-            Ok(parse_front_matter(self)?)
+            Ok(parse_front_matter(self.read_to_string()?)?)
         }
     }
 

@@ -3,8 +3,8 @@
 //! - Single writer actor per DB URL executing batched SQL in one IMMEDIATE txn.
 //! - Public API hides actor details; consumers use exec_batch_write()/checkpoint_wal().
 
-use adapt::db::DbError;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use serve::db::DbError;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     ConnectOptions, SqliteConnection, SqlitePool,
@@ -23,9 +23,8 @@ pub enum SqliteDbError {
     #[error("Connection failed: {0}")]
     Connect(#[from] sqlx::Error),
 
-    #[error("Setup/migration failed: {0}")]
-    Setup(sqlx::Error),
-
+    //#[error("Setup/migration failed: {0}")]
+    //Setup(sqlx::Error),
     #[error("SQL execution failed: {0}")]
     Execute(sqlx::Error),
 
@@ -158,7 +157,7 @@ impl Actor for WriterActor {
             .map_err(to_actor_err)?;
 
         // Additional pragmatic PRAGMAs (safe defaults for WAL workloads)
-        // Note: use best-effort; if they fail, bubble via SetupSnafu.
+        // Note: use best-effort; if they fail, bubble up.
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&mut conn)
             .await?;
