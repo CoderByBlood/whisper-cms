@@ -1,6 +1,6 @@
 mod sqlite;
 
-use serve::db::{DatabaseError, DatabaseService, SqlValue};
+use adapt::db::{DatabaseError, DatabaseService, SqlValue};
 use sqlite::{Bind, SqliteDbError};
 use sqlx::{Column, Row, Sqlite, Type, TypeInfo, ValueRef};
 use std::collections::HashMap;

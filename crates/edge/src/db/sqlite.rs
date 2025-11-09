@@ -3,8 +3,8 @@
 //! - Single writer actor per DB URL executing batched SQL in one IMMEDIATE txn.
 //! - Public API hides actor details; consumers use exec_batch_write()/checkpoint_wal().
 
+use adapt::db::DbError;
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
-use serve::db::DbError;
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     ConnectOptions, SqliteConnection, SqlitePool,
