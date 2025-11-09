@@ -1,5 +1,5 @@
 use crate::fs::scan::SRV;
-use adapt::cli::{run_cli, Commands};
+use adapt::cmd::{run_cli, Commands};
 use clap::Parser;
 use serve::ctx::AppCtx;
 use std::process::ExitCode;
