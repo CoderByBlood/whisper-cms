@@ -3,7 +3,6 @@
 //! - TOML: `+++` (fenced, closing `+++`)
 //! - JSON: first non-whitespace is `{` (unfenced top-level object)
 
-use domain::doc::DocumentError;
 use serde::{Deserialize, Serialize};
 use serde_json as json;
 use serde_yml::{self as yml};
@@ -55,10 +54,6 @@ pub enum FrontMatterError {
     /// JSON front matter parse error.
     #[error("JSON front matter parse error: {0}")]
     Json(#[from] serde_json::Error),
-
-    /// Document front matter parse error.
-    #[error("Document front matter parse error: {0}")]
-    Doc(#[from] DocumentError),
 
     /// Transparent catch-all for any other error you want to bubble up.
     /// Keeps the original Display/Debug and source chain intact.

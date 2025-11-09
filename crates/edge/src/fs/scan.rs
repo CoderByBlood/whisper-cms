@@ -1,10 +1,10 @@
 //! Scanning + I/O operations. Constructs `file::ScannedFolder`/`file::File`
 //! and performs all filesystem access here (no std::fs in `file.rs`).
 
-use domain::file::{File, FileService, ScanReport, ScanStageError, ScannedFolder};
 use rayon::prelude::*;
 use regex::Regex;
 use same_file::Handle;
+use serve::file::{File, FileService, ScanReport, ScanStageError, ScannedFolder};
 use std::{
     collections::HashMap,
     fs, io,
