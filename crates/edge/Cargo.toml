@@ -16,6 +16,7 @@ sqlx = { workspace = true }
 async-trait = { workspace = true }
 regex = { workspace = true }
 clap = { workspace = true }
+config = { workspace = true }
 domain = { path = "../domain" }
 adapt = { path = "../adapt" }
 serve = { path = "../serve" }

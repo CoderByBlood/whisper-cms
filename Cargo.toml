@@ -35,3 +35,4 @@ regex = "1.12.2"
 clap = { version = "4.5.51", features = ["derive", "env"] }
 tower = { version = "0.5.2", features = ["full"] }
 futures = "0.3.31"
+config = "0.15.18"

@@ -1,4 +1,5 @@
 use crate::file::FileService;
+use domain::setting::Settings;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -7,24 +8,49 @@ use thiserror::Error;
 
 /// Shared app context and error
 pub struct AppCtx {
-    root: PathBuf,
-    file_service: Arc<FileService>,
+    root: Option<PathBuf>,
+    settings: Option<Arc<Settings>>,
+    file_service: Option<Arc<FileService>>,
 }
 
 impl AppCtx {
-    pub fn new(root_dir: &Path, file_service: FileService) -> Self {
+    pub fn new() -> Self {
         Self {
-            root: root_dir.to_path_buf(),
-            file_service: Arc::new(file_service),
+            root: None,
+            settings: None,
+            file_service: None,
         }
     }
 
     pub fn root_dir(&self) -> &Path {
-        &self.root.as_path()
+        &self
+            .root
+            .as_ref()
+            .expect("Root directory not set")
+            .as_path()
+    }
+
+    pub fn set_root(mut self, root: &Path) -> Self {
+        self.root = Some(root.to_path_buf());
+        self
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings.as_ref().expect("Settings not set")
+    }
+
+    pub fn set_settings(mut self, settings: Settings) -> Self {
+        self.settings = Some(Arc::new(settings));
+        self
     }
 
     pub fn file_service(&self) -> &FileService {
-        &self.file_service
+        &self.file_service.as_ref().expect("File service not set")
+    }
+
+    pub fn set_file_service(mut self, file_service: FileService) -> Self {
+        self.file_service = Some(Arc::new(file_service));
+        self
     }
 }
 

@@ -13,7 +13,7 @@ use std::{
 };
 use walkdir::{DirEntry, WalkDir};
 
-pub(crate) const SRV: FileService = FileService::from_fns(
+pub(crate) const FILE_SERVICE: FileService = FileService::from_fns(
     read_file_bytes,
     write_file_bytes,
     scan_folder_with_report_and_filters,
@@ -193,14 +193,14 @@ pub fn scan_folder_with_report_and_filters(
             if let Some(existing) = by_handle.get(&h) {
                 existing.clone()
             } else {
-                let f = Arc::new(File::new(it.abs.clone(), it.rel.clone(), SRV));
+                let f = Arc::new(File::new(it.abs.clone(), it.rel.clone(), FILE_SERVICE));
                 by_handle.insert(h, f.clone());
                 f
             }
         } else if let Some(existing) = by_abs.get(&it.abs) {
             existing.clone()
         } else {
-            Arc::new(File::new(it.abs.clone(), it.rel.clone(), SRV))
+            Arc::new(File::new(it.abs.clone(), it.rel.clone(), FILE_SERVICE))
         };
 
         // Insert into abs map; push to files only on first sighting.
@@ -220,7 +220,7 @@ pub fn scan_folder_with_report_and_filters(
         by_rel,
         dir_name_re.cloned(),
         file_name_re.cloned(),
-        SRV,
+        FILE_SERVICE,
     );
     Ok((store, report))
 }

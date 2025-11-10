@@ -110,12 +110,13 @@ mod tests {
         task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     };
     use tempfile::{tempdir, NamedTempFile};
-    use tokio; // for #[tokio::test]
+    use tokio;
 
-    // Import the file types to build a minimal FileService for AppCtx::new
+    // Bring in settings and file types for the minimal service
+    use domain::setting::{Server, Settings};
     use serve::file::{File, FileService, ScanReport, ScannedFolder};
 
-    // ── Minimal FileService (uses real fs for read/write; empty scan) ─────────
+    // ── Minimal FileService (real fs read/write; empty scan) ─────────────────
     fn fs_read(p: &Path) -> std::io::Result<Vec<u8>> {
         std::fs::read(p)
     }
@@ -133,7 +134,7 @@ mod tests {
         _dir_re: Option<&regex::Regex>,
         _file_re: Option<&regex::Regex>,
     ) -> std::io::Result<(ScannedFolder, ScanReport)> {
-        let svc = test_service(); // folder must hold a service; reuse this
+        let svc = test_service();
         let folder = ScannedFolder::new(
             root.to_path_buf(),
             Vec::new(),
@@ -265,11 +266,24 @@ mod tests {
         assert!(err.to_string().to_lowercase().contains("not found"));
     }
 
-    // ── Dispatcher / run_cli (build AppCtx with our test service) ────────────
+    // ── Dispatcher / run_cli (attach Settings to ctx) ────────────────────────
     #[tokio::test]
-    async fn run_cli_returns_success_on_valid_dir() {
+    async fn run_cli_returns_success_on_valid_dir_with_settings() {
         let td = tempdir().unwrap();
-        let ctx = AppCtx::new(td.path(), test_service());
+
+        // Minimal, valid settings (if your start logic requires them)
+        let settings = Settings {
+            server: Some(Server {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 8080,
+            }),
+        };
+
+        let ctx = AppCtx::new()
+            .set_file_service(test_service())
+            .set_root(td.path())
+            .set_settings(settings);
+
         let cmd = Commands::Start(StartCmd {
             dir: td.path().to_path_buf(),
         });
@@ -278,14 +292,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_cli_returns_nonzero_on_bogus_dir() {
-        // Build ctx with a bogus root; the business logic should fail and map to non-zero.
+    async fn run_cli_returns_nonzero_on_bogus_dir_even_with_settings() {
         let bogus: PathBuf = if cfg!(windows) {
             r"C:\__definitely__\__not__\__here__".into()
         } else {
             "/definitely/not/here/__whispercms__".into()
         };
-        let ctx = AppCtx::new(&bogus, test_service());
+
+        let settings = Settings {
+            server: Some(Server {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 8080,
+            }),
+        };
+
+        let ctx = AppCtx::new()
+            .set_file_service(test_service())
+            .set_root(&bogus)
+            .set_settings(settings);
+
         let cmd = Commands::Start(StartCmd { dir: bogus });
         let code = run_cli(ctx, cmd).await;
         assert_ne!(code, ExitCode::SUCCESS, "expected non-zero exit on failure");

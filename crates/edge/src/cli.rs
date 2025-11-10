@@ -1,6 +1,8 @@
-use crate::fs::scan::SRV;
+use crate::fs::scan::FILE_SERVICE;
 use adapt::cmd::{run_cli, Commands};
 use clap::Parser;
+use config::{Config, File};
+use domain::setting::Settings;
 use serve::ctx::AppCtx;
 use std::process::ExitCode;
 
@@ -15,11 +17,39 @@ pub struct Cli {
 #[tokio::main(flavor = "multi_thread")]
 pub async fn start() -> ExitCode {
     let cli = Cli::parse();
+
     let ctx = match &cli.command {
-        Commands::Start(start) => AppCtx::new(&start.dir, SRV),
+        Commands::Start(start) => AppCtx::new()
+            .set_file_service(FILE_SERVICE)
+            .set_root(&start.dir),
     };
 
-    run_cli(ctx, cli.command).await
+    let file = ctx.root_dir().join("whispercms-settings.toml");
+
+    let cfg = match Config::builder()
+        .add_source(File::with_name(
+            file.as_os_str()
+                .to_str()
+                .expect("Failed to convert file path to string"),
+        ))
+        .build()
+    {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("Error loading settings: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let settings: Settings = match cfg.try_deserialize() {
+        Ok(settings) => settings,
+        Err(err) => {
+            eprintln!("Error deserializing settings: {}", err);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    run_cli(ctx.set_settings(settings), cli.command).await
 }
 
 #[cfg(test)]
