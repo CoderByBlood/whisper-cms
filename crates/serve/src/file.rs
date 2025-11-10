@@ -14,16 +14,16 @@ use thiserror::Error;
 /// Concrete wiring is provided from `scan.rs`.
 #[derive(Clone, Copy, Debug)]
 pub struct FileService {
-    pub read_file_bytes: fn(&Path) -> io::Result<Vec<u8>>,
-    pub write_file_bytes: fn(&Path, &[u8]) -> io::Result<()>,
+    read_file_bytes: fn(&Path) -> io::Result<Vec<u8>>,
+    write_file_bytes: fn(&Path, &[u8]) -> io::Result<()>,
 
-    pub scan_with_report_and_filters: fn(
+    scan_folder_with_report_and_filters: fn(
         root_dir: &Path,
         dir_name_re: Option<&Regex>,
         file_name_re: Option<&Regex>,
     ) -> io::Result<(ScannedFolder, ScanReport)>,
 
-    pub lookup_by_absolute:
+    lookup_by_absolute:
         fn(by_abs: &HashMap<PathBuf, Arc<File>>, abs: &Path) -> io::Result<Option<Arc<File>>>,
 }
 
@@ -38,7 +38,7 @@ impl FileService {
         Self {
             read_file_bytes: read,
             write_file_bytes: write,
-            scan_with_report_and_filters: scan,
+            scan_folder_with_report_and_filters: scan,
             lookup_by_absolute: lookup,
         }
     }
@@ -51,6 +51,25 @@ impl FileService {
     #[inline]
     pub fn write(&self, p: &Path, data: &[u8]) -> io::Result<()> {
         (self.write_file_bytes)(p, data)
+    }
+
+    #[inline]
+    pub fn scan_with_report_and_filters(
+        &self,
+        p: &Path,
+        dir_name_re: Option<&Regex>,
+        file_name_re: Option<&Regex>,
+    ) -> io::Result<(ScannedFolder, ScanReport)> {
+        (self.scan_folder_with_report_and_filters)(p, dir_name_re, file_name_re)
+    }
+
+    #[inline]
+    pub fn lookup_by_absolute(
+        &self,
+        by_abs: &HashMap<PathBuf, Arc<File>>,
+        abs: &Path,
+    ) -> io::Result<Option<Arc<File>>> {
+        (self.lookup_by_absolute)(by_abs, abs)
     }
 }
 
@@ -191,7 +210,7 @@ impl ScannedFolder {
     /// Re-scan the directory and return a refreshed store using the SAME filters.
     #[inline]
     pub fn refresh(&self) -> io::Result<Self> {
-        (self.svc.scan_with_report_and_filters)(
+        (self.svc.scan_folder_with_report_and_filters)(
             &self.root,
             self.dir_name_re.as_ref(),
             self.file_name_re.as_ref(),
