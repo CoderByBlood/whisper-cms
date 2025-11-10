@@ -56,6 +56,14 @@ impl AppCtx {
 
 #[derive(Error, Debug)]
 pub enum AppError {
+    /// Regex error
+    #[error("Regex error: {0}")]
+    Regex(#[from] regex::Error),
+
+    /// Underlying I/O
+    #[error("I/O error while reading: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("{0}")]
     Msg(String),
 }
