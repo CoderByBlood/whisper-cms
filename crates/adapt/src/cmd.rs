@@ -91,7 +91,7 @@ pub async fn run_cli(ctx: AppCtx, cmd: Commands) -> ExitCode {
 
 async fn start_command(ctx: &AppCtx, _cmd: StartCmd) -> Result<ExitCode> {
     // Delegate to the serve tier
-    serve::start::start_command(ctx)
+    serve::start::find_content(ctx)
         .await
         .and(Ok(ExitCode::SUCCESS))
 }
@@ -101,6 +101,7 @@ mod tests {
     use super::*;
     use clap::error::ErrorKind;
     use clap::Parser;
+    use std::fs;
     use std::sync::{Mutex, OnceLock};
     use std::{
         collections::HashMap,
@@ -270,6 +271,9 @@ mod tests {
     #[tokio::test]
     async fn run_cli_returns_success_on_valid_dir_with_settings() {
         let td = tempdir().unwrap();
+
+        // Create content directory
+        fs::create_dir(td.path().join("content")).unwrap();
 
         // Minimal, valid settings (if your start logic requires them)
         let settings = Settings {
