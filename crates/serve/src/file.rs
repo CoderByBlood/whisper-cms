@@ -120,7 +120,7 @@ pub struct ScanReport {
 }
 
 /// A single file known to the store (canonical absolute + path relative to root).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct File {
     abs: PathBuf,
     rel: PathBuf,
