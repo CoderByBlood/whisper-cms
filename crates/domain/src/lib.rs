@@ -1,2 +1,2 @@
-pub mod react;
+pub mod reactive;
 pub mod setting;

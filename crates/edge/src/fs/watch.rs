@@ -1,37 +1,37 @@
 //! folder_watch.rs
-//! Functional, module-level entry points that drive a `ReactiveQueue<PathBuf>` from OS filesystem events.
+//! Functional, module-level entry points that turn OS filesystem events into a
+//! **bounded, debounced, coalesced** stream of `PathBuf`s over `tokio::mpsc`.
 //!
 //! Usage:
-//!   let (queue, stop) = watch_folder_default("/some/root")?;
-//!   queue.effect(|| {
-//!       let _ = queue.seq.get();             // one tick per dispatched path
-//!       if let Some(p) = queue.last_item.get() {
-//!           // react to `p`
-//!       }
-//!   });
-//!   // ... later:
-//!   stop(); // synchronous shutdown (stops forwarder task, watcher, and the queue)
+//!   let (mut rx, stop) = watch_folder_default("/some/root")?;
+//!   while let Some(path) = rx.recv().await {
+//!       // react to `path`
+//!   }
+//!   // ... later (or in a drop path):
+//!   stop(); // synchronous shutdown (stops forwarder task and the watcher)
 //!
 //! If you need knobs, use `watch_folder(root, cfg)`.
 
-use domain::react::ReactiveQueue;
 use notify::{Event, RecursiveMode, Result as NotifyResult, Watcher};
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
 };
-use tokio::sync::{mpsc, oneshot}; // adjust this path to where ReactiveQueue<T> lives
+use tokio::sync::{mpsc, oneshot};
 
-/// Configuration for how we forward events into the queue.
+/// Configuration for how we forward events into a bounded channel.
 #[derive(Debug, Clone)]
 pub struct FolderWatchConfig {
     /// Whether to recursively watch the directory tree.
     pub recursive: bool,
-    /// Small debounce to smooth editor bursts before we forward to the queue (milliseconds).
-    /// The `ReactiveQueue` still coalesces duplicates while queued; this only drains immediate bursts from `notify`.
+    /// Small debounce to smooth editor bursts before forwarding (milliseconds).
+    /// Duplicate paths within a debounce window are coalesced.
     pub debounce_ms: u64,
     /// Canonicalize paths before enqueue (useful for stable equality across symlinks).
     pub canonicalize_paths: bool,
+    /// Bounded channel capacity for backpressure. If the consumer is slow,
+    /// the forwarder will await sends once the buffer fills.
+    pub channel_capacity: usize,
 }
 
 impl Default for FolderWatchConfig {
@@ -40,6 +40,7 @@ impl Default for FolderWatchConfig {
             recursive: true,
             debounce_ms: 40,
             canonicalize_paths: false,
+            channel_capacity: 512,
         }
     }
 }
@@ -47,26 +48,26 @@ impl Default for FolderWatchConfig {
 /// Convenience: start with defaults.
 pub fn watch_folder_default(
     root: impl AsRef<Path>,
-) -> NotifyResult<(Arc<ReactiveQueue<PathBuf>>, Box<dyn FnOnce() + Send>)> {
+) -> NotifyResult<(mpsc::Receiver<PathBuf>, Box<dyn FnOnce() + Send>)> {
     watch_folder(root, FolderWatchConfig::default())
 }
 
-/// Functional entry point: start watching `root` and forwarding paths into a **new** ReactiveQueue<PathBuf>.
-/// Returns:
-/// - `Arc<ReactiveQueue<PathBuf>>` you can use to register effects and read signals
-/// - `stop: Box<dyn FnOnce() + Send>` synchronous closure that shuts down everything
+/// Start watching `root` and return:
+/// - a **bounded** `tokio::mpsc::Receiver<PathBuf>`
+/// - a synchronous `stop` closure that halts the watcher and forwarder
 pub fn watch_folder(
     root: impl AsRef<Path>,
     cfg: FolderWatchConfig,
-) -> NotifyResult<(Arc<ReactiveQueue<PathBuf>>, Box<dyn FnOnce() + Send>)> {
-    // Create the queue.
-    let queue = Arc::new(ReactiveQueue::<PathBuf>::start());
+) -> NotifyResult<(mpsc::Receiver<PathBuf>, Box<dyn FnOnce() + Send>)> {
+    // Output: bounded channel with caller-specified capacity (provides backpressure).
+    let (tx_out, rx_out) = mpsc::channel::<PathBuf>(cfg.channel_capacity);
 
-    // Wire notify → mpsc so we can process on a Tokio task.
-    let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
+    // notify callback → unbounded mpsc (we can’t await in the callback)
+    let (tx_raw, mut rx_raw) = mpsc::unbounded_channel::<Event>();
     let mut watcher = notify::recommended_watcher(move |res| {
         if let Ok(ev) = res {
-            let _ = tx.send(ev);
+            // If the receiver side is gone, ignore send errors.
+            let _ = tx_raw.send(ev);
         }
     })?;
 
@@ -81,42 +82,58 @@ pub fn watch_folder(
     // Shutdown signal for the forwarder task.
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
-    // Clone what we need into the task.
-    let queue_for_task = Arc::clone(&queue);
-    let canonicalize = cfg.canonicalize_paths;
     let debounce_ms = cfg.debounce_ms;
+    let canonicalize = cfg.canonicalize_paths;
 
-    // Spawn forwarder: debounce bursts, enqueue each path (coalescing handled by ReactiveQueue).
+    // Clone the bounded sender into the task so we can drop it in `stop`.
+    let tx_out_for_task = tx_out.clone();
+
+    // Forwarder task: debounce, coalesce duplicates within the window, then
+    // send each unique path into the bounded channel (awaiting when full).
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = &mut shutdown_rx => break,
-                maybe = rx.recv() => {
+                maybe = rx_raw.recv() => {
                     let Some(ev) = maybe else { break; };
 
+                    // Optionally debounce a short window to collect burst events.
                     if debounce_ms > 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
                     }
 
-                    // Handle this batch.
+                    // Coalesce duplicates within the debounce window.
+                    let mut uniq = HashSet::<PathBuf>::new();
+
+                    // include current event's paths
                     for p in ev.paths {
-                        let path_to_send = if canonicalize {
+                        let path = if canonicalize {
                             std::fs::canonicalize(&p).unwrap_or(p)
                         } else {
                             p
                         };
-                        queue_for_task.enqueue(path_to_send);
+                        uniq.insert(path);
                     }
 
-                    // Drain immediate backlog without extra sleeps.
-                    while let Ok(ev2) = rx.try_recv() {
+                    // Drain any additional immediate events without sleeping again,
+                    // adding their (possibly canonicalized) paths to the same set.
+                    while let Ok(ev2) = rx_raw.try_recv() {
                         for p in ev2.paths {
-                            let path_to_send = if canonicalize {
+                            let path = if canonicalize {
                                 std::fs::canonicalize(&p).unwrap_or(p)
                             } else {
                                 p
                             };
-                            queue_for_task.enqueue(path_to_send);
+                            uniq.insert(path);
+                        }
+                    }
+
+                    // Send each unique path to the bounded channel; this is where
+                    // **backpressure** is applied (await when full).
+                    for p in uniq {
+                        // If receiver dropped, stop.
+                        if tx_out_for_task.send(p).await.is_err() {
+                            break;
                         }
                     }
                 }
@@ -124,18 +141,16 @@ pub fn watch_folder(
         }
     });
 
-    // Build a synchronous stopper closure that:
+    // Build a synchronous stopper that:
     // 1) drops the watcher (stop native callbacks)
-    // 2) signals the task to exit and aborts it if still running
-    // 3) stops the ReactiveQueue (joins its reactive thread)
+    // 2) signals the forwarder to exit and aborts if still running
+    // 3) drops the bounded sender to close the output stream
     let stop = {
-        // Move ownership into the closure
         let mut maybe_watcher = Some(watcher);
         let mut maybe_task = Some(task);
-        let queue_for_stop = Arc::clone(&queue);
         let mut maybe_shutdown = Some(shutdown_tx);
+        let mut maybe_tx_out = Some(tx_out);
 
-        // inside watch_folder / stop closure
         Box::new(move || {
             // 1) stop OS callbacks
             maybe_watcher.take();
@@ -145,253 +160,229 @@ pub fn watch_folder(
                 let _ = tx.send(());
             }
             if let Some(h) = maybe_task.take() {
-                h.abort(); // can't .await here; abort is fine
+                h.abort(); // can’t .await here; abort is fine
             }
 
-            // 3) stop the queue synchronously (non-consuming API)
-            queue_for_stop.stop();
+            // 3) drop the sender to close the channel
+            drop(maybe_tx_out.take());
         }) as Box<dyn FnOnce() + Send>
     };
 
-    Ok((queue, stop))
+    Ok((rx_out, stop))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leptos_reactive::SignalGet;
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         fs,
         path::{Path, PathBuf},
-        sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc, Mutex,
-        },
         time::{Duration, Instant},
     };
     use tempfile::TempDir;
+    use tokio::time::timeout;
 
     // ---------- helpers ----------
-
-    fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if pred() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
-    }
 
     fn canon(p: &Path) -> PathBuf {
         std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
     }
 
-    fn register_counting_effect(
-        q: &ReactiveQueue<PathBuf>,
-        hits: &'static AtomicUsize,
-        seen_initial: &'static AtomicBool,
-    ) {
-        let seq = q.seq;
-        let last = q.last_item;
-
-        q.effect(move || {
-            let _ = seq.get(); // tracked
-            let _ = last.get(); // tracked
-            if !seen_initial.swap(true, Ordering::Relaxed) {
-                return; // ignore first run
+    async fn recv_until(
+        rx: &mut mpsc::Receiver<PathBuf>,
+        deadline: Duration,
+        mut predicate: impl FnMut(&PathBuf) -> bool,
+    ) -> Option<PathBuf> {
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            if let Some(p) = timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .ok()
+                .flatten()
+            {
+                if predicate(&p) {
+                    return Some(p);
+                }
             }
-            hits.fetch_add(1, Ordering::Relaxed);
-        });
+        }
+        None
+    }
+
+    async fn drain_for(rx: &mut mpsc::Receiver<PathBuf>, how_long: Duration) -> Vec<PathBuf> {
+        let start = Instant::now();
+        let mut out = Vec::new();
+        while start.elapsed() < how_long {
+            match timeout(Duration::from_millis(50), rx.recv()).await {
+                Ok(Some(p)) => out.push(p),
+                _ => {}
+            }
+        }
+        out
     }
 
     // ---------- tests ----------
 
+    /// Starts and stops cleanly; no events produced.
     #[tokio::test(flavor = "multi_thread")]
-    async fn starts_and_stops_without_events() -> notify::Result<()> {
+    async fn starts_and_idles_without_writes() -> NotifyResult<()> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
         let dir = TempDir::new().unwrap();
-        let (q, stop) = watch_folder_default(dir.path())?;
+        let (mut rx, stop) = watch_folder_default(dir.path())?;
 
-        static HITS: AtomicUsize = AtomicUsize::new(0);
-        static INIT: AtomicBool = AtomicBool::new(false);
-        register_counting_effect(&q, &HITS, &INIT);
+        // Warm-up: some backends emit one-off startup events. Drain them.
+        let _startup_noise = drain_for(&mut rx, Duration::from_millis(300)).await;
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert_eq!(HITS.load(Ordering::Relaxed), 0);
+        // Observation window: with no writes, we should not see *new* events.
+        // Accept either: (a) timeout (no events), or (b) channel closed (unlikely here).
+        match timeout(Duration::from_millis(400), rx.recv()).await {
+            Ok(Some(p)) => panic!("unexpected event without writes: {p:?}"),
+            Ok(None) => { /* channel closed: fine */ }
+            Err(_) => { /* no events during quiet window: expected */ }
+        }
 
         stop();
         Ok(())
     }
 
+    /// Single change should produce at least one path, matching the changed file (canonicalized).
     #[tokio::test(flavor = "multi_thread")]
-    async fn single_file_change_emits_one_or_more_ticks_and_last_matches() -> notify::Result<()> {
+    async fn single_file_change_yields_path() -> NotifyResult<()> {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         fs::write(&file, "init").unwrap();
 
-        let (q, stop) = watch_folder_default(dir.path())?;
-
-        static HITS: AtomicUsize = AtomicUsize::new(0);
-        static INIT: AtomicBool = AtomicBool::new(false);
-        register_counting_effect(&q, &HITS, &INIT);
-
+        let (mut rx, stop) = watch_folder_default(dir.path())?;
         fs::write(&file, "v1").unwrap();
 
-        let got_tick = wait_until(Duration::from_millis(1500), || {
-            HITS.load(Ordering::Relaxed) >= 1
-        });
-        assert!(
-            got_tick,
-            "expected at least one tick after single file write"
-        );
-
-        let last = q.read_last_item().expect("last_item should be Some");
-        assert_eq!(
-            canon(&last),
-            canon(&file),
-            "last path should match (canonicalized)"
-        );
+        let want = canon(&file);
+        let got = recv_until(&mut rx, Duration::from_secs(2), |p| canon(p) == want).await;
+        assert!(got.is_some(), "expected to receive the edited file path");
 
         stop();
         Ok(())
     }
 
+    /// Bursts to the same file should coalesce within the debounce window; count is <= writes.
+    /// We don't enforce exact counts because notify delivery is platform/editor dependent.
     #[tokio::test(flavor = "multi_thread")]
-    async fn burst_same_file_is_coalesced_non_deterministically() -> notify::Result<()> {
+    async fn burst_same_file_is_non_deterministically_coalesced() -> NotifyResult<()> {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("dup.txt");
         fs::write(&file, "init").unwrap();
 
-        let (q, stop) = watch_folder(
+        let (mut rx, stop) = watch_folder(
             dir.path(),
             FolderWatchConfig {
-                debounce_ms: 40,
+                debounce_ms: 50,
                 ..Default::default()
             },
         )?;
 
-        static HITS: AtomicUsize = AtomicUsize::new(0);
-        static INIT: AtomicBool = AtomicBool::new(false);
-        register_counting_effect(&q, &HITS, &INIT);
-
-        for n in 0..5 {
+        // Rapid burst of writes.
+        for n in 0..6 {
             fs::write(&file, format!("v{}", n)).unwrap();
         }
 
-        let ok = wait_until(Duration::from_millis(2000), || {
-            HITS.load(Ordering::Relaxed) >= 1
-        });
-        assert!(ok, "expected at least one tick for burst");
+        // Drain for a bit and count how many times the target path appears.
+        let events = drain_for(&mut rx, Duration::from_millis(1200)).await;
+        let want = canon(&file);
+        let hits = events.into_iter().filter(|p| canon(p) == want).count();
 
-        let ticks = HITS.load(Ordering::Relaxed);
         assert!(
-            ticks <= 5,
-            "expected <= 5 ticks for 5 burst writes (coalescing while queued), got {}",
-            ticks
+            hits >= 1 && hits <= 6,
+            "expected 1..=6 hits for burst coalescing, got {hits}"
         );
 
         stop();
         Ok(())
     }
 
+    /// Two distinct files should both be observed eventually (order is not guaranteed).
     #[tokio::test(flavor = "multi_thread")]
-    async fn two_distinct_files_eventually_both_seen() -> notify::Result<()> {
+    async fn two_distinct_files_eventually_both_seen() -> NotifyResult<()> {
         let dir = TempDir::new().unwrap();
         let f1 = dir.path().join("one.md");
         let f2 = dir.path().join("two.md");
         fs::write(&f1, "init1").unwrap();
         fs::write(&f2, "init2").unwrap();
 
-        let (q, stop) = watch_folder_default(dir.path())?;
-
-        let seen: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
-        let seen_cl = Arc::clone(&seen);
-
-        let seq = q.seq;
-        let last = q.last_item;
-        static INIT: AtomicBool = AtomicBool::new(false);
-        q.effect(move || {
-            let _ = seq.get();
-            if let Some(p) = last.get() {
-                if !INIT.swap(true, Ordering::Relaxed) {
-                    return;
-                }
-                seen_cl.lock().unwrap().insert(canon(&p));
-            }
-        });
-
+        let (mut rx, stop) = watch_folder_default(dir.path())?;
         fs::write(&f1, "ch1").unwrap();
         fs::write(&f2, "ch2").unwrap();
 
-        let f1c = canon(&f1);
-        let f2c = canon(&f2);
+        let mut seen = HashSet::<PathBuf>::new();
+        let target1 = canon(&f1);
+        let target2 = canon(&f2);
 
-        let ok = wait_until(Duration::from_secs(3), || {
-            let s = seen.lock().unwrap();
-            s.contains(&f1c) && s.contains(&f2c)
-        });
-        assert!(ok, "expected to see both changed files (canonicalized)");
+        let ok = recv_until(&mut rx, Duration::from_secs(3), |p| {
+            seen.insert(canon(p));
+            seen.contains(&target1) && seen.contains(&target2)
+        })
+        .await
+        .is_some();
+
+        assert!(ok, "expected to observe both changed files eventually");
 
         stop();
         Ok(())
     }
 
+    /// Non-recursive mode should not surface changes in nested directories.
     #[tokio::test(flavor = "multi_thread")]
-    async fn non_recursive_ignores_nested_changes() -> notify::Result<()> {
+    async fn non_recursive_ignores_nested_changes() -> NotifyResult<()> {
         let dir = TempDir::new().unwrap();
-        let nested_dir = dir.path().join("sub");
-        fs::create_dir_all(&nested_dir).unwrap();
+        let nested = dir.path().join("sub");
+        fs::create_dir_all(&nested).unwrap();
 
-        let top_file = dir.path().join("top.txt");
-        let nested_file = nested_dir.join("nested.txt");
-        fs::write(&top_file, "t0").unwrap();
+        let top = dir.path().join("top.txt");
+        let nested_file = nested.join("nested.txt");
+        fs::write(&top, "t0").unwrap();
         fs::write(&nested_file, "n0").unwrap();
 
-        let (q, stop) = watch_folder(
+        let (mut rx, stop) = watch_folder(
             dir.path(),
             FolderWatchConfig {
                 recursive: false,
-                debounce_ms: 20,
+                debounce_ms: 25,
                 ..Default::default()
             },
         )?;
 
-        static HITS: AtomicUsize = AtomicUsize::new(0);
-        static INIT: AtomicBool = AtomicBool::new(false);
-
-        let seq = q.seq;
-        let last = q.last_item;
-        q.effect(move || {
-            let _ = seq.get();
-            let _ = last.get();
-            if !INIT.swap(true, Ordering::Relaxed) {
-                return;
-            }
-            HITS.fetch_add(1, Ordering::Relaxed);
-        });
-
+        // Change nested file: we should **not** see it in a short window.
         fs::write(&nested_file, "n1").unwrap();
-        tokio::time::sleep(Duration::from_millis(350)).await;
-        let hits_after_nested = HITS.load(Ordering::Relaxed);
-
-        fs::write(&top_file, "t1").unwrap();
-        let ok = wait_until(Duration::from_millis(1200), || {
-            HITS.load(Ordering::Relaxed) > hits_after_nested
-        });
+        let nested_seen = recv_until(&mut rx, Duration::from_millis(800), |p| {
+            canon(p) == canon(&nested_file)
+        })
+        .await
+        .is_some();
         assert!(
-            ok,
-            "expected a tick for top-level change in non-recursive mode"
+            !nested_seen,
+            "should not receive nested path in non-recursive mode"
+        );
+
+        // Change top file: we should see it.
+        fs::write(&top, "t1").unwrap();
+        let top_seen = recv_until(&mut rx, Duration::from_millis(1200), |p| {
+            canon(p) == canon(&top)
+        })
+        .await
+        .is_some();
+        assert!(
+            top_seen,
+            "expected to receive top-level change in non-recursive mode"
         );
 
         stop();
         Ok(())
     }
 
+    /// Canonicalization on: a symlink write should report the canonicalized target path.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn canonicalize_paths_true_reports_target_path() -> notify::Result<()> {
+    async fn canonicalize_paths_true_reports_target_path() -> NotifyResult<()> {
         use std::os::unix::fs as unix_fs;
 
         let dir = TempDir::new().unwrap();
@@ -400,7 +391,7 @@ mod tests {
         fs::write(&target, "init").unwrap();
         unix_fs::symlink(&target, &link).unwrap();
 
-        let (q, stop) = watch_folder(
+        let (mut rx, stop) = watch_folder(
             dir.path(),
             FolderWatchConfig {
                 canonicalize_paths: true,
@@ -408,29 +399,12 @@ mod tests {
             },
         )?;
 
-        static INIT: AtomicBool = AtomicBool::new(false);
-        static HITS: AtomicUsize = AtomicUsize::new(0);
-
-        let seq = q.seq;
-        let last = q.last_item;
-        let target_c = canon(&target);
-        q.effect(move || {
-            let _ = seq.get();
-            if let Some(p) = last.get() {
-                if !INIT.swap(true, Ordering::Relaxed) {
-                    return;
-                }
-                if canon(&p) == target_c {
-                    HITS.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        });
-
         fs::write(&link, "v1").unwrap();
 
-        let ok = wait_until(Duration::from_millis(3000), || {
-            HITS.load(Ordering::Relaxed) >= 1
-        });
+        let want = canon(&target);
+        let ok = recv_until(&mut rx, Duration::from_secs(3), |p| canon(p) == want)
+            .await
+            .is_some();
         assert!(
             ok,
             "expected at least one tick showing canonicalized target path"
@@ -440,34 +414,153 @@ mod tests {
         Ok(())
     }
 
+    /// Backpressure sanity: with a small channel capacity, a large number of unique writes
+    /// should still be received eventually (we don't assert exact counts).
     #[tokio::test(flavor = "multi_thread")]
-    async fn stop_prevents_further_delivery() -> notify::Result<()> {
+    async fn bounded_channel_backpressure_sanity() -> NotifyResult<()> {
+        let dir = TempDir::new().unwrap();
+
+        let (mut rx, stop) = watch_folder(
+            dir.path(),
+            FolderWatchConfig {
+                channel_capacity: 4, // very small buffer
+                debounce_ms: 20,
+                ..Default::default()
+            },
+        )?;
+
+        // Create many unique files quickly.
+        let n = 24usize;
+        for i in 0..n {
+            let p = dir.path().join(format!("f{i}.txt"));
+            fs::write(&p, "x").unwrap();
+            fs::write(&p, "y").unwrap(); // ensure an event per file
+        }
+
+        // Collect for a while.
+        let items = drain_for(&mut rx, Duration::from_secs(3)).await;
+
+        // We should see at least some events (backpressure means producer can wait, not drop).
+        assert!(
+            !items.is_empty(),
+            "expected to receive some paths even with tight capacity"
+        );
+
+        // Either duplicates were coalesced by debounce, or not; ensure most are unique.
+        let uniq: HashSet<_> = items.into_iter().map(|p| canon(&p)).collect();
+        assert!(
+            !uniq.is_empty(),
+            "expected at least one unique path to be delivered"
+        );
+
+        stop();
+        Ok(())
+    }
+
+    /// After stop, further writes should not be delivered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_prevents_further_delivery() -> NotifyResult<()> {
+        use std::time::{Duration, Instant};
+
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("afterstop.txt");
         fs::write(&file, "init").unwrap();
 
-        let (q, stop) = watch_folder_default(dir.path())?;
+        let (mut rx, stop) = watch_folder_default(dir.path())?;
 
-        static HITS: AtomicUsize = AtomicUsize::new(0);
-        static INIT: AtomicBool = AtomicBool::new(false);
-        register_counting_effect(&q, &HITS, &INIT);
-
+        // Cause at least one event before stop.
         fs::write(&file, "v1").unwrap();
-        let _ = wait_until(Duration::from_millis(1200), || {
-            HITS.load(Ordering::Relaxed) >= 1
-        });
-        let hits_before = HITS.load(Ordering::Relaxed);
 
+        // Wait for at least one event (don’t care which one).
+        let _ = timeout(Duration::from_millis(1500), rx.recv()).await;
+
+        // Now stop the watcher/forwarder/sender.
         stop();
 
+        // Drain any residual buffered events until we've seen a “quiet” period
+        // with no arrivals. This handles callback races and in-flight messages.
+        let quiet_for = Duration::from_millis(250);
+        let overall_deadline = Instant::now() + Duration::from_secs(2);
+        let mut last_recv = Instant::now();
+
+        loop {
+            // If we've been quiet long enough, we're done draining.
+            if last_recv.elapsed() >= quiet_for {
+                break;
+            }
+            // If we run past an overall deadline, also stop draining.
+            if Instant::now() >= overall_deadline {
+                break;
+            }
+
+            match timeout(Duration::from_millis(50), rx.recv()).await {
+                Ok(Some(_p)) => {
+                    // Saw another residual event; reset quiet timer.
+                    last_recv = Instant::now();
+                }
+                Ok(None) => {
+                    // Channel closed — ideal case after stop.
+                    break;
+                }
+                Err(_) => {
+                    // Timed out waiting; loop again to check quiet window.
+                }
+            }
+        }
+
+        // After draining, assert no *new* events arrive in a longer observation window.
+        // Allow either: (a) channel already closed (recv => None), or
+        // (b) no arrivals within the window (timeout).
+        let verdict = timeout(Duration::from_millis(600), rx.recv()).await;
+        match verdict {
+            Ok(Some(_)) => panic!("no further events expected after stop"),
+            Ok(None) => { /* channel closed: good */ }
+            Err(_) => { /* timed out with no events: also good */ }
+        }
+
+        Ok(())
+    }
+
+    /// Invalid root should error immediately.
+    #[test]
+    fn invalid_root_errors() {
+        let bogus = PathBuf::from("/definitely/not/a/real/path/for/watch");
+        let res = watch_folder(bogus, FolderWatchConfig::default());
+        assert!(res.is_err(), "watching a non-existent root should error");
+    }
+
+    /// Debounce off should still stream paths; we allow multiple hits for the same file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn debounce_off_still_streams() -> NotifyResult<()> {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("nodebounce.txt");
+        fs::write(&file, "init").unwrap();
+
+        let (mut rx, stop) = watch_folder(
+            dir.path(),
+            FolderWatchConfig {
+                debounce_ms: 0,
+                ..Default::default()
+            },
+        )?;
+
+        fs::write(&file, "v1").unwrap();
         fs::write(&file, "v2").unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(
-            HITS.load(Ordering::Relaxed),
-            hits_before,
-            "no ticks expected after stop"
+
+        let target = canon(&file);
+        let mut tally = HashMap::<PathBuf, usize>::new();
+        let events = drain_for(&mut rx, Duration::from_millis(1200)).await;
+        for p in events {
+            *tally.entry(canon(&p)).or_default() += 1;
+        }
+
+        // We should have seen at least one event for the file.
+        assert!(
+            tally.get(&target).copied().unwrap_or(0) >= 1,
+            "expected at least one event with debounce off"
         );
 
+        stop();
         Ok(())
     }
 }

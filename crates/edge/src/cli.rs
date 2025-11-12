@@ -1,4 +1,3 @@
-use crate::fs::scan::FILE_SERVICE;
 use adapt::cmd::{run_cli, Commands};
 use clap::Parser;
 use config::{Config, File};
@@ -19,9 +18,7 @@ pub async fn start() -> ExitCode {
     let cli = Cli::parse();
 
     let ctx = match &cli.command {
-        Commands::Start(start) => AppCtx::new()
-            .set_file_service(FILE_SERVICE)
-            .set_root(&start.dir),
+        Commands::Start(start) => AppCtx::new().set_root(&start.dir),
     };
 
     let file = ctx.root_dir().join("whispercms-settings.toml");

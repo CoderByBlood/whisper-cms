@@ -8,3 +8,4 @@ leptos_reactive = { workspace = true }
 thiserror = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
+tokio = { workspace = true }

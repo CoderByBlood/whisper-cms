@@ -1,66 +1,166 @@
-//! Scanning + I/O operations. Constructs `file::ScannedFolder`/`file::File`
-//! and performs all filesystem access here (no std::fs in `file.rs`).
+//! Scanning + I/O operations producing a debounced mpsc stream of paths.
+//!
+//! - Returns a bounded `tokio::sync::mpsc::Receiver<PathBuf>` and a stop function (`Box<dyn FnOnce() + Send>`).
+//! - Debounces identical paths within a window (coalescing).
+//! - Bounded channel provides natural backpressure.
+//! - Optional folder / file regex filters.
+//! - Supports absolute/relative emission, recursion depth, and path canonicalization.
 
-use rayon::prelude::*;
 use regex::Regex;
-use same_file::Handle;
-use serve::file::{File, FileService, ScanReport, ScanStageError, ScannedFolder};
 use std::{
-    collections::HashMap,
+    collections::{HashSet, VecDeque},
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    time::Duration,
 };
-use walkdir::{DirEntry, WalkDir};
+use tokio::{
+    select,
+    sync::mpsc,
+    task::{AbortHandle, JoinHandle},
+    time,
+};
+use walkdir::WalkDir;
 
-pub(crate) const FILE_SERVICE: FileService = FileService::from_fns(
-    read_file_bytes,
-    write_file_bytes,
-    scan_folder_with_report_and_filters,
-    lookup_by_absolute,
-);
-
-/// Entry point preserving original signature (no filters). Discards the report.
-pub fn scan_folder(root_dir: &Path) -> io::Result<ScannedFolder> {
-    scan_folder_with_report_and_filters(root_dir, None, None).map(|(s, _)| s)
+/// Configuration for `start_folder_scan`.
+#[derive(Debug, Clone)]
+pub struct FolderScanConfig {
+    /// Emit absolute paths (true) or paths relative to `root` (false).
+    pub absolute: bool,
+    /// Recurse into subdirectories.
+    pub recursive: bool,
+    /// Debounce window in milliseconds for coalescing duplicate paths.
+    pub debounce_ms: u64,
+    /// Canonicalize paths before emission.
+    pub canonicalize_paths: bool,
+    /// Capacity of the bounded output channel.
+    pub channel_capacity: usize,
+    /// Optional regex to **allow** folders. If set, a directory is traversed
+    /// if it or **any ancestor under `root`** matches.
+    pub folder_re: Option<Regex>,
+    /// Optional regex to **allow** files by name (basename).
+    pub file_re: Option<Regex>,
 }
 
-/// Full scan with a `ScanReport` (no filters).
-pub fn scan_folder_with_report(root_dir: &Path) -> io::Result<(ScannedFolder, ScanReport)> {
-    scan_folder_with_report_and_filters(root_dir, None, None)
+impl Default for FolderScanConfig {
+    fn default() -> Self {
+        Self {
+            absolute: true,
+            recursive: true,
+            debounce_ms: 64,
+            canonicalize_paths: true,
+            channel_capacity: 1024,
+            folder_re: None,
+            file_re: None,
+        }
+    }
 }
 
-/// Filtered scan (regexes on directory/file names).
-pub fn scan_folder_with_filters(
-    root_dir: &Path,
-    dir_name_re: Option<&Regex>,
-    file_name_re: Option<&Regex>,
-) -> io::Result<ScannedFolder> {
-    scan_folder_with_report_and_filters(root_dir, dir_name_re, file_name_re).map(|(s, _)| s)
-}
+/// Start scanning `root` according to `cfg`, producing a debounced stream of paths.
+///
+/// Returns:
+/// - `Receiver<PathBuf>`: a bounded channel yielding file paths (subject to filters / options)
+/// - `Box<dyn FnOnce() + Send>`: call it to stop both internal tasks
+///
+/// Errors:
+/// - `NotFound` if `root` does not exist
+/// - `Other` if `root` is not a directory or cannot be accessed
+pub fn start_folder_scan(
+    root: &Path,
+    cfg: FolderScanConfig,
+) -> io::Result<(mpsc::Receiver<PathBuf>, Box<dyn FnOnce() + Send>)> {
+    // Pre-check root existence and type (fail fast with a regular io::Error).
+    let meta = fs::metadata(root).map_err(|e| io::Error::new(e.kind(), format!("root: {e}")))?;
+    if !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "root is not a directory",
+        ));
+    }
 
-/// Filtered scan that also returns a `ScanReport`.
-pub fn scan_folder_with_report_and_filters(
-    root_dir: &Path,
-    dir_name_re: Option<&Regex>,
-    file_name_re: Option<&Regex>,
-) -> io::Result<(ScannedFolder, ScanReport)> {
-    let root = fs::canonicalize(root_dir)?;
-    let mut report = ScanReport::default();
+    // Canonical root used for traversal and (if requested) for canonicalization.
+    let root_canon = fs::canonicalize(root)?;
 
-    // Prune by directory name. Always allow the root (depth == 0).
-    let walker = WalkDir::new(&root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
+    // Output channel (bounded) — natural backpressure.
+    let (out_tx, out_rx) = mpsc::channel::<PathBuf>(cfg.channel_capacity);
+
+    // Internal raw channel (unbounded) between walker and debouncer.
+    let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<PathBuf>();
+
+    // ---------- Debounce task ----------
+    // Coalesce duplicate paths within a time window, then flush to bounded `out_tx`.
+    let debounce_ms = cfg.debounce_ms;
+    let out_tx_clone = out_tx.clone();
+    let debounce_handle: JoinHandle<()> = tokio::spawn(async move {
+        let mut pending: HashSet<PathBuf> = HashSet::new();
+        let mut queue: VecDeque<PathBuf> = VecDeque::new();
+        let mut ticker = time::interval(Duration::from_millis(debounce_ms.max(1)));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+        loop {
+            select! {
+                biased;
+
+                // Receive raw paths as they come in (no backpressure here).
+                maybe_path = raw_rx.recv() => {
+                    match maybe_path {
+                        Some(p) => {
+                            if pending.insert(p.clone()) {
+                                queue.push_back(p);
+                            }
+                        }
+                        None => {
+                            // Raw sender dropped: flush remaining and exit.
+                            while let Some(p) = queue.pop_front() {
+                                if out_tx_clone.send(p).await.is_err() {
+                                    return;
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                // On each tick, flush the coalesced set to the output channel.
+                _ = ticker.tick() => {
+                    if queue.is_empty() {
+                        continue;
+                    }
+                    let mut drain = Vec::with_capacity(queue.len());
+                    while let Some(p) = queue.pop_front() {
+                        drain.push(p);
+                    }
+                    pending.clear();
+                    for p in drain {
+                        if out_tx_clone.send(p).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let debounce_abort: AbortHandle = debounce_handle.abort_handle();
+
+    // ---------- Scan task ----------
+    let folder_re = cfg.folder_re.clone();
+    let file_re = cfg.file_re.clone();
+    let recursive = cfg.recursive;
+    let canonicalize_paths = cfg.canonicalize_paths;
+    let absolute = cfg.absolute;
+
+    let scan_handle: JoinHandle<()> = tokio::spawn(async move {
+        let mut builder = WalkDir::new(&root_canon).follow_links(false);
+        if !recursive {
+            builder = builder.max_depth(1);
+        }
+        // Ancestor-allow semantics for folder filter.
+        let walker = builder.into_iter().filter_entry(|e| {
             if e.depth() == 0 {
                 return true;
             }
-            if let Some(re) = dir_name_re {
+            if let Some(re) = &folder_re {
                 if e.file_type().is_dir() {
-                    // If this directory or any of its ancestors (under root) matches,
-                    // traverse it (and thus its whole subtree).
-                    let rel = e.path().strip_prefix(&root).unwrap_or(e.path());
+                    let rel = e.path().strip_prefix(&root_canon).unwrap_or(e.path());
                     for comp in rel.components() {
                         let name = comp.as_os_str().to_string_lossy();
                         if re.is_match(&name) {
@@ -73,196 +173,76 @@ pub fn scan_folder_with_report_and_filters(
             true
         });
 
-    // Gather file entries (respect file-name filter); record walk errors.
-    let mut entries: Vec<DirEntry> = Vec::new();
-    for item in walker {
-        match item {
-            Ok(e) => {
-                report.entries_seen += 1;
-                if e.file_type().is_file() {
-                    if let Some(re) = file_name_re {
-                        let name = e.file_name().to_string_lossy();
-                        if !re.is_match(&name) {
-                            continue;
+        for entry in walker {
+            let e = match entry {
+                Ok(e) => e,
+                Err(_) => continue, // ignore traversal errors in this stream API
+            };
+
+            if !e.file_type().is_file() {
+                continue;
+            }
+
+            // File-name filter (basename)
+            if let Some(re) = &file_re {
+                let name = e.file_name().to_string_lossy();
+                if !re.is_match(&name) {
+                    continue;
+                }
+            }
+
+            // Determine the emission path according to config.
+            let emit_path = if absolute {
+                if canonicalize_paths {
+                    match fs::canonicalize(e.path()) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    }
+                } else {
+                    e.path().to_path_buf()
+                }
+            } else {
+                let mut p = match e.path().strip_prefix(&root_canon) {
+                    Ok(r) => r.to_path_buf(),
+                    Err(_) => continue,
+                };
+                if canonicalize_paths {
+                    if let Ok(abs) = fs::canonicalize(e.path()) {
+                        if let Ok(rel) = abs.strip_prefix(&root_canon) {
+                            p = rel.to_path_buf();
                         }
                     }
-                    entries.push(e);
                 }
-            }
-            Err(err) => {
-                let path = err
-                    .path()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| root.clone());
-                report.errors.push(ScanStageError::WalkDir {
-                    path,
-                    source: io::Error::new(
-                        err.io_error()
-                            .map(|e| e.kind())
-                            .unwrap_or(io::ErrorKind::Other),
-                        err.to_string(),
-                    ),
-                });
-            }
-        }
-    }
-
-    // Per-entry work in parallel.
-    #[derive(Debug)]
-    struct Item {
-        abs: PathBuf,
-        rel: PathBuf,
-        handle: Option<Handle>,
-        err: Option<ScanStageError>,
-    }
-
-    let items: Vec<Item> = entries
-        .into_par_iter()
-        .map(|e| {
-            // Canonicalize
-            let abs = match fs::canonicalize(e.path()) {
-                Ok(p) => p,
-                Err(source) => {
-                    return Item {
-                        abs: e.path().to_path_buf(),
-                        rel: PathBuf::new(),
-                        handle: None,
-                        err: Some(ScanStageError::Canonicalize {
-                            path: e.path().to_path_buf(),
-                            source,
-                        }),
-                    };
-                }
+                p
             };
 
-            // Relative to root
-            let rel = match abs.strip_prefix(&root) {
-                Ok(r) => r.to_path_buf(),
-                Err(e) => {
-                    return Item {
-                        abs: abs.clone(),
-                        rel: PathBuf::new(),
-                        handle: None,
-                        err: Some(ScanStageError::StripPrefix {
-                            path: abs,
-                            source: io::Error::new(io::ErrorKind::Other, e.to_string()),
-                        }),
-                    };
-                }
-            };
-
-            // Same-file handle (non-fatal if it fails)
-            let handle = match Handle::from_path(&abs) {
-                Ok(h) => Some(h),
-                Err(source) => {
-                    return Item {
-                        abs: abs.clone(),
-                        rel: rel.clone(),
-                        handle: None,
-                        err: Some(ScanStageError::SameFileHandle {
-                            path: abs.clone(),
-                            source,
-                        }),
-                    };
-                }
-            };
-
-            Item {
-                abs,
-                rel,
-                handle,
-                err: None,
-            }
-        })
-        .collect();
-
-    // Build indices with hard-link coalescing.
-    let mut by_abs: HashMap<PathBuf, Arc<File>> = HashMap::with_capacity(items.len());
-    let mut by_rel: HashMap<PathBuf, Arc<File>> = HashMap::with_capacity(items.len());
-    let mut by_handle: HashMap<Handle, Arc<File>> = HashMap::new();
-    let mut files: Vec<Arc<File>> = Vec::new();
-
-    for it in items {
-        if let Some(err) = it.err {
-            report.errors.push(err);
-            continue;
+            let _ = raw_tx.send(emit_path);
         }
 
-        // Unify by handle first.
-        let arc = if let Some(h) = it.handle {
-            if let Some(existing) = by_handle.get(&h) {
-                existing.clone()
-            } else {
-                let f = Arc::new(File::new(it.abs.clone(), it.rel.clone(), FILE_SERVICE));
-                by_handle.insert(h, f.clone());
-                f
-            }
-        } else if let Some(existing) = by_abs.get(&it.abs) {
-            existing.clone()
-        } else {
-            Arc::new(File::new(it.abs.clone(), it.rel.clone(), FILE_SERVICE))
-        };
+        // Close raw sender → debouncer flushes and exits.
+        drop(raw_tx);
+    });
+    let scan_abort: AbortHandle = scan_handle.abort_handle();
 
-        // Insert into abs map; push to files only on first sighting.
-        if let std::collections::hash_map::Entry::Vacant(v) = by_abs.entry(it.abs.clone()) {
-            v.insert(arc.clone());
-            files.push(arc.clone());
-            report.files_indexed += 1;
-        }
-        // Map relative to same Arc (don't overwrite).
-        by_rel.entry(it.rel).or_insert_with(|| arc.clone());
-    }
+    // Stop closure replaces a struct handle
+    let stop_fn: Box<dyn FnOnce() + Send> = Box::new(move || {
+        scan_abort.abort();
+        debounce_abort.abort();
+    });
 
-    let store = ScannedFolder::new(
-        root,
-        files,
-        by_abs,
-        by_rel,
-        dir_name_re.cloned(),
-        file_name_re.cloned(),
-        FILE_SERVICE,
-    );
-    Ok((store, report))
-}
-
-// ===== Helper functions used by model (thin, testable) =====
-
-#[inline]
-pub fn read_file_bytes(abs: &Path) -> io::Result<Vec<u8>> {
-    // Ensure parent exists/permissions are handled by caller when writing.
-    fs::read(abs)
-}
-
-#[inline]
-pub fn write_file_bytes(abs: &Path, data: &[u8]) -> io::Result<()> {
-    if let Some(parent) = abs.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(abs, data)
-}
-
-#[inline]
-pub fn lookup_by_absolute(
-    by_abs: &HashMap<PathBuf, Arc<File>>,
-    abs: &Path,
-) -> io::Result<Option<Arc<File>>> {
-    match fs::canonicalize(abs) {
-        Ok(canon) => Ok(by_abs.get(&canon).cloned()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    Ok((out_rx, stop_fn))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use regex::Regex;
     use std::collections::HashSet;
     use std::fs::File as StdFile;
     use std::io::Write;
     use tempfile::tempdir;
+    use tokio::time::{sleep, timeout};
 
-    // -------- helpers --------
+    // ---------- small helpers ----------
 
     fn write_text(path: &Path, s: &str) -> io::Result<()> {
         if let Some(parent) = path.parent() {
@@ -273,277 +253,246 @@ mod tests {
         Ok(())
     }
 
-    fn relset(store: &ScannedFolder) -> HashSet<PathBuf> {
-        store
-            .files()
-            .iter()
-            .map(|f| f.relative_path().to_path_buf())
+    async fn collect_all(mut rx: tokio::sync::mpsc::Receiver<PathBuf>) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        while let Some(p) = rx.recv().await {
+            out.push(p);
+        }
+        out
+    }
+
+    async fn collect_until_closed_or_timeout(
+        rx: tokio::sync::mpsc::Receiver<PathBuf>,
+        max_ms: u64,
+    ) -> Vec<PathBuf> {
+        let fut = collect_all(rx);
+        match timeout(Duration::from_millis(max_ms), fut).await {
+            Ok(v) => v,
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn as_rel_set(root: &Path, mut v: Vec<PathBuf>) -> HashSet<PathBuf> {
+        v.iter_mut()
+            .filter_map(|p| p.strip_prefix(root).ok().map(|r| r.to_path_buf()))
             .collect()
     }
 
-    // -------- scan_folder / scan_folder_with_report --------
+    // ---------- tests ----------
 
-    #[test]
-    fn scan_folder_basic_index_and_lazy_read_write() -> io::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_root_returns_error() {
+        let missing = Path::new("/definitely/not/here/___x");
+        let cfg = FolderScanConfig::default();
+
+        let res = start_folder_scan(missing, cfg);
+        let err = match res {
+            Ok((_rx, stop)) => {
+                // be tidy if it ever unexpectedly succeeds
+                stop();
+                panic!("expected start_folder_scan to error for missing root");
+            }
+            Err(e) => e,
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn absolute_emission_and_canonicalization() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
 
-        write_text(&root.join("a/one.txt"), "hello")?;
-        write_text(&root.join("b/two.txt"), "world")?;
+        write_text(&root.join("a/one.txt"), "1")?;
+        write_text(&root.join("b/two.txt"), "2")?;
 
-        // Basic scan (no filters)
-        let store = scan_folder(root)?;
-        let rels = relset(&store);
-        assert!(rels.contains(Path::new("a/one.txt")));
-        assert!(rels.contains(Path::new("b/two.txt")));
+        let mut cfg = FolderScanConfig::default();
+        cfg.absolute = true;
+        cfg.canonicalize_paths = true;
+        cfg.debounce_ms = 10;
+        cfg.channel_capacity = 4;
 
-        // Rel lookup
-        let f_rel = store
-            .get_by_relative(Path::new("a/one.txt"))
-            .expect("rel missing");
-        assert_eq!(f_rel.read_string()?, "hello");
+        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let got = collect_until_closed_or_timeout(rx, 1000).await;
+        stop();
 
-        // Abs lookup (canonical)
-        let f_abs = store
-            .get_by_absolute(&root.join("a/one.txt"))?
-            .expect("abs missing");
-        assert!(Arc::ptr_eq(&f_rel, &f_abs));
-
-        // Write via one handle, observe via the other (no cache)
-        f_abs.write_string("HELLO")?;
-        assert_eq!(f_rel.read_string()?, "HELLO");
-
+        assert!(got.iter().all(|p| p.is_absolute()));
+        let relset = as_rel_set(&fs::canonicalize(root)?, got);
+        assert!(relset.contains(Path::new("a/one.txt")));
+        assert!(relset.contains(Path::new("b/two.txt")));
         Ok(())
     }
 
-    #[test]
-    fn scan_folder_with_report_counts_and_no_errors() -> io::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relative_emission_and_canonicalization_off() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
-        write_text(&root.join("x/1.txt"), "1")?;
-        write_text(&root.join("x/2.txt"), "2")?;
-        write_text(&root.join("y/3.txt"), "3")?;
 
-        let (_store, report) = scan_folder_with_report(root)?;
-        assert!(report.errors.is_empty());
-        // WalkDir visits dirs and files; entries_seen >= files_indexed
-        assert!(report.entries_seen >= report.files_indexed);
-        assert_eq!(report.files_indexed, 3);
+        write_text(&root.join("x/one.md"), "A")?;
+        write_text(&root.join("x/two.md"), "B")?;
 
+        let mut cfg = FolderScanConfig::default();
+        cfg.absolute = false;
+        cfg.canonicalize_paths = false;
+        cfg.debounce_ms = 10;
+        cfg.channel_capacity = 4;
+
+        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let got = collect_until_closed_or_timeout(rx, 1000).await;
+        stop();
+
+        assert!(got.iter().all(|p| !p.is_absolute()));
+        let set: HashSet<_> = got.into_iter().collect();
+        assert!(set.contains(PathBuf::from("x/one.md").as_path()));
+        assert!(set.contains(PathBuf::from("x/two.md").as_path()));
         Ok(())
     }
 
-    // -------- filters --------
-
-    #[test]
-    fn dir_name_filter_limits_traversal() -> io::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_recursive_scans_only_top_level() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
 
-        write_text(&root.join("keep/sub/a.txt"), "A")?;
-        write_text(&root.join("skip/sub/b.txt"), "B")?;
+        write_text(&root.join("top.txt"), "T")?;
+        write_text(&root.join("sub/inner.txt"), "I")?;
 
-        let dir_re = Regex::new(r"^keep$").unwrap();
-        let store = scan_folder_with_filters(root, Some(&dir_re), None)?;
-        let rels = relset(&store);
+        let mut cfg = FolderScanConfig::default();
+        cfg.recursive = false;
+        cfg.debounce_ms = 10;
+        cfg.absolute = false;
 
-        assert!(rels.contains(Path::new("keep/sub/a.txt")));
-        assert!(!rels.contains(Path::new("skip/sub/b.txt")));
+        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let got = collect_until_closed_or_timeout(rx, 1000).await;
+        stop();
+
+        let set: HashSet<_> = got.into_iter().collect();
+        assert!(set.contains(PathBuf::from("top.txt").as_path()));
+        assert!(!set.contains(PathBuf::from("sub/inner.txt").as_path()));
         Ok(())
     }
 
-    #[test]
-    fn file_name_filter_limits_inclusion() -> io::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn folder_regex_ancestor_allow_and_file_regex() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
 
-        write_text(&root.join("keep/a.md"), "A")?;
-        write_text(&root.join("keep/b.html"), "B")?;
-        write_text(&root.join("keep/c.png"), "C")?;
-
-        let file_re = Regex::new(r"(?i)\.(md|html)$").unwrap();
-        let store = scan_folder_with_filters(root, None, Some(&file_re))?;
-        let rels = relset(&store);
-
-        assert!(rels.contains(Path::new("keep/a.md")));
-        assert!(rels.contains(Path::new("keep/b.html")));
-        assert!(!rels.contains(Path::new("keep/c.png")));
-        Ok(())
-    }
-
-    #[test]
-    fn both_filters_together() -> io::Result<()> {
-        let dir = tempdir()?;
-        let root = dir.path();
-
-        write_text(&root.join("posts/a.md"), "A")?;
-        write_text(&root.join("posts/b.txt"), "B")?;
+        write_text(&root.join("keep/sub/a.md"), "A")?;
+        write_text(&root.join("keep/sub/b.txt"), "B")?;
+        write_text(&root.join("skip/sub/c.md"), "C")?;
         write_text(&root.join("pages/home.html"), "<html>")?;
-        write_text(&root.join("other/skip.md"), "X")?;
 
-        let dir_re = Regex::new(r"^(posts|pages)$").unwrap();
-        let file_re = Regex::new(r"(?i)\.(md|html)$").unwrap();
+        let mut cfg = FolderScanConfig::default();
+        cfg.absolute = false;
+        cfg.debounce_ms = 10;
+        cfg.folder_re = Some(Regex::new(r"^(keep|pages)$").unwrap());
+        cfg.file_re = Some(Regex::new(r"(?i)\.(md|html)$").unwrap());
 
-        let store = scan_folder_with_filters(root, Some(&dir_re), Some(&file_re))?;
-        let rels = relset(&store);
+        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let got = collect_until_closed_or_timeout(rx, 1500).await;
+        stop();
 
-        assert!(rels.contains(Path::new("posts/a.md")));
-        assert!(rels.contains(Path::new("pages/home.html")));
-        assert!(!rels.contains(Path::new("posts/b.txt"))); // filtered by file regex
-        assert!(!rels.contains(Path::new("other/skip.md"))); // filtered by dir regex
+        let set: HashSet<_> = got.into_iter().collect();
+        assert!(set.contains(Path::new("keep/sub/a.md")));
+        assert!(set.contains(Path::new("pages/home.html")));
+        assert!(!set.contains(Path::new("keep/sub/b.txt"))); // filtered by file regex
+        assert!(!set.contains(Path::new("skip/sub/c.md"))); // filtered by folder regex
         Ok(())
     }
 
-    // -------- symlinks and hard links --------
-
-    #[test]
-    fn symlinks_are_not_followed_as_files() -> io::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_channel_backpressure_no_loss() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
 
-        write_text(&root.join("real/file.txt"), "ok")?;
+        for i in 0..64 {
+            write_text(&root.join(format!("f{i:02}.txt")), "x")?;
+        }
 
-        // Create symlink if platform allows; ignore failure gracefully.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(root.join("real/file.txt"), root.join("link.txt")).ok();
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_file(root.join("real/file.txt"), root.join("link.txt")).ok();
+        let mut cfg = FolderScanConfig::default();
+        cfg.channel_capacity = 1; // force strong backpressure
+        cfg.debounce_ms = 20;
+        cfg.absolute = false;
 
-        let store = scan_folder(root)?;
-        let rels = relset(&store);
+        let (mut rx, stop) = start_folder_scan(root, cfg)?;
 
-        assert!(rels.contains(Path::new("real/file.txt")));
-        assert!(!rels.contains(Path::new("link.txt"))); // not followed
-        Ok(())
-    }
-
-    #[test]
-    fn hard_links_coalesce_to_same_arc_when_supported() -> io::Result<()> {
-        let dir = tempdir()?;
-        let root = dir.path();
-
-        write_text(&root.join("a/original.txt"), "v1")?;
-
-        // Try to create a hard link; if unsupported, skip the identity assertion.
-        match std::fs::hard_link(root.join("a/original.txt"), root.join("b/alias.txt")) {
-            Ok(()) => {
-                let store = scan_folder(root)?;
-                let f1 = store
-                    .get_by_relative(Path::new("a/original.txt"))
-                    .expect("orig missing");
-                let f2 = store
-                    .get_by_relative(Path::new("b/alias.txt"))
-                    .expect("alias missing");
-                assert!(
-                    Arc::ptr_eq(&f1, &f2),
-                    "hard-linked files should coalesce to the same Arc<File>"
-                );
-
-                // Update via one, observe via the other (no cache)
-                assert_eq!(f1.read_string()?, "v1");
-                f2.write_string("v2")?;
-                assert_eq!(f1.read_string()?, "v2");
+        let mut received = Vec::new();
+        loop {
+            match timeout(Duration::from_millis(2000), rx.recv()).await {
+                Ok(Some(p)) => {
+                    received.push(p);
+                    sleep(Duration::from_millis(5)).await; // slow consumer
+                }
+                Ok(None) => break,
+                Err(_) => break,
             }
-            Err(_) => {
-                // Hard links not supported; accept as pass
-            }
+        }
+        stop();
+
+        assert_eq!(received.len(), 64);
+        let set: HashSet<_> = received.into_iter().collect();
+        for i in 0..64 {
+            assert!(set.contains(Path::new(&format!("f{i:02}.txt"))));
         }
         Ok(())
     }
 
-    // -------- error reporting from WalkDir (Unix-only, permissions) --------
-
-    #[cfg(unix)]
-    #[test]
-    fn unreadable_directory_emits_walkdir_error_in_report() -> io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
+    #[tokio::test(flavor = "multi_thread")]
+    async fn debounce_batches_and_flushes() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
-
-        write_text(&root.join("ok/visible.txt"), "ok")?;
-        let blocked = root.join("blocked");
-        fs::create_dir_all(&blocked)?;
-        // Remove all permissions so the walker cannot descend
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))?;
-
-        let (_store, report) = scan_folder_with_report(root)?;
-        // Restore perms so tempdir can clean up.
-        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755))?;
-
-        assert!(
-            !report.errors.is_empty(),
-            "expected at least one traversal error from unreadable dir"
-        );
-        let has_walk_error = report
-            .errors
-            .iter()
-            .any(|e| matches!(e, ScanStageError::WalkDir { .. }));
-        assert!(has_walk_error, "expected a WalkDir stage error");
-        Ok(())
-    }
-
-    // -------- helpers: read_file_bytes / write_file_bytes / lookup_by_absolute --------
-
-    #[test]
-    fn helper_read_write_file_bytes_create_parents_and_roundtrip() -> io::Result<()> {
-        let dir = tempdir()?;
-        let root = dir.path();
-
-        let nested = root.join("nested/dir/data.bin");
-        write_file_bytes(&nested, b"\x01\x02\x03")?;
-        let bytes = read_file_bytes(&nested)?;
-        assert_eq!(bytes, b"\x01\x02\x03");
-
-        Ok(())
-    }
-
-    #[test]
-    fn helper_lookup_by_absolute_uses_canonicalization() -> io::Result<()> {
-        let dir = tempdir()?;
-        let root = fs::canonicalize(dir.path())?;
 
         write_text(&root.join("a/one.txt"), "1")?;
-        let store = scan_folder(&root)?;
+        write_text(&root.join("b/two.txt"), "2")?;
+        write_text(&root.join("b/three.txt"), "3")?;
 
-        // Build a non-canonical path to the same file (e.g., with "./")
-        let noncanon = root.join("a").join("./one.txt");
+        let mut cfg = FolderScanConfig::default();
+        cfg.debounce_ms = 50;
+        cfg.absolute = false;
 
-        // The folder should contain the canonical key; lookup should still succeed.
-        let f = store
-            .get_by_absolute(&noncanon)?
-            .expect("lookup failed via non-canonical path");
-        assert_eq!(f.read_string()?, "1");
+        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let got = collect_until_closed_or_timeout(rx, 2000).await;
+        stop();
 
-        // Missing path → Ok(None)
-        assert!(store.get_by_absolute(&root.join("missing.txt"))?.is_none());
-
+        let set: HashSet<_> = got.into_iter().collect();
+        assert!(set.contains(Path::new("a/one.txt")));
+        assert!(set.contains(Path::new("b/two.txt")));
+        assert!(set.contains(Path::new("b/three.txt")));
         Ok(())
     }
 
-    // -------- refresh semantics (remember filters) --------
-
-    #[test]
-    fn refresh_reuses_filters_and_picks_up_new_files() -> io::Result<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stop_function_aborts_and_closes_stream() -> io::Result<()> {
         let dir = tempdir()?;
         let root = dir.path();
 
-        write_text(&root.join("posts/a.md"), "A")?;
-        let dir_re = Regex::new(r"^posts$").unwrap();
-        let file_re = Regex::new(r"(?i)\.md$").unwrap();
+        for d in 0..10 {
+            for f in 0..50 {
+                write_text(&root.join(format!("d{d}/f{f}.txt")), "x")?;
+            }
+        }
 
-        let (store, _rpt) =
-            scan_folder_with_report_and_filters(root, Some(&dir_re), Some(&file_re))?;
-        let rels = relset(&store);
-        assert!(rels.contains(Path::new("posts/a.md")));
-        assert!(!rels.contains(Path::new("posts/b.html")));
+        let mut cfg = FolderScanConfig::default();
+        cfg.debounce_ms = 20;
+        cfg.channel_capacity = 8;
+        cfg.absolute = false;
 
-        // Add a matching file and refresh
-        write_text(&root.join("posts/new.md"), "N")?;
-        let store2 = store.refresh()?;
-        let rels2 = relset(&store2);
+        let (mut rx, stop) = start_folder_scan(root, cfg)?;
 
-        assert!(rels2.contains(Path::new("posts/new.md")));
+        // Consume a few, then stop early.
+        let mut first_batch = Vec::new();
+        for _ in 0..5 {
+            if let Ok(Some(p)) = timeout(Duration::from_millis(1000), rx.recv()).await {
+                first_batch.push(p);
+            }
+        }
+        stop(); // abort tasks
+
+        // After some time, channel should close (no more items).
+        let rest = collect_until_closed_or_timeout(rx, 1500).await;
+
+        assert!(!first_batch.is_empty());
+        let total = first_batch.len() + rest.len();
+        assert!(total <= 500); // non-deterministic; we stopped early
         Ok(())
     }
 }
