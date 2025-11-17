@@ -13,7 +13,6 @@ use std::{io, marker::PhantomData};
 /// This is called *after* BodyRegex patches have run,
 /// and only when the final content type is confirmed to be HTML.
 pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) -> Settings<'h, 's> {
-    // Let the compiler infer the concrete `(Cow<Selector>, ElementContentHandlers)` type.
     let mut elements = Vec::new();
 
     for patch in patches {
@@ -21,7 +20,6 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
             let sel = selector.clone();
             let ops = ops.clone();
 
-            // Build a closure for this selector.
             let handler = element!(sel.as_str(), move |el: &mut Element| {
                 for op in &ops {
                     match op {
@@ -55,25 +53,25 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::SetInnerText(text) => {
-                            let escaped = html_escape::encode_text(text);
-                            let _ = el.set_inner_content(&escaped, ContentType::Text);
+                            // FIXED: let lol_html escape text; no manual escaping.
+                            let _ = el.set_inner_content(text, ContentType::Text);
                         }
 
                         DomOp::AppendHtml(html) => {
-                            let _ = el.append(&html, ContentType::Html);
+                            let _ = el.append(html, ContentType::Html);
                         }
 
                         DomOp::PrependHtml(html) => {
-                            let _ = el.prepend(&html, ContentType::Html);
+                            let _ = el.prepend(html, ContentType::Html);
                         }
 
                         DomOp::ReplaceWithHtml(html) => {
-                            let _ = el.replace(&html, ContentType::Html);
+                            let _ = el.replace(html, ContentType::Html);
                         }
 
                         DomOp::ReplaceWithText(text) => {
-                            let escaped = html_escape::encode_text(text);
-                            let _ = el.replace(&escaped, ContentType::Text);
+                            // FIXED: let lol_html escape text; no manual escaping.
+                            let _ = el.replace(text, ContentType::Text);
                         }
 
                         DomOp::InsertBeforeHtml(html) => {
@@ -81,8 +79,8 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::InsertBeforeText(text) => {
-                            let escaped = html_escape::encode_text(text);
-                            let _ = el.before(&escaped, ContentType::Text);
+                            // FIXED
+                            let _ = el.before(text, ContentType::Text);
                         }
 
                         DomOp::InsertAfterHtml(html) => {
@@ -90,17 +88,15 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::InsertAfterText(text) => {
-                            let escaped = html_escape::encode_text(text);
-                            let _ = el.after(&escaped, ContentType::Text);
+                            // FIXED
+                            let _ = el.after(text, ContentType::Text);
                         }
 
                         DomOp::Remove => {
-                            // Remove the element and its content.
                             let _ = el.remove();
                         }
 
                         DomOp::Unwrap => {
-                            // Remove only the element, keep its children.
                             let _ = el.remove_and_keep_content();
                         }
                     }
