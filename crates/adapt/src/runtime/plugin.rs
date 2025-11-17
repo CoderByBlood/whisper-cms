@@ -202,3 +202,509 @@ impl<E: JsEngine> PluginRuntime<E> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::content::ContentKind;
+    use crate::core::context::RequestContext;
+    use crate::core::recommendation::Recommendations;
+    use crate::js::{JsEngine, JsError, JsValue};
+    use http::{HeaderMap, Method};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Test helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct MockEngine {
+        // record load_module calls
+        load_calls: Vec<(String, String)>,
+        // optional error for next load_module call
+        next_load_err: Option<JsError>,
+
+        // func_path -> pre-programmed result
+        call_results: HashMap<String, Result<JsValue, JsError>>,
+        // log of function paths invoked
+        call_log: Vec<String>,
+    }
+
+    impl MockEngine {
+        fn with_load_error(err: JsError) -> Self {
+            Self {
+                next_load_err: Some(err),
+                ..Self::default()
+            }
+        }
+
+        fn with_call_result(mut self, path: &str, result: Result<JsValue, JsError>) -> Self {
+            self.call_results.insert(path.to_string(), result);
+            self
+        }
+    }
+
+    impl JsEngine for MockEngine {
+        fn eval(&mut self, _code: &str) -> Result<JsValue, JsError> {
+            Ok(JsValue::Null)
+        }
+
+        fn load_module(&mut self, name: &str, source: &str) -> Result<(), JsError> {
+            self.load_calls.push((name.to_string(), source.to_string()));
+
+            if let Some(err) = self.next_load_err.take() {
+                Err(err)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn call_function(
+            &mut self,
+            func_path: &str,
+            _args: &[JsValue],
+        ) -> Result<JsValue, JsError> {
+            self.call_log.push(func_path.to_string());
+            self.call_results
+                .remove(func_path)
+                .unwrap_or(Ok(JsValue::Null))
+        }
+    }
+
+    fn dummy_ctx() -> RequestContext {
+        RequestContext::new(
+            "/test".to_string(),
+            Method::GET,
+            HeaderMap::new(),
+            HashMap::new(),
+            ContentKind::Html,
+            json!({"title": "test"}),
+            PathBuf::from("content/test.html"),
+            json!({}),
+            HashMap::new(),
+        )
+    }
+
+    fn fresh_recommendations() -> Recommendations {
+        Recommendations::default()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PluginSpec / PluginMeta basics
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn plugin_spec_fields_are_set_correctly() {
+        let spec = PluginSpec {
+            id: "plugin-1".into(),
+            name: "Test Plugin".into(),
+            source: "/* js */".into(),
+        };
+
+        assert_eq!(spec.id, "plugin-1");
+        assert_eq!(spec.name, "Test Plugin");
+        assert_eq!(spec.source, "/* js */");
+    }
+
+    #[test]
+    fn plugin_meta_clone_round_trips() {
+        let meta = PluginMeta {
+            id: "p".into(),
+            name: "Plugin".into(),
+        };
+
+        let clone = meta.clone();
+        assert_eq!(clone.id, "p");
+        assert_eq!(clone.name, "Plugin");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // load_plugins
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn load_plugins_success_populates_plugins_and_calls_engine() {
+        let engine = MockEngine::default();
+        let mut runtime = PluginRuntime::new(engine);
+
+        let specs = vec![
+            PluginSpec {
+                id: "p1".into(),
+                name: "Plugin 1".into(),
+                source: "/* p1 */".into(),
+            },
+            PluginSpec {
+                id: "p2".into(),
+                name: "Plugin 2".into(),
+                source: "/* p2 */".into(),
+            },
+        ];
+
+        let result = runtime.load_plugins(&specs);
+        assert!(result.is_ok(), "load_plugins should succeed");
+
+        // We’re inside the same module, so we can inspect private fields.
+        assert_eq!(runtime.plugins.len(), 2);
+        assert!(runtime.plugins.contains_key("p1"));
+        assert!(runtime.plugins.contains_key("p2"));
+
+        let load_calls = &runtime.engine.load_calls;
+        assert_eq!(load_calls.len(), 2);
+        assert_eq!(load_calls[0].0, "p1");
+        assert_eq!(load_calls[1].0, "p2");
+    }
+
+    #[test]
+    fn load_plugins_propagates_engine_load_error() {
+        let engine = MockEngine::with_load_error(JsError::Eval("boom".into()));
+        let mut runtime = PluginRuntime::new(engine);
+
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+
+        let result = runtime.load_plugins(&specs);
+        assert!(
+            result.is_err(),
+            "load_plugins should propagate load_module errors"
+        );
+    }
+
+    #[test]
+    fn load_plugins_on_empty_list_is_ok_and_keeps_plugins_empty() {
+        let engine = MockEngine::default();
+        let mut runtime = PluginRuntime::new(engine);
+
+        let specs: Vec<PluginSpec> = Vec::new();
+        let result = runtime.load_plugins(&specs);
+
+        assert!(result.is_ok());
+        assert!(runtime.plugins.is_empty());
+        assert!(runtime.engine.load_calls.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // init_all
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn init_all_calls_init_for_each_plugin_when_defined() {
+        let engine = MockEngine::default()
+            .with_call_result("p1.init", Ok(JsValue::Null))
+            .with_call_result("p2.init", Ok(JsValue::Null));
+
+        let mut runtime = PluginRuntime::new(engine);
+
+        let specs = vec![
+            PluginSpec {
+                id: "p1".into(),
+                name: "Plugin 1".into(),
+                source: "/* p1 */".into(),
+            },
+            PluginSpec {
+                id: "p2".into(),
+                name: "Plugin 2".into(),
+                source: "/* p2 */".into(),
+            },
+        ];
+
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let ctx = dummy_ctx();
+        let result = runtime.init_all(&ctx);
+        assert!(result.is_ok());
+
+        let log = &runtime.engine.call_log;
+        assert!(
+            log.contains(&"p1.init".to_string()) && log.contains(&"p2.init".to_string()),
+            "init_all should call <id>.init for each plugin"
+        );
+    }
+
+    #[test]
+    fn init_all_ignores_missing_init_functions() {
+        let engine = MockEngine::default().with_call_result(
+            "p1.init",
+            Err(JsError::Call("p1.init is not a function".into())),
+        );
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let ctx = dummy_ctx();
+        let result = runtime.init_all(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "init_all should ignore 'is not a function' errors for init hooks"
+        );
+    }
+
+    #[test]
+    fn init_all_propagates_other_init_errors() {
+        let engine = MockEngine::default()
+            .with_call_result("p1.init", Err(JsError::Call("some other error".into())));
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let ctx = dummy_ctx();
+        let result = runtime.init_all(&ctx);
+
+        assert!(
+            result.is_err(),
+            "init_all should propagate non-'is not a function' errors"
+        );
+    }
+
+    #[test]
+    fn init_all_is_noop_when_no_plugins_loaded() {
+        let engine = MockEngine::default();
+        let mut runtime = PluginRuntime::new(engine);
+
+        let ctx = dummy_ctx();
+        let result = runtime.init_all(&ctx);
+
+        assert!(result.is_ok());
+        assert!(
+            runtime.engine.call_log.is_empty(),
+            "no init calls should be made with no plugins"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // before_all
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn before_all_calls_before_for_each_plugin() {
+        let engine = MockEngine::default()
+            .with_call_result("p1.before", Ok(JsValue::Object(HashMap::new())))
+            .with_call_result("p2.before", Ok(JsValue::Null));
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![
+            PluginSpec {
+                id: "p1".into(),
+                name: "Plugin 1".into(),
+                source: "/* p1 */".into(),
+            },
+            PluginSpec {
+                id: "p2".into(),
+                name: "Plugin 2".into(),
+                source: "/* p2 */".into(),
+            },
+        ];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.before_all(&mut ctx);
+        assert!(result.is_ok());
+
+        let log = &runtime.engine.call_log;
+        assert!(
+            log.contains(&"p1.before".to_string()) && log.contains(&"p2.before".to_string()),
+            "before_all should call <id>.before for each plugin"
+        );
+    }
+
+    #[test]
+    fn before_all_ignores_missing_before_functions() {
+        let engine = MockEngine::default().with_call_result(
+            "p1.before",
+            Err(JsError::Call("p1.before is not a function".into())),
+        );
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.before_all(&mut ctx);
+        assert!(
+            result.is_ok(),
+            "before_all should ignore 'is not a function' errors"
+        );
+    }
+
+    #[test]
+    fn before_all_propagates_other_before_errors() {
+        let engine =
+            MockEngine::default().with_call_result("p1.before", Err(JsError::Call("boom".into())));
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.before_all(&mut ctx);
+        assert!(
+            result.is_err(),
+            "before_all should propagate non-'is not a function' errors"
+        );
+    }
+
+    #[test]
+    fn before_all_does_not_fail_when_no_plugins_loaded() {
+        let engine = MockEngine::default();
+        let mut runtime = PluginRuntime::new(engine);
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.before_all(&mut ctx);
+        assert!(result.is_ok());
+        assert!(
+            runtime.engine.call_log.is_empty(),
+            "no calls should be made when there are no plugins"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // after_all
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn after_all_calls_after_for_each_plugin() {
+        let engine = MockEngine::default()
+            .with_call_result("p1.after", Ok(JsValue::Object(HashMap::new())))
+            .with_call_result("p2.after", Ok(JsValue::Null));
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![
+            PluginSpec {
+                id: "p1".into(),
+                name: "Plugin 1".into(),
+                source: "/* p1 */".into(),
+            },
+            PluginSpec {
+                id: "p2".into(),
+                name: "Plugin 2".into(),
+                source: "/* p2 */".into(),
+            },
+        ];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.after_all(&mut ctx);
+        assert!(result.is_ok());
+
+        let log = &runtime.engine.call_log;
+        assert!(
+            log.contains(&"p1.after".to_string()) && log.contains(&"p2.after".to_string()),
+            "after_all should call <id>.after for each plugin"
+        );
+    }
+
+    #[test]
+    fn after_all_ignores_missing_after_functions() {
+        let engine = MockEngine::default().with_call_result(
+            "p1.after",
+            Err(JsError::Call("p1.after is not a function".into())),
+        );
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.after_all(&mut ctx);
+        assert!(
+            result.is_ok(),
+            "after_all should ignore 'is not a function' errors"
+        );
+    }
+
+    #[test]
+    fn after_all_propagates_other_after_errors() {
+        let engine =
+            MockEngine::default().with_call_result("p1.after", Err(JsError::Call("boom".into())));
+
+        let mut runtime = PluginRuntime::new(engine);
+        let specs = vec![PluginSpec {
+            id: "p1".into(),
+            name: "Plugin 1".into(),
+            source: "/* p1 */".into(),
+        }];
+        runtime
+            .load_plugins(&specs)
+            .expect("load_plugins should succeed");
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.after_all(&mut ctx);
+        assert!(
+            result.is_err(),
+            "after_all should propagate non-'is not a function' errors"
+        );
+    }
+
+    #[test]
+    fn after_all_does_not_fail_when_no_plugins_loaded() {
+        let engine = MockEngine::default();
+        let mut runtime = PluginRuntime::new(engine);
+
+        let mut ctx = dummy_ctx();
+        ctx.recommendations = fresh_recommendations();
+
+        let result = runtime.after_all(&mut ctx);
+        assert!(result.is_ok());
+        assert!(
+            runtime.engine.call_log.is_empty(),
+            "no calls should be made when no plugins are loaded"
+        );
+    }
+}
