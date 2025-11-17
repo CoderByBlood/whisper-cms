@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ContentKind {
     /// Static asset: bypasses plugins/themes and all transformation pipeline.
-    StaticAsset,
+    Asset,
 
     /// HTML content: theme generates HTML response.
-    HtmlContent,
+    Html,
 
     /// JSON content: theme generates JSON response.
-    JsonContent,
+    Json,
 }

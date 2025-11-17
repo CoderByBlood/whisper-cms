@@ -243,3 +243,166 @@ impl ResponseSpec {
         self.body = ResponseBodySpec::JsonValue(value);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Simple wrapper to test the `serde_method` helper directly.
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct MethodHolder {
+        #[serde(with = "super::serde_method")]
+        method: Method,
+    }
+
+    #[test]
+    fn serde_method_roundtrip() {
+        let original = MethodHolder {
+            method: Method::POST,
+        };
+
+        let json = serde_json::to_string(&original).expect("serialize MethodHolder");
+        // Should serialize as: {"method":"POST"}
+        assert!(
+            json.contains("POST"),
+            "serialized method should contain POST, got {json}"
+        );
+
+        let decoded: MethodHolder = serde_json::from_str(&json).expect("deserialize MethodHolder");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn response_spec_default_values() {
+        let spec = ResponseSpec::default();
+
+        assert_eq!(spec.status, StatusCode::OK);
+        assert!(spec.headers.is_empty());
+        matches!(spec.body, ResponseBodySpec::Unset);
+    }
+
+    #[test]
+    fn response_spec_set_status() {
+        let mut spec = ResponseSpec::default();
+        spec.set_status(StatusCode::NOT_FOUND);
+        assert_eq!(spec.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn response_spec_set_header_success() {
+        let mut spec = ResponseSpec::default();
+
+        spec.set_header("x-custom", "value")
+            .expect("header should be valid");
+
+        let hv = spec
+            .headers
+            .get("x-custom")
+            .expect("header should exist after set");
+        assert_eq!(hv.to_str().unwrap(), "value");
+    }
+
+    #[test]
+    fn response_spec_set_header_invalid_name() {
+        let mut spec = ResponseSpec::default();
+
+        // Invalid header name (space is not allowed).
+        let res = spec.set_header("bad name", "value");
+        assert!(res.is_err(), "expected invalid header name to error");
+    }
+
+    #[test]
+    fn response_spec_set_header_invalid_value() {
+        let mut spec = ResponseSpec::default();
+
+        // Header values cannot contain newline characters.
+        let res = spec.set_header("x-bad", "line1\nline2");
+        assert!(res.is_err(), "expected invalid header value to error");
+    }
+
+    #[test]
+    fn response_spec_append_header_success() {
+        let mut spec = ResponseSpec::default();
+
+        spec.append_header("x-many", "one").expect("append first");
+        spec.append_header("x-many", "two").expect("append second");
+
+        let values: Vec<_> = spec
+            .headers
+            .get_all("x-many")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(values, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn response_spec_remove_header() {
+        let mut spec = ResponseSpec::default();
+        spec.set_header("x-remove", "value").unwrap();
+
+        assert!(spec.headers.contains_key("x-remove"));
+        spec.remove_header("x-remove");
+        assert!(!spec.headers.contains_key("x-remove"));
+    }
+
+    #[test]
+    fn response_body_spec_setters() {
+        let mut spec = ResponseSpec::default();
+
+        // HtmlTemplate
+        let model = json!({ "foo": "bar" });
+        spec.set_html_template("tpl".to_string(), model.clone());
+        match &spec.body {
+            ResponseBodySpec::HtmlTemplate { template, model: m } => {
+                assert_eq!(template, "tpl");
+                assert_eq!(m, &model);
+            }
+            other => panic!("expected HtmlTemplate, got {other:?}"),
+        }
+
+        // HtmlString
+        spec.set_html_string("<h1>Hi</h1>");
+        match &spec.body {
+            ResponseBodySpec::HtmlString(s) => {
+                assert_eq!(s, "<h1>Hi</h1>");
+            }
+            other => panic!("expected HtmlString, got {other:?}"),
+        }
+
+        // JsonValue
+        let value = json!({ "ok": true });
+        spec.set_json_value(value.clone());
+        match &spec.body {
+            ResponseBodySpec::JsonValue(v) => {
+                assert_eq!(v, &value);
+            }
+            other => panic!("expected JsonValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn response_spec_serde_roundtrip() {
+        let mut spec = ResponseSpec::default();
+        spec.set_status(StatusCode::CREATED);
+        spec.set_header("x-serde", "yes").unwrap();
+        spec.set_json_value(json!({ "answer": 42 }));
+
+        let value = serde_json::to_value(&spec).expect("serialize ResponseSpec");
+
+        // Status should be encoded as a number via `serde_status`.
+        assert_eq!(value["status"], json!(201));
+        assert_eq!(value["headers"]["x-serde"], json!("yes"));
+
+        let decoded: ResponseSpec =
+            serde_json::from_value(value).expect("deserialize ResponseSpec");
+        assert_eq!(decoded.status, StatusCode::CREATED);
+        assert_eq!(
+            decoded.headers.get("x-serde").unwrap().to_str().unwrap(),
+            "yes"
+        );
+        matches!(decoded.body, ResponseBodySpec::JsonValue(_));
+    }
+}

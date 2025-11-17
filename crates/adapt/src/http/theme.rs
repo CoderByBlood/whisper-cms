@@ -179,3 +179,174 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::content::ContentKind;
+    use crate::core::context::{RequestContext, ResponseBodySpec, ResponseSpec};
+    use http::{HeaderMap, Method};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    /// Helper: construct a RequestContext with a specific ResponseBodySpec.
+    fn mk_ctx_with_body(body: ResponseBodySpec, path: &str) -> RequestContext {
+        let headers = HeaderMap::new();
+        let query_params: HashMap<String, String> = HashMap::new();
+        let content_kind = ContentKind::Html;
+        let front_matter = json!({"title": "Test"});
+        let body_path = PathBuf::from("/tmp/content.html");
+        let theme_config = json!({});
+        let plugin_configs: HashMap<String, serde_json::Value> = HashMap::new();
+
+        let mut ctx = RequestContext::new(
+            path.to_string(),
+            Method::GET,
+            headers,
+            query_params,
+            content_kind,
+            front_matter,
+            body_path,
+            theme_config,
+            plugin_configs,
+        );
+
+        ctx.response_spec = ResponseSpec {
+            status: ctx.response_spec.status, // keep default 200
+            headers: HeaderMap::new(),
+            body,
+        };
+
+        ctx
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // SimpleThemeHandler::handle
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn simple_theme_sets_default_json_when_body_unset() {
+        let handler = SimpleThemeHandler;
+        let path = "/some/path";
+        let mut ctx = mk_ctx_with_body(ResponseBodySpec::Unset, path);
+
+        handler
+            .handle(&mut ctx)
+            .expect("SimpleThemeHandler should not error");
+
+        match &ctx.response_spec.body {
+            ResponseBodySpec::JsonValue(val) => {
+                assert_eq!(val["ok"], json!(true));
+                assert_eq!(val["path"], json!(path));
+            }
+            other => panic!("expected JsonValue default body, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn simple_theme_does_not_overwrite_existing_html_template() {
+        let handler = SimpleThemeHandler;
+        let path = "/html/page";
+
+        let initial_model = json!({ "title": "Existing" });
+        let mut ctx = mk_ctx_with_body(
+            ResponseBodySpec::HtmlTemplate {
+                template: "my_template".to_string(),
+                model: initial_model.clone(),
+            },
+            path,
+        );
+
+        let before_spec = ctx.response_spec.clone();
+
+        handler
+            .handle(&mut ctx)
+            .expect("SimpleThemeHandler should not error");
+
+        match &ctx.response_spec.body {
+            ResponseBodySpec::HtmlTemplate { template, model } => {
+                assert_eq!(template, "my_template");
+                assert_eq!(model, &initial_model);
+            }
+            other => panic!("expected HtmlTemplate to be preserved, got {:?}", other),
+        }
+
+        // Should not have changed status or headers.
+        assert_eq!(ctx.response_spec.status, before_spec.status);
+        assert_eq!(ctx.response_spec.headers, before_spec.headers);
+    }
+
+    #[test]
+    fn simple_theme_does_not_overwrite_existing_json_value() {
+        let handler = SimpleThemeHandler;
+        let path = "/api/data";
+
+        let initial_body = json!({ "foo": "bar", "ok": false });
+        let mut ctx = mk_ctx_with_body(ResponseBodySpec::JsonValue(initial_body.clone()), path);
+
+        let before_spec = ctx.response_spec.clone();
+
+        handler
+            .handle(&mut ctx)
+            .expect("SimpleThemeHandler should not error");
+
+        match &ctx.response_spec.body {
+            ResponseBodySpec::JsonValue(val) => {
+                assert_eq!(val, &initial_body);
+            }
+            other => panic!("expected JsonValue to be preserved, got {:?}", other),
+        }
+
+        // Status/headers unchanged.
+        assert_eq!(ctx.response_spec.status, before_spec.status);
+        assert_eq!(ctx.response_spec.headers, before_spec.headers);
+    }
+
+    #[test]
+    fn simple_theme_does_not_overwrite_none_body() {
+        let handler = SimpleThemeHandler;
+        let path = "/no/body";
+
+        let mut ctx = mk_ctx_with_body(ResponseBodySpec::None, path);
+        let before_spec = ctx.response_spec.clone();
+
+        handler
+            .handle(&mut ctx)
+            .expect("SimpleThemeHandler should not error");
+
+        match &ctx.response_spec.body {
+            ResponseBodySpec::None => { /* expected */ }
+            other => panic!("expected ResponseBodySpec::None, got {:?}", other),
+        }
+
+        // Status/headers unchanged.
+        assert_eq!(ctx.response_spec.status, before_spec.status);
+        assert_eq!(ctx.response_spec.headers, before_spec.headers);
+    }
+
+    #[test]
+    fn simple_theme_is_idempotent_when_body_already_set() {
+        let handler = SimpleThemeHandler;
+        let path = "/already/set";
+
+        let initial_body = json!({ "hello": "world" });
+        let mut ctx = mk_ctx_with_body(ResponseBodySpec::JsonValue(initial_body.clone()), path);
+
+        handler.handle(&mut ctx).expect("first call should succeed");
+
+        let after_first = ctx.response_spec.clone();
+
+        handler
+            .handle(&mut ctx)
+            .expect("second call should also succeed");
+
+        // After multiple calls, body should remain unchanged.
+        assert_eq!(ctx.response_spec.status, after_first.status);
+        assert_eq!(ctx.response_spec.headers, after_first.headers);
+        assert_eq!(
+            format!("{:?}", ctx.response_spec.body),
+            format!("{:?}", after_first.body),
+        );
+    }
+}
