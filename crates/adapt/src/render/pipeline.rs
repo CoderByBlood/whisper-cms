@@ -159,3 +159,291 @@ pub fn render_json_to<W: Write>(
     serde_json::to_writer(&mut out, &patched_value)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::recommendation::{BodyPatch, DomOp};
+    use crate::render::template::HbsEngine;
+    use serde::Serialize;
+    use serde_json::json;
+
+    #[derive(Serialize)]
+    struct SimpleModel<'a> {
+        name: &'a str,
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // HTML: basic rendering + regex + HtmlDom + errors
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_html_template_no_patches_produces_expected_output() {
+        let mut engine = HbsEngine::new();
+        engine
+            .register_template_str("hello", "Hello, {{name}}!")
+            .expect("template registration should succeed");
+
+        let model = SimpleModel { name: "Alice" };
+        let mut out = Vec::new();
+
+        render_html_template_to(&engine, "hello", &model, &[], &mut out)
+            .expect("render_html_template_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(s, "Hello, Alice!");
+    }
+
+    #[test]
+    fn render_html_template_applies_regex_patches_in_order() {
+        let mut engine = HbsEngine::new();
+        engine
+            .register_template_str("hello", "Hello, Alice! Alice!")
+            .expect("template registration should succeed");
+
+        let model = SimpleModel { name: "ignored" };
+
+        // First replace "Alice" with "Bob", then "Bob" with "Carol".
+        let patches = vec![
+            BodyPatch::new_regex("Alice".into(), "Bob".into(), "p1".into()),
+            BodyPatch::new_regex("Bob".into(), "Carol".into(), "p2".into()),
+        ];
+
+        let mut out = Vec::new();
+        render_html_template_to(&engine, "hello", &model, &patches, &mut out)
+            .expect("render_html_template_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(s, "Hello, Carol! Carol!");
+    }
+
+    #[test]
+    fn render_html_template_ignores_json_patches_for_html() {
+        let mut engine = HbsEngine::new();
+        engine
+            .register_template_str("hello", "<p>{{name}}</p>")
+            .expect("template registration should succeed");
+
+        let model = SimpleModel { name: "Alice" };
+
+        // JsonPatch body patches should be ignored for HTML.
+        let json_patch_doc = json!([
+            { "op": "replace", "path": "/name", "value": "Bob" }
+        ]);
+        let patches = vec![BodyPatch::new_json_patch(
+            json_patch_doc,
+            "json-plugin".into(),
+        )];
+
+        let mut out = Vec::new();
+        render_html_template_to(&engine, "hello", &model, &patches, &mut out)
+            .expect("render_html_template_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(s, "<p>Alice</p>");
+    }
+
+    #[test]
+    fn render_html_template_with_invalid_regex_returns_error() {
+        let mut engine = HbsEngine::new();
+        engine
+            .register_template_str("hello", "Hello")
+            .expect("template registration should succeed");
+
+        let model = SimpleModel { name: "ignored" };
+
+        // Invalid regex: unbalanced '('
+        let patches = vec![BodyPatch::new_regex("(".into(), "x".into(), "bad".into())];
+
+        let mut out = Vec::new();
+        let res = render_html_template_to(&engine, "hello", &model, &patches, &mut out);
+
+        match res {
+            Err(RenderError::InvalidRegex { pattern, .. }) => {
+                assert_eq!(pattern, "(");
+            }
+            other => panic!("expected InvalidRegex error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn render_html_template_applies_html_dom_patches_if_present() {
+        let mut engine = HbsEngine::new();
+        engine
+            .register_template_str("page", "<html><body><p class=\"x\">Hello</p></body></html>")
+            .expect("template registration should succeed");
+
+        let model = ();
+
+        // HtmlDom patch: change inner text of <p.x> to "Hi".
+        let dom_ops = vec![DomOp::SetInnerText("Hi".into())];
+        let patches = vec![BodyPatch::new_html_dom(
+            "p.x".into(),
+            dom_ops,
+            "dom-plugin".into(),
+        )];
+
+        let mut out = Vec::new();
+        let res = render_html_template_to(&engine, "page", &model, &patches, &mut out);
+
+        // If html_rewriter / lol_html wiring is correct, this should succeed
+        // and the <p> content should be replaced.
+        match res {
+            Ok(()) => {
+                let s = String::from_utf8(out).unwrap();
+                assert!(
+                    s.contains("<p class=\"x\">Hi</p>"),
+                    "rewritten html should contain modified <p>, got: {}",
+                    s
+                );
+            }
+            Err(e) => panic!("expected ok for HtmlDom path, got {:?}", e),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // JSON: basic rendering + regex + JsonPatch + error paths
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_json_no_patches_writes_original_value() {
+        let value = json!({ "a": 1, "b": "x" });
+
+        let mut out = Vec::new();
+        render_json_to(&value, &[], &mut out).expect("render_json_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        let parsed: Json = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, value);
+    }
+
+    #[test]
+    fn render_json_applies_regex_patches_on_serialized_text() {
+        let value = json!({ "message": "Hello" });
+
+        // Replace "Hello" with "Hi" in the JSON text.
+        let patches = vec![BodyPatch::new_regex(
+            "Hello".into(),
+            "Hi".into(),
+            "p1".into(),
+        )];
+
+        let mut out = Vec::new();
+        render_json_to(&value, &patches, &mut out).expect("render_json_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        let parsed: Json = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, json!({ "message": "Hi" }));
+    }
+
+    #[test]
+    fn render_json_with_invalid_regex_returns_error() {
+        let value = json!({ "a": 1 });
+
+        let patches = vec![BodyPatch::new_regex("(".into(), "x".into(), "bad".into())];
+
+        let mut out = Vec::new();
+        let res = render_json_to(&value, &patches, &mut out);
+
+        match res {
+            Err(RenderError::InvalidRegex { pattern, .. }) => {
+                assert_eq!(pattern, "(");
+            }
+            other => panic!("expected InvalidRegex error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn render_json_invalid_after_regex_yields_json_after_regex_error() {
+        let value = json!({ "a": 1 });
+
+        // Remove all double quotes from the JSON text, producing invalid JSON `{a:1}`.
+        let patches = vec![BodyPatch::new_regex(
+            "\"".into(),
+            "".into(),
+            "break-json".into(),
+        )];
+
+        let mut out = Vec::new();
+        let res = render_json_to(&value, &patches, &mut out);
+
+        match res {
+            Err(RenderError::JsonAfterRegex(msg)) => {
+                // Don't overfit on serde_json wording; just ensure we got a non-empty message.
+                assert!(
+                    !msg.trim().is_empty(),
+                    "expected a non-empty serde_json error message, got: {:?}",
+                    msg
+                );
+            }
+            other => panic!("expected JsonAfterRegex error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn render_json_applies_json_patch_body_patches() {
+        let value = json!({ "a": 1 });
+
+        // JsonPatch: add field /b = 2
+        let patch_doc = json!([
+            { "op": "add", "path": "/b", "value": 2 }
+        ]);
+
+        let patches = vec![BodyPatch::new_json_patch(patch_doc, "json-patch".into())];
+
+        let mut out = Vec::new();
+        render_json_to(&value, &patches, &mut out).expect("render_json_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        let parsed: Json = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, json!({ "a": 1, "b": 2 }));
+    }
+
+    #[test]
+    fn render_json_invalid_patch_document_returns_error() {
+        let value = json!({ "a": 1 });
+
+        // Not a valid JSON Patch document (must be an array of ops).
+        let bad_patch_doc = json!({"op": "add", "path": "/b", "value": 2});
+
+        let patches = vec![BodyPatch::new_json_patch(bad_patch_doc, "bad-patch".into())];
+
+        let mut out = Vec::new();
+        let res = render_json_to(&value, &patches, &mut out);
+
+        // We don't assert the exact variant here, just that it's an error
+        // originating from json-patch / serde_json conversion.
+        assert!(
+            res.is_err(),
+            "expected error from invalid JSON Patch document"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Smoke test: combination of regex + jsonPatch on JSON
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_json_applies_regex_then_json_patch_in_sequence() {
+        // Start with {"msg":"Hello","count":1}
+        let value = json!({ "msg": "Hello", "count": 1 });
+
+        // First, regex changes "Hello" -> "Hi".
+        let regex_patch = BodyPatch::new_regex("Hello".into(), "Hi".into(), "regex".into());
+
+        // Then, json patch increments count to 2 via replace.
+        let patch_doc = json!([
+            { "op": "replace", "path": "/count", "value": 2 }
+        ]);
+        let json_patch = BodyPatch::new_json_patch(patch_doc, "json-patch".into());
+
+        let patches = vec![regex_patch, json_patch];
+
+        let mut out = Vec::new();
+        render_json_to(&value, &patches, &mut out).expect("render_json_to should succeed");
+
+        let s = String::from_utf8(out).unwrap();
+        let parsed: Json = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, json!({ "msg": "Hi", "count": 2 }));
+    }
+}
