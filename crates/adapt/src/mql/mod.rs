@@ -8,5 +8,15 @@ pub mod query;
 pub use ast::{CmpOp, FieldExpr, Filter, FindOptions};
 pub use error::QueryError;
 pub use eval::eval_filter;
-pub use index::{InMemoryIndexBackend, InMemoryJsonStore, IndexBackend, IndexConfig, JsonStore};
+pub use index::{
+    InMemoryIndexBackend,
+    InMemoryJsonStore,
+    IndexBackend,
+    IndexConfig,
+    // These will exist once you add the skeleton in `index.rs`:
+    IndexedJsonApi,
+    IndexedJsonIndexBackend,
+    IndexedJsonStore,
+    JsonStore,
+};
 pub use query::{execute_query, QueryPlanner, QueryResult};
