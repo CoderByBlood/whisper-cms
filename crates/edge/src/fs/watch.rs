@@ -1,16 +1,17 @@
 //! folder_watch.rs
 //! Functional, module-level entry points that turn OS filesystem events into a
-//! **bounded, debounced, coalesced** stream of `PathBuf`s over `tokio::mpsc`.
+//! **debounced, coalesced** stream of `PathBuf`s over `tokio::mpsc`.
 //!
 //! Usage:
-//!   let (mut rx, stop) = watch_folder_default("/some/root")?;
+//!   let (tx, mut rx) = mpsc::channel::<PathBuf>(512);
+//!   let stop = watch_folder_default("/some/root", tx)?;
 //!   while let Some(path) = rx.recv().await {
 //!       // react to `path`
 //!   }
 //!   // ... later (or in a drop path):
 //!   stop(); // synchronous shutdown (stops forwarder task and the watcher)
 //!
-//! If you need knobs, use `watch_folder(root, cfg)`.
+//! If you need knobs, use `watch_folder(root, cfg, tx)`.
 
 use notify::{Event, RecursiveMode, Result as NotifyResult, Watcher};
 use std::{
@@ -19,7 +20,11 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-/// Configuration for how we forward events into a bounded channel.
+/// Configuration for how we forward events into a channel.
+///
+/// Note: as of this version, the caller is responsible for creating the
+/// actual `mpsc::channel` with whatever capacity they want; this config
+/// is purely about notify/debounce/canonicalization behavior.
 #[derive(Debug, Clone)]
 pub struct FolderWatchConfig {
     /// Whether to recursively watch the directory tree.
@@ -29,9 +34,6 @@ pub struct FolderWatchConfig {
     pub debounce_ms: u64,
     /// Canonicalize paths before enqueue (useful for stable equality across symlinks).
     pub canonicalize_paths: bool,
-    /// Bounded channel capacity for backpressure. If the consumer is slow,
-    /// the forwarder will await sends once the buffer fills.
-    pub channel_capacity: usize,
 }
 
 impl Default for FolderWatchConfig {
@@ -40,28 +42,30 @@ impl Default for FolderWatchConfig {
             recursive: true,
             debounce_ms: 40,
             canonicalize_paths: false,
-            channel_capacity: 512,
         }
     }
 }
 
 /// Convenience: start with defaults.
+///
+/// You provide the `Sender<PathBuf>`; this function wires `notify` into it and
+/// returns a synchronous `stop` callback.
 pub fn watch_folder_default(
     root: impl AsRef<Path>,
-) -> NotifyResult<(mpsc::Receiver<PathBuf>, Box<dyn FnOnce() + Send>)> {
-    watch_folder(root, FolderWatchConfig::default())
+    tx_out: mpsc::Sender<PathBuf>,
+) -> NotifyResult<Box<dyn FnOnce() + Send>> {
+    watch_folder(root, FolderWatchConfig::default(), tx_out)
 }
 
-/// Start watching `root` and return:
-/// - a **bounded** `tokio::mpsc::Receiver<PathBuf>`
-/// - a synchronous `stop` closure that halts the watcher and forwarder
+/// Start watching `root` and forward paths into the provided `Sender<PathBuf>`.
+///
+/// Returns:
+/// - `stop: Box<dyn FnOnce() + Send>` synchronous closure that halts the watcher and forwarder
 pub fn watch_folder(
     root: impl AsRef<Path>,
     cfg: FolderWatchConfig,
-) -> NotifyResult<(mpsc::Receiver<PathBuf>, Box<dyn FnOnce() + Send>)> {
-    // Output: bounded channel with caller-specified capacity (provides backpressure).
-    let (tx_out, rx_out) = mpsc::channel::<PathBuf>(cfg.channel_capacity);
-
+    tx_out: mpsc::Sender<PathBuf>,
+) -> NotifyResult<Box<dyn FnOnce() + Send>> {
     // notify callback → unbounded mpsc (we can’t await in the callback)
     let (tx_raw, mut rx_raw) = mpsc::unbounded_channel::<Event>();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -85,11 +89,12 @@ pub fn watch_folder(
     let debounce_ms = cfg.debounce_ms;
     let canonicalize = cfg.canonicalize_paths;
 
-    // Clone the bounded sender into the task so we can drop it in `stop`.
+    // Clone the sender into the task; the original will be dropped in `stop`.
     let tx_out_for_task = tx_out.clone();
 
     // Forwarder task: debounce, coalesce duplicates within the window, then
-    // send each unique path into the bounded channel (awaiting when full).
+    // send each unique path into the caller-provided channel (backpressure is
+    // provided by the caller's channel capacity).
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -128,7 +133,7 @@ pub fn watch_folder(
                         }
                     }
 
-                    // Send each unique path to the bounded channel; this is where
+                    // Send each unique path to the caller's bounded channel; this is where
                     // **backpressure** is applied (await when full).
                     for p in uniq {
                         // If receiver dropped, stop.
@@ -144,7 +149,7 @@ pub fn watch_folder(
     // Build a synchronous stopper that:
     // 1) drops the watcher (stop native callbacks)
     // 2) signals the forwarder to exit and aborts if still running
-    // 3) drops the bounded sender to close the output stream
+    // 3) drops the caller's sender to close the stream on their side
     let stop = {
         let mut maybe_watcher = Some(watcher);
         let mut maybe_task = Some(task);
@@ -168,7 +173,7 @@ pub fn watch_folder(
         }) as Box<dyn FnOnce() + Send>
     };
 
-    Ok((rx_out, stop))
+    Ok(stop)
 }
 
 #[cfg(test)]
@@ -223,20 +228,17 @@ mod tests {
 
     // ---------- tests ----------
 
-    /// Starts and stops cleanly; no events produced.
+    /// Starts and idles cleanly; no events produced after a warm-up drain.
     #[tokio::test(flavor = "multi_thread")]
     async fn starts_and_idles_without_writes() -> NotifyResult<()> {
-        use std::time::Duration;
-        use tokio::time::timeout;
-
         let dir = TempDir::new().unwrap();
-        let (mut rx, stop) = watch_folder_default(dir.path())?;
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder_default(dir.path(), tx)?;
 
         // Warm-up: some backends emit one-off startup events. Drain them.
         let _startup_noise = drain_for(&mut rx, Duration::from_millis(300)).await;
 
         // Observation window: with no writes, we should not see *new* events.
-        // Accept either: (a) timeout (no events), or (b) channel closed (unlikely here).
         match timeout(Duration::from_millis(400), rx.recv()).await {
             Ok(Some(p)) => panic!("unexpected event without writes: {p:?}"),
             Ok(None) => { /* channel closed: fine */ }
@@ -254,7 +256,8 @@ mod tests {
         let file = dir.path().join("a.txt");
         fs::write(&file, "init").unwrap();
 
-        let (mut rx, stop) = watch_folder_default(dir.path())?;
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder_default(dir.path(), tx)?;
         fs::write(&file, "v1").unwrap();
 
         let want = canon(&file);
@@ -273,12 +276,14 @@ mod tests {
         let file = dir.path().join("dup.txt");
         fs::write(&file, "init").unwrap();
 
-        let (mut rx, stop) = watch_folder(
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder(
             dir.path(),
             FolderWatchConfig {
                 debounce_ms: 50,
                 ..Default::default()
             },
+            tx,
         )?;
 
         // Rapid burst of writes.
@@ -309,7 +314,8 @@ mod tests {
         fs::write(&f1, "init1").unwrap();
         fs::write(&f2, "init2").unwrap();
 
-        let (mut rx, stop) = watch_folder_default(dir.path())?;
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder_default(dir.path(), tx)?;
         fs::write(&f1, "ch1").unwrap();
         fs::write(&f2, "ch2").unwrap();
 
@@ -342,13 +348,15 @@ mod tests {
         fs::write(&top, "t0").unwrap();
         fs::write(&nested_file, "n0").unwrap();
 
-        let (mut rx, stop) = watch_folder(
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder(
             dir.path(),
             FolderWatchConfig {
                 recursive: false,
                 debounce_ms: 25,
                 ..Default::default()
             },
+            tx,
         )?;
 
         // Change nested file: we should **not** see it in a short window.
@@ -391,12 +399,14 @@ mod tests {
         fs::write(&target, "init").unwrap();
         unix_fs::symlink(&target, &link).unwrap();
 
-        let (mut rx, stop) = watch_folder(
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder(
             dir.path(),
             FolderWatchConfig {
                 canonicalize_paths: true,
                 ..Default::default()
             },
+            tx,
         )?;
 
         fs::write(&link, "v1").unwrap();
@@ -414,19 +424,20 @@ mod tests {
         Ok(())
     }
 
-    /// Backpressure sanity: with a small channel capacity, a large number of unique writes
-    /// should still be received eventually (we don't assert exact counts).
+    /// Backpressure sanity: with a small channel capacity (caller-controlled),
+    /// a large number of unique writes should still be received eventually.
     #[tokio::test(flavor = "multi_thread")]
     async fn bounded_channel_backpressure_sanity() -> NotifyResult<()> {
         let dir = TempDir::new().unwrap();
 
-        let (mut rx, stop) = watch_folder(
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(4); // very small buffer
+        let stop = watch_folder(
             dir.path(),
             FolderWatchConfig {
-                channel_capacity: 4, // very small buffer
                 debounce_ms: 20,
                 ..Default::default()
             },
+            tx,
         )?;
 
         // Create many unique files quickly.
@@ -457,7 +468,7 @@ mod tests {
         Ok(())
     }
 
-    /// After stop, further writes should not be delivered.
+    /// After stop, further writes should not be delivered (beyond eventual draining).
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_prevents_further_delivery() -> NotifyResult<()> {
         use std::time::{Duration, Instant};
@@ -466,7 +477,8 @@ mod tests {
         let file = dir.path().join("afterstop.txt");
         fs::write(&file, "init").unwrap();
 
-        let (mut rx, stop) = watch_folder_default(dir.path())?;
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder_default(dir.path(), tx)?;
 
         // Cause at least one event before stop.
         fs::write(&file, "v1").unwrap();
@@ -477,25 +489,21 @@ mod tests {
         // Now stop the watcher/forwarder/sender.
         stop();
 
-        // Drain any residual buffered events until we've seen a “quiet” period
-        // with no arrivals. This handles callback races and in-flight messages.
+        // Drain any residual buffered events until we've seen a “quiet” period.
         let quiet_for = Duration::from_millis(250);
         let overall_deadline = Instant::now() + Duration::from_secs(2);
         let mut last_recv = Instant::now();
 
         loop {
-            // If we've been quiet long enough, we're done draining.
             if last_recv.elapsed() >= quiet_for {
                 break;
             }
-            // If we run past an overall deadline, also stop draining.
             if Instant::now() >= overall_deadline {
                 break;
             }
 
             match timeout(Duration::from_millis(50), rx.recv()).await {
                 Ok(Some(_p)) => {
-                    // Saw another residual event; reset quiet timer.
                     last_recv = Instant::now();
                 }
                 Ok(None) => {
@@ -509,8 +517,6 @@ mod tests {
         }
 
         // After draining, assert no *new* events arrive in a longer observation window.
-        // Allow either: (a) channel already closed (recv => None), or
-        // (b) no arrivals within the window (timeout).
         let verdict = timeout(Duration::from_millis(600), rx.recv()).await;
         match verdict {
             Ok(Some(_)) => panic!("no further events expected after stop"),
@@ -525,7 +531,8 @@ mod tests {
     #[test]
     fn invalid_root_errors() {
         let bogus = PathBuf::from("/definitely/not/a/real/path/for/watch");
-        let res = watch_folder(bogus, FolderWatchConfig::default());
+        let (tx, _rx) = mpsc::channel::<PathBuf>(8);
+        let res = watch_folder(bogus, FolderWatchConfig::default(), tx);
         assert!(res.is_err(), "watching a non-existent root should error");
     }
 
@@ -536,12 +543,14 @@ mod tests {
         let file = dir.path().join("nodebounce.txt");
         fs::write(&file, "init").unwrap();
 
-        let (mut rx, stop) = watch_folder(
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(64);
+        let stop = watch_folder(
             dir.path(),
             FolderWatchConfig {
                 debounce_ms: 0,
                 ..Default::default()
             },
+            tx,
         )?;
 
         fs::write(&file, "v1").unwrap();
