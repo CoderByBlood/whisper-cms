@@ -9,3 +9,5 @@ thiserror = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
