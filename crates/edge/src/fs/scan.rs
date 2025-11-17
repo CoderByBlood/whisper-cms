@@ -1,8 +1,8 @@
 //! Scanning + I/O operations producing a debounced mpsc stream of paths.
 //!
-//! - Returns a bounded `tokio::sync::mpsc::Receiver<PathBuf>` and a stop function (`Box<dyn FnOnce() + Send>`).
+//! - Sends debounced `PathBuf`s into a provided `tokio::sync::mpsc::Sender<PathBuf>`.
+//! - Returns a stop function (`Box<dyn FnOnce() + Send>`) that aborts internal tasks.
 //! - Debounces identical paths within a window (coalescing).
-//! - Bounded channel provides natural backpressure.
 //! - Optional folder / file regex filters.
 //! - Supports absolute/relative emission, recursion depth, and path canonicalization.
 
@@ -32,7 +32,7 @@ pub struct FolderScanConfig {
     pub debounce_ms: u64,
     /// Canonicalize paths before emission.
     pub canonicalize_paths: bool,
-    /// Capacity of the bounded output channel.
+    /// Capacity of the bounded output channel (no longer used here, but kept for config symmetry).
     pub channel_capacity: usize,
     /// Optional regex to **allow** folders. If set, a directory is traversed
     /// if it or **any ancestor under `root`** matches.
@@ -55,10 +55,15 @@ impl Default for FolderScanConfig {
     }
 }
 
-/// Start scanning `root` according to `cfg`, producing a debounced stream of paths.
+/// Start scanning `root` according to `cfg`, producing a debounced stream of paths
+/// that are sent into the provided `out_tx`.
+///
+/// Arguments:
+/// - `root`: directory to scan
+/// - `cfg`: configuration (filters, paths, debounce, recursion)
+/// - `out_tx`: bounded channel sender used for delivering debounced paths
 ///
 /// Returns:
-/// - `Receiver<PathBuf>`: a bounded channel yielding file paths (subject to filters / options)
 /// - `Box<dyn FnOnce() + Send>`: call it to stop both internal tasks
 ///
 /// Errors:
@@ -67,7 +72,8 @@ impl Default for FolderScanConfig {
 pub fn start_folder_scan(
     root: &Path,
     cfg: FolderScanConfig,
-) -> io::Result<(mpsc::Receiver<PathBuf>, Box<dyn FnOnce() + Send>)> {
+    out_tx: mpsc::Sender<PathBuf>,
+) -> io::Result<Box<dyn FnOnce() + Send>> {
     // Pre-check root existence and type (fail fast with a regular io::Error).
     let meta = fs::metadata(root).map_err(|e| io::Error::new(e.kind(), format!("root: {e}")))?;
     if !meta.is_dir() {
@@ -79,9 +85,6 @@ pub fn start_folder_scan(
 
     // Canonical root used for traversal and (if requested) for canonicalization.
     let root_canon = fs::canonicalize(root)?;
-
-    // Output channel (bounded) — natural backpressure.
-    let (out_tx, out_rx) = mpsc::channel::<PathBuf>(cfg.channel_capacity);
 
     // Internal raw channel (unbounded) between walker and debouncer.
     let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<PathBuf>();
@@ -224,13 +227,13 @@ pub fn start_folder_scan(
     });
     let scan_abort: AbortHandle = scan_handle.abort_handle();
 
-    // Stop closure replaces a struct handle
+    // Stop closure
     let stop_fn: Box<dyn FnOnce() + Send> = Box::new(move || {
         scan_abort.abort();
         debounce_abort.abort();
     });
 
-    Ok((out_rx, stop_fn))
+    Ok(stop_fn)
 }
 
 #[cfg(test)]
@@ -253,7 +256,7 @@ mod tests {
         Ok(())
     }
 
-    async fn collect_all(mut rx: tokio::sync::mpsc::Receiver<PathBuf>) -> Vec<PathBuf> {
+    async fn collect_all(mut rx: mpsc::Receiver<PathBuf>) -> Vec<PathBuf> {
         let mut out = Vec::new();
         while let Some(p) = rx.recv().await {
             out.push(p);
@@ -262,7 +265,7 @@ mod tests {
     }
 
     async fn collect_until_closed_or_timeout(
-        rx: tokio::sync::mpsc::Receiver<PathBuf>,
+        rx: mpsc::Receiver<PathBuf>,
         max_ms: u64,
     ) -> Vec<PathBuf> {
         let fut = collect_all(rx);
@@ -284,11 +287,11 @@ mod tests {
     async fn missing_root_returns_error() {
         let missing = Path::new("/definitely/not/here/___x");
         let cfg = FolderScanConfig::default();
+        let (tx, _rx) = mpsc::channel::<PathBuf>(16);
 
-        let res = start_folder_scan(missing, cfg);
+        let res = start_folder_scan(missing, cfg, tx);
         let err = match res {
-            Ok((_rx, stop)) => {
-                // be tidy if it ever unexpectedly succeeds
+            Ok(stop) => {
                 stop();
                 panic!("expected start_folder_scan to error for missing root");
             }
@@ -310,9 +313,9 @@ mod tests {
         cfg.absolute = true;
         cfg.canonicalize_paths = true;
         cfg.debounce_ms = 10;
-        cfg.channel_capacity = 4;
 
-        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let (tx, rx) = mpsc::channel::<PathBuf>(4);
+        let stop = start_folder_scan(root, cfg, tx)?;
         let got = collect_until_closed_or_timeout(rx, 1000).await;
         stop();
 
@@ -335,9 +338,9 @@ mod tests {
         cfg.absolute = false;
         cfg.canonicalize_paths = false;
         cfg.debounce_ms = 10;
-        cfg.channel_capacity = 4;
 
-        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let (tx, rx) = mpsc::channel::<PathBuf>(4);
+        let stop = start_folder_scan(root, cfg, tx)?;
         let got = collect_until_closed_or_timeout(rx, 1000).await;
         stop();
 
@@ -361,7 +364,8 @@ mod tests {
         cfg.debounce_ms = 10;
         cfg.absolute = false;
 
-        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let (tx, rx) = mpsc::channel::<PathBuf>(4);
+        let stop = start_folder_scan(root, cfg, tx)?;
         let got = collect_until_closed_or_timeout(rx, 1000).await;
         stop();
 
@@ -387,7 +391,8 @@ mod tests {
         cfg.folder_re = Some(Regex::new(r"^(keep|pages)$").unwrap());
         cfg.file_re = Some(Regex::new(r"(?i)\.(md|html)$").unwrap());
 
-        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let (tx, rx) = mpsc::channel::<PathBuf>(16);
+        let stop = start_folder_scan(root, cfg, tx)?;
         let got = collect_until_closed_or_timeout(rx, 1500).await;
         stop();
 
@@ -409,11 +414,12 @@ mod tests {
         }
 
         let mut cfg = FolderScanConfig::default();
-        cfg.channel_capacity = 1; // force strong backpressure
         cfg.debounce_ms = 20;
         cfg.absolute = false;
 
-        let (mut rx, stop) = start_folder_scan(root, cfg)?;
+        // Capacity 1 → strong backpressure
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(1);
+        let stop = start_folder_scan(root, cfg, tx)?;
 
         let mut received = Vec::new();
         loop {
@@ -449,7 +455,8 @@ mod tests {
         cfg.debounce_ms = 50;
         cfg.absolute = false;
 
-        let (rx, stop) = start_folder_scan(root, cfg)?;
+        let (tx, rx) = mpsc::channel::<PathBuf>(8);
+        let stop = start_folder_scan(root, cfg, tx)?;
         let got = collect_until_closed_or_timeout(rx, 2000).await;
         stop();
 
@@ -473,10 +480,10 @@ mod tests {
 
         let mut cfg = FolderScanConfig::default();
         cfg.debounce_ms = 20;
-        cfg.channel_capacity = 8;
         cfg.absolute = false;
 
-        let (mut rx, stop) = start_folder_scan(root, cfg)?;
+        let (tx, mut rx) = mpsc::channel::<PathBuf>(8);
+        let stop = start_folder_scan(root, cfg, tx)?;
 
         // Consume a few, then stop early.
         let mut first_batch = Vec::new();
