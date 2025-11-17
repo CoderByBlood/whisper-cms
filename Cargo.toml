@@ -17,6 +17,7 @@ tempfile = "3.3.0"
 # leptos = "0.8.12"
 leptos_reactive = "0.6.15"
 tokio = { version = "1.48.0", features = ["full"] }
+tokio-stream = "0.1.17"
 rayon = "1.11.0"
 walkdir = "2.5"
 same-file = "1.0.0"
