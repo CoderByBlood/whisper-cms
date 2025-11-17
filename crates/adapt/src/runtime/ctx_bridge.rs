@@ -472,3 +472,633 @@ fn merge_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), RuntimeE
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::content::ContentKind;
+    use crate::core::context::ResponseBodySpec;
+    use crate::core::recommendation::{
+        BodyPatchKind, DomOp, HeaderPatchKind, ModelPatch, Recommendations,
+    };
+    use http::{HeaderMap, Method};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    // ─────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────
+
+    fn base_ctx() -> RequestContext {
+        RequestContext::new(
+            "/test".to_string(),
+            Method::GET,
+            HeaderMap::new(),
+            HashMap::new(),
+            ContentKind::Html,
+            json!({"title": "doc"}),
+            PathBuf::from("content/test.html"),
+            json!({}),
+            HashMap::new(),
+        )
+    }
+
+    fn _ctx_with_response(body: ResponseBodySpec) -> RequestContext {
+        let mut ctx = base_ctx();
+        ctx.response_spec.body = body;
+        ctx
+    }
+
+    fn ctx_with_recommendations() -> RequestContext {
+        use crate::core::recommendation::{BodyPatch, HeaderPatch};
+
+        let mut ctx = base_ctx();
+
+        ctx.recommendations = Recommendations {
+            header_patches: vec![HeaderPatch::set(
+                "x-test".into(),
+                "1".into(),
+                "plugin-a".into(),
+            )],
+            model_patches: vec![ModelPatch {
+                patch: json!([{ "op": "add", "path": "/foo", "value": 42 }]),
+                source_plugin: "plugin-a".into(),
+            }],
+            body_patches: vec![BodyPatch {
+                kind: BodyPatchKind::Regex {
+                    pattern: "foo".into(),
+                    replacement: "bar".into(),
+                },
+                source_plugin: "plugin-a".into(),
+            }],
+        };
+
+        ctx
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // ctx_to_js_* (Rust -> JS)
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ctx_to_js_for_plugins_basic_shape() {
+        let ctx = base_ctx();
+        let js = ctx_to_js_for_plugins(&ctx);
+        let json = js.to_json();
+
+        let obj = json.as_object().expect("root should be object");
+
+        // request basics
+        let req = obj.get("request").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(req.get("path").unwrap().as_str().unwrap(), "/test");
+        assert_eq!(req.get("method").unwrap().as_str().unwrap(), "GET");
+        assert!(req.get("requestId").is_some());
+
+        // headers and query params objects exist
+        assert!(req.get("headers").unwrap().is_object());
+        assert!(req.get("queryParams").unwrap().is_object());
+
+        // response present
+        let resp = obj.get("response").unwrap().as_object().unwrap();
+        assert_eq!(resp.get("status").unwrap().as_u64().unwrap(), 200);
+
+        // body kind = "unset" by default
+        let body = resp.get("body").unwrap().as_object().unwrap();
+        assert_eq!(body.get("kind").unwrap().as_str().unwrap(), "unset");
+
+        // content / model / recommendations present
+        let content = obj.get("content").unwrap().as_object().unwrap();
+        let model = content.get("model").unwrap().as_object().unwrap();
+        assert!(model.is_empty(), "default model should be empty object");
+        let recs = content.get("recommendations").unwrap().as_object().unwrap();
+        assert!(recs
+            .get("headerPatches")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(recs
+            .get("modelPatches")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(recs
+            .get("bodyPatches")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty());
+
+        // config default
+        assert!(obj.get("config").unwrap().as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ctx_to_js_includes_headers_and_query_params() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", HeaderValue::from_static("abc"));
+
+        let mut query = HashMap::new();
+        query.insert("q".to_string(), "rust".to_string());
+
+        let ctx = RequestContext::new(
+            "/search".to_string(),
+            Method::GET,
+            headers,
+            query,
+            ContentKind::Html,
+            json!({}),
+            PathBuf::from("content/search.html"),
+            json!({}),
+            HashMap::new(),
+        );
+
+        let js = ctx_to_js_for_plugins(&ctx);
+        let json = js.to_json();
+        let obj = json.as_object().unwrap();
+        let req = obj.get("request").unwrap().as_object().unwrap();
+
+        let hdrs = req.get("headers").unwrap().as_object().unwrap();
+        assert_eq!(hdrs.get("x-test").unwrap().as_str().unwrap(), "abc");
+
+        let qp = req.get("queryParams").unwrap().as_object().unwrap();
+        assert_eq!(qp.get("q").unwrap().as_str().unwrap(), "rust");
+    }
+
+    #[test]
+    fn response_spec_to_js_handles_all_body_variants() {
+        // HtmlTemplate
+        let mut spec = ResponseSpec {
+            status: StatusCode::CREATED,
+            headers: HeaderMap::new(),
+            body: ResponseBodySpec::HtmlTemplate {
+                template: "t1".into(),
+                model: json!({"x": 1}),
+            },
+        };
+        let j = response_spec_to_js(&spec);
+        let o = j.as_object().unwrap();
+        assert_eq!(o.get("status").unwrap().as_u64().unwrap(), 201);
+        let body = o.get("body").unwrap().as_object().unwrap();
+        assert_eq!(body.get("kind").unwrap().as_str().unwrap(), "htmlTemplate");
+        assert_eq!(body.get("template").unwrap().as_str().unwrap(), "t1");
+
+        // HtmlString
+        spec.body = ResponseBodySpec::HtmlString("<p>hi</p>".into());
+        let j = response_spec_to_js(&spec);
+        let body = j
+            .as_object()
+            .unwrap()
+            .get("body")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(body.get("kind").unwrap().as_str().unwrap(), "htmlString");
+        assert_eq!(body.get("html").unwrap().as_str().unwrap(), "<p>hi</p>");
+
+        // JsonValue
+        spec.body = ResponseBodySpec::JsonValue(json!({"ok": true}));
+        let j = response_spec_to_js(&spec);
+        let body = j
+            .as_object()
+            .unwrap()
+            .get("body")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(body.get("kind").unwrap().as_str().unwrap(), "json");
+        assert_eq!(body.get("value").unwrap()["ok"], json!(true));
+
+        // None
+        spec.body = ResponseBodySpec::None;
+        let j = response_spec_to_js(&spec);
+        let body = j
+            .as_object()
+            .unwrap()
+            .get("body")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(body.get("kind").unwrap().as_str().unwrap(), "none");
+
+        // Unset
+        spec.body = ResponseBodySpec::Unset;
+        let j = response_spec_to_js(&spec);
+        let body = j
+            .as_object()
+            .unwrap()
+            .get("body")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(body.get("kind").unwrap().as_str().unwrap(), "unset");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // HeaderPatch / ModelPatch / BodyPatch (Rust -> JS -> Rust)
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn header_patch_roundtrip_to_js_and_back() {
+        let hp = HeaderPatch {
+            kind: HeaderPatchKind::Append,
+            name: "x-test".into(),
+            value: Some("v".into()),
+            source_plugin: "plugin-a".into(),
+        };
+
+        let j = header_patch_to_js(&hp);
+        let parsed = parse_header_patch(&j).expect("should parse back");
+
+        assert_eq!(parsed.name, "x-test");
+        assert_eq!(parsed.value.as_deref(), Some("v"));
+        assert_eq!(parsed.source_plugin, "plugin-a");
+        assert_eq!(parsed.kind, HeaderPatchKind::Append);
+    }
+
+    #[test]
+    fn parse_header_patch_rejects_missing_source_plugin() {
+        let j = json!({
+            "kind": "set",
+            "name": "x-test",
+            "value": "v"
+        });
+
+        assert!(parse_header_patch(&j).is_none());
+    }
+
+    #[test]
+    fn model_patch_roundtrip_to_js_and_back() {
+        let mp = ModelPatch {
+            patch: json!([{ "op": "add", "path": "/x", "value": 1 }]),
+            source_plugin: "plugin-a".into(),
+        };
+
+        let j = model_patch_to_js(&mp);
+        let parsed = parse_model_patch(&j).expect("should parse back");
+
+        assert_eq!(parsed.patch, mp.patch);
+        assert_eq!(parsed.source_plugin, "plugin-a");
+    }
+
+    #[test]
+    fn parse_model_patch_rejects_missing_source_plugin() {
+        let j = json!({
+            "patch": [{ "op": "add", "path": "/x", "value": 1 }]
+        });
+
+        assert!(parse_model_patch(&j).is_none());
+    }
+
+    #[test]
+    fn body_patch_regex_roundtrip() {
+        use crate::core::recommendation::BodyPatch;
+
+        let bp = BodyPatch {
+            kind: BodyPatchKind::Regex {
+                pattern: "foo".into(),
+                replacement: "bar".into(),
+            },
+            source_plugin: "plugin-a".into(),
+        };
+
+        let j = body_patch_to_js(&bp);
+        let parsed = parse_body_patch(&j).expect("should parse");
+
+        match parsed.kind {
+            BodyPatchKind::Regex {
+                pattern,
+                replacement,
+            } => {
+                assert_eq!(pattern, "foo");
+                assert_eq!(replacement, "bar");
+            }
+            _ => panic!("expected regex body patch"),
+        }
+        assert_eq!(parsed.source_plugin, "plugin-a");
+    }
+
+    #[test]
+    fn body_patch_html_dom_roundtrip_for_supported_ops() {
+        use crate::core::recommendation::BodyPatch;
+
+        let bp = BodyPatch {
+            kind: BodyPatchKind::HtmlDom {
+                selector: "p".into(),
+                ops: vec![
+                    DomOp::SetInnerHtml("<b>hi</b>".into()),
+                    DomOp::PrependHtml("<span>prefix</span>".into()),
+                ],
+            },
+            source_plugin: "plugin-b".into(),
+        };
+
+        let j = body_patch_to_js(&bp);
+        let parsed = parse_body_patch(&j).expect("should parse");
+
+        match parsed.kind {
+            BodyPatchKind::HtmlDom { selector, ops } => {
+                assert_eq!(selector, "p");
+                // Only the supported ops should roundtrip
+                assert_eq!(ops.len(), 2);
+                match &ops[0] {
+                    DomOp::SetInnerHtml(html) => assert_eq!(html, "<b>hi</b>"),
+                    _ => panic!("expected SetInnerHtml"),
+                }
+                match &ops[1] {
+                    DomOp::PrependHtml(html) => assert_eq!(html, "<span>prefix</span>"),
+                    _ => panic!("expected PrependHtml"),
+                }
+            }
+            _ => panic!("expected HtmlDom body patch"),
+        }
+        assert_eq!(parsed.source_plugin, "plugin-b");
+    }
+
+    #[test]
+    fn body_patch_html_dom_drops_unsupported_ops() {
+        use crate::core::recommendation::BodyPatch;
+
+        let bp = BodyPatch {
+            kind: BodyPatchKind::HtmlDom {
+                selector: "div".into(),
+                ops: vec![DomOp::Remove], // not supported by parse_dom_op
+            },
+            source_plugin: "plugin-c".into(),
+        };
+
+        let j = body_patch_to_js(&bp);
+        let parsed = parse_body_patch(&j).expect("should still parse HtmlDom");
+
+        match parsed.kind {
+            BodyPatchKind::HtmlDom { selector, ops } => {
+                assert_eq!(selector, "div");
+                assert!(
+                    ops.is_empty(),
+                    "unsupported ops should be dropped during parse_dom_op"
+                );
+            }
+            _ => panic!("expected HtmlDom body patch"),
+        }
+    }
+
+    #[test]
+    fn body_patch_json_patch_roundtrip() {
+        use crate::core::recommendation::BodyPatch;
+
+        let patch_json = json!([{ "op": "replace", "path": "/x", "value": 2 }]);
+
+        let bp = BodyPatch {
+            kind: BodyPatchKind::JsonPatch {
+                patch: patch_json.clone(),
+            },
+            source_plugin: "plugin-d".into(),
+        };
+
+        let j = body_patch_to_js(&bp);
+        let parsed = parse_body_patch(&j).expect("should parse jsonPatch");
+
+        match parsed.kind {
+            BodyPatchKind::JsonPatch { patch } => {
+                assert_eq!(patch, patch_json);
+            }
+            _ => panic!("expected JsonPatch body patch"),
+        }
+        assert_eq!(parsed.source_plugin, "plugin-d");
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // parse_response_spec
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_response_spec_defaults_for_missing_fields() {
+        let j = json!({});
+        let spec = parse_response_spec(&j).expect("should construct default spec");
+
+        assert_eq!(spec.status, StatusCode::OK);
+        assert!(spec.headers.is_empty());
+        match spec.body {
+            ResponseBodySpec::None => {} // default in parser
+            _ => panic!("expected ResponseBodySpec::None"),
+        }
+    }
+
+    #[test]
+    fn parse_response_spec_handles_status_headers_and_json_body() {
+        let j = json!({
+            "status": 201,
+            "headers": {
+                "x-a": "one",
+                "x-b": ["two", "three"]
+            },
+            "body": {
+                "kind": "json",
+                "value": {"ok": true}
+            }
+        });
+
+        let spec = parse_response_spec(&j).expect("parse_response_spec should succeed");
+
+        assert_eq!(spec.status, StatusCode::CREATED);
+
+        let mut vals = Vec::new();
+        for v in spec.headers.get_all("x-b").iter() {
+            vals.push(v.to_str().unwrap().to_string());
+        }
+        assert_eq!(spec.headers.get("x-a").unwrap(), "one");
+        assert_eq!(vals, vec!["two".to_string(), "three".to_string()]);
+
+        match spec.body {
+            ResponseBodySpec::JsonValue(v) => {
+                assert_eq!(v["ok"], json!(true));
+            }
+            _ => panic!("expected JsonValue"),
+        }
+    }
+
+    #[test]
+    fn parse_response_spec_treats_unknown_kind_as_none() {
+        let j = json!({
+            "body": { "kind": "something-else" }
+        });
+
+        let spec = parse_response_spec(&j).expect("should succeed");
+        match spec.body {
+            ResponseBodySpec::None => {}
+            _ => panic!("unknown body kind should map to None"),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // merge_from_js via public helpers
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_recommendations_from_js_merges_new_recommendations_and_response() {
+        let mut ctx = ctx_with_recommendations();
+
+        // Start with something non-default so we can see overrides.
+        ctx.response_spec.status = StatusCode::OK;
+
+        let js_ret = json!({
+            "recommendations": {
+                "headerPatches": [
+                    {
+                        "kind": "set",
+                        "name": "x-merged",
+                        "value": "v",
+                        "sourcePlugin": "plugin-x"
+                    }
+                ],
+                "modelPatches": [
+                    {
+                        "patch": [{ "op": "add", "path": "/y", "value": 99 }],
+                        "sourcePlugin": "plugin-y"
+                    }
+                ],
+                "bodyPatches": [
+                    {
+                        "kind": "regex",
+                        "pattern": "foo",
+                        "replacement": "baz",
+                        "sourcePlugin": "plugin-z"
+                    }
+                ]
+            },
+            "response": {
+                "status": 404,
+                "headers": {
+                    "x-from-js": "yes"
+                },
+                "body": {
+                    "kind": "json",
+                    "value": { "fromJs": true }
+                }
+            }
+        });
+
+        let js_val = JsValue::from_json(&js_ret);
+
+        let result = merge_recommendations_from_js(&js_val, &mut ctx);
+        assert!(result.is_ok());
+
+        // All existing recs plus the new ones
+        assert!(
+            ctx.recommendations.header_patches.len() >= 2,
+            "should append header patches"
+        );
+        assert!(
+            ctx.recommendations.model_patches.len() >= 2,
+            "should append model patches"
+        );
+        assert!(
+            ctx.recommendations.body_patches.len() >= 2,
+            "should append body patches"
+        );
+
+        // Response overridden
+        assert_eq!(ctx.response_spec.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            ctx.response_spec
+                .headers
+                .get("x-from-js")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "yes"
+        );
+        match &ctx.response_spec.body {
+            ResponseBodySpec::JsonValue(v) => {
+                assert_eq!(v["fromJs"], json!(true));
+            }
+            _ => panic!("expected JsonValue from JS override"),
+        }
+    }
+
+    #[test]
+    fn merge_recommendations_from_js_is_noop_for_non_object() {
+        let mut ctx = ctx_with_recommendations();
+        let before = ctx.recommendations.header_patches.len();
+
+        let js_val = JsValue::Null;
+        let result = merge_recommendations_from_js(&js_val, &mut ctx);
+        assert!(result.is_ok());
+        assert_eq!(
+            ctx.recommendations.header_patches.len(),
+            before,
+            "no change expected when ret is not object"
+        );
+    }
+
+    #[test]
+    fn merge_recommendations_skips_malformed_entries() {
+        let mut ctx = base_ctx();
+
+        let js_ret = json!({
+            "recommendations": {
+                "headerPatches": [
+                    { "kind": "set", "name": "x-ok", "value": "1", "sourcePlugin": "p" },
+                    { "kind": "set", "name": "x-bad", "value": "2" } // missing sourcePlugin
+                ],
+                "modelPatches": [
+                    { "patch": [], "sourcePlugin": "p" },
+                    { "patch": [] } // missing sourcePlugin
+                ],
+                "bodyPatches": [
+                    {
+                        "kind": "regex",
+                        "pattern": "a",
+                        "replacement": "b",
+                        "sourcePlugin": "p"
+                    },
+                    {
+                        "kind": "regex",
+                        "pattern": "a",
+                        "replacement": "b"
+                        // missing sourcePlugin
+                    }
+                ]
+            }
+        });
+
+        let js_val = JsValue::from_json(&js_ret);
+        merge_recommendations_from_js(&js_val, &mut ctx).expect("merge should succeed");
+
+        assert_eq!(ctx.recommendations.header_patches.len(), 1);
+        assert_eq!(ctx.recommendations.model_patches.len(), 1);
+        assert_eq!(ctx.recommendations.body_patches.len(), 1);
+    }
+
+    #[test]
+    fn merge_theme_ctx_from_js_behaves_same_as_merge_recommendations_from_js() {
+        let mut ctx_a = base_ctx();
+        let mut ctx_b = base_ctx();
+
+        let js_ret = json!({
+            "response": { "status": 500 }
+        });
+        let js_val = JsValue::from_json(&js_ret);
+
+        merge_recommendations_from_js(&js_val, &mut ctx_a).unwrap();
+        merge_theme_ctx_from_js(&js_val, &mut ctx_b).unwrap();
+
+        assert_eq!(ctx_a.response_spec.status, ctx_b.response_spec.status);
+    }
+
+    #[test]
+    fn ctx_to_js_for_theme_matches_plugins_view_of_request() {
+        let ctx = base_ctx();
+
+        let js_theme = ctx_to_js_for_theme(&ctx).to_json();
+        let js_plugins = ctx_to_js_for_plugins(&ctx).to_json();
+
+        assert_eq!(js_theme["request"]["path"], js_plugins["request"]["path"]);
+        assert_eq!(
+            js_theme["request"]["method"],
+            js_plugins["request"]["method"]
+        );
+    }
+}
