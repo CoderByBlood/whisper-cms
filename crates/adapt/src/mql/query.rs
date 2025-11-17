@@ -1,19 +1,32 @@
 use super::ast::{CmpOp, FieldExpr, Filter, FindOptions};
 use super::error::QueryError;
-use super::eval::eval_filter;
+use super::eval::{eval_filter, get_field_value};
 use super::index::{IndexBackend, IndexConfig, JsonStore};
+
 use serde_json::Value as Json;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-/// Result of a query: (document id, document JSON reference).
-pub struct QueryResult<'a, Id> {
+/// Result of a query: document ID + owned JSON document.
+///
+/// Owned JSON keeps this API usable for both in-memory and disk-backed stores.
+#[derive(Debug, Clone)]
+pub struct QueryResult<Id> {
     pub id: Id,
-    pub doc: &'a Json,
+    pub doc: Json,
 }
 
-/// A simple query planner that extracts indexable constraints from a Filter
-/// and uses them to ask the index backend for candidate document ids.
+/// Plans and executes queries over a JsonStore + IndexBackend pair.
+///
+/// - Uses `IndexConfig` to discover which fields are indexed.
+/// - Extracts simple indexable constraints from the filter (equality / IN).
+/// - Asks the index backend for candidate ID sets.
+/// - Intersects candidate sets when multiple constraints are available.
+/// - Falls back to full scan when no index can be used.
+/// - Always uses `eval_filter` for final correctness.
+///
+/// This stays generic over the actual storage engine (in-memory, indexed_json, etc.).
+#[derive(Debug)]
 pub struct QueryPlanner<'a> {
     index_config: &'a IndexConfig,
 }
@@ -23,520 +36,776 @@ impl<'a> QueryPlanner<'a> {
         Self { index_config }
     }
 
-    /// Execute a planned query:
-    ///
-    /// 1. Analyze the filter to find indexable constraints.
-    /// 2. Use the index to get candidate ids (intersection of index hits).
-    /// 3. If no indexable constraints exist, fall back to a full scan of all ids.
-    /// 4. Load docs from the JsonStore and evaluate the full filter via `eval_filter`.
-    /// 5. Apply sort + skip + limit in-memory.
-    pub fn execute<'b, S, I>(
+    /// Execute a query against the given store + index backend.
+    pub fn execute<S, I>(
         &self,
-        store: &'b S,
+        store: &S,
         index: &I,
         filter: &Filter,
         opts: &FindOptions,
-    ) -> Result<Vec<QueryResult<'b, S::Id>>, QueryError>
+    ) -> Result<Vec<QueryResult<S::Id>>, QueryError>
     where
         S: JsonStore,
         I: IndexBackend<Id = S::Id>,
     {
-        // 1. Collect indexable constraints.
+        // 1. Collect indexable constraints (only equality / IN on indexed fields).
         let constraints = collect_indexable_constraints(filter, self.index_config);
 
-        // 2. Choose candidate ids.
+        // 2. Determine candidate IDs using the index, or fall back to all IDs.
         let candidate_ids: Vec<S::Id> = if constraints.is_empty() {
-            // No usable index predicates → full scan.
-            store.all_ids().into_iter().collect()
+            store.all_ids()
         } else {
-            // For each constraint, ask the index for matching ids, then intersect.
-            let mut iter = constraints
-                .into_iter()
-                .map(|c| lookup_ids_for_constraint(index, &c))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter();
+            let mut sets: Vec<HashSet<S::Id>> = Vec::new();
 
-            if let Some(first) = iter.next() {
-                let mut acc = first;
-                for set in iter {
-                    acc = acc.intersection(&set).cloned().collect::<HashSet<S::Id>>();
+            for c in &constraints {
+                if let Some(ids) = lookup_ids_for_constraint(index, c) {
+                    sets.push(ids);
                 }
-                acc.into_iter().collect()
+            }
+
+            if sets.is_empty() {
+                // No usable index constraints (backend couldn't answer any).
+                store.all_ids()
             } else {
-                Vec::new()
+                // Intersect all constraint sets to get final candidate IDs.
+                let mut iter = sets.into_iter();
+                let first = iter.next().unwrap();
+                let acc: HashSet<S::Id> =
+                    iter.fold(first, |acc, set| acc.intersection(&set).copied().collect());
+
+                acc.into_iter().collect()
             }
         };
 
-        // 3. Load docs and evaluate the full filter to ensure correctness.
-        let mut docs: Vec<QueryResult<'b, S::Id>> = candidate_ids
-            .into_iter()
-            .filter_map(|id| store.get(id).map(|doc| QueryResult { id, doc }))
-            .filter(|qr| eval_filter(filter, qr.doc))
-            .collect();
+        // 3. Load documents, evaluate filter, and collect matches.
+        let mut matches: Vec<QueryResult<S::Id>> = Vec::new();
 
-        // 4. Sort & paginate.
-        apply_sort(&mut docs, &opts.sort);
-        let sliced = apply_skip_limit(docs, opts.skip, opts.limit);
+        for id in candidate_ids {
+            if let Some(doc) = store.get(id) {
+                if eval_filter(filter, &doc) {
+                    matches.push(QueryResult { id, doc });
+                }
+            }
+        }
+
+        // 4. Apply sorting, skipping, and limiting.
+        apply_sort(&mut matches, opts);
+        let sliced = apply_skip_limit(matches, opts.skip, opts.limit);
 
         Ok(sliced)
     }
 }
 
-/// A single indexable constraint of the form:
-///   field == value   or   field IN [values...]
+/// Convenience helper to execute a query in one call.
+///
+/// If you already have an IndexConfig and a planner is not reused heavily,
+/// this is a nicer single-shot API.
+pub fn execute_query<S, I>(
+    index_config: &IndexConfig,
+    store: &S,
+    index: &I,
+    filter: &Filter,
+    opts: &FindOptions,
+) -> Result<Vec<QueryResult<S::Id>>, QueryError>
+where
+    S: JsonStore,
+    I: IndexBackend<Id = S::Id>,
+{
+    let planner = QueryPlanner::new(index_config);
+    planner.execute(store, index, filter, opts)
+}
+
+/// Constraints that can be answered by the index backend.
+///
+/// For now we only use:
+/// - field == value
+/// - field IN values
+///
+/// Range support can be added later if/when backends implement `lookup_range`.
 #[derive(Debug, Clone)]
 enum IndexConstraint {
     Eq { field: String, value: Json },
     In { field: String, values: Vec<Json> },
 }
 
-/// Traverse the Filter tree and collect indexable constraints based on the
-/// provided IndexConfig.
+/// Walk the filter and extract indexable constraints.
+///
+/// We are conservative:
+/// - Only take constraints on fields that `IndexConfig::is_indexed`.
+/// - Only equality / IN (`$eq` / `$in`) are considered indexable for now.
+/// - We only harvest constraints in AND contexts; constraints under OR are
+///   ignored for indexing (correctness still ensured by eval_filter).
 fn collect_indexable_constraints(filter: &Filter, config: &IndexConfig) -> Vec<IndexConstraint> {
     let mut out = Vec::new();
-    collect_indexable_constraints_inner(filter, config, &mut out);
+    collect_indexable_constraints_inner(filter, config, true, &mut out);
     out
 }
 
 fn collect_indexable_constraints_inner(
     filter: &Filter,
     config: &IndexConfig,
+    in_and_context: bool,
     out: &mut Vec<IndexConstraint>,
 ) {
     match filter {
-        Filter::And(list) | Filter::Or(list) => {
-            for f in list {
-                collect_indexable_constraints_inner(f, config, out);
+        Filter::And(children) => {
+            for child in children {
+                collect_indexable_constraints_inner(child, config, true, out);
+            }
+        }
+        Filter::Or(children) => {
+            // Constraints in OR blocks are not safe to use for intersection-based
+            // candidate pruning (at least not without more sophisticated analysis),
+            // so we recurse with `in_and_context = false`.
+            for child in children {
+                collect_indexable_constraints_inner(child, config, false, out);
             }
         }
         Filter::Field(FieldExpr { path, op }) => {
+            if !in_and_context {
+                // Skip index hints under OR for now.
+                return;
+            }
             if !config.is_indexed(path) {
                 return;
             }
 
             match op {
-                CmpOp::Eq(v) => out.push(IndexConstraint::Eq {
-                    field: path.clone(),
-                    value: v.clone(),
-                }),
-                CmpOp::In(values) => out.push(IndexConstraint::In {
-                    field: path.clone(),
-                    values: values.clone(),
-                }),
-                _ => {
-                    // Non-indexable op (>, <, exists, etc.) – ignore here.
+                CmpOp::Eq(v) => {
+                    out.push(IndexConstraint::Eq {
+                        field: path.clone(),
+                        value: v.clone(),
+                    });
                 }
+                CmpOp::In(values) => {
+                    out.push(IndexConstraint::In {
+                        field: path.clone(),
+                        values: values.clone(),
+                    });
+                }
+                // For now we do not try to use range constraints with indexes.
+                _ => {}
             }
         }
     }
 }
 
-/// Ask the index backend for ids matching a single constraint.
-fn lookup_ids_for_constraint<I>(
-    index: &I,
-    c: &IndexConstraint,
-) -> Result<HashSet<I::Id>, QueryError>
+/// Ask the index backend for candidate IDs for a single constraint.
+///
+/// If the backend cannot answer this constraint, returns None and the caller
+/// will treat it as "no index available", falling back to a broader scan.
+fn lookup_ids_for_constraint<I>(index: &I, c: &IndexConstraint) -> Option<HashSet<I::Id>>
 where
     I: IndexBackend,
 {
     match c {
-        IndexConstraint::Eq { field, value } => index
-            .lookup_eq(field, value)
-            .ok_or_else(|| QueryError::Other("Error in eqaulity test".into())),
-        IndexConstraint::In { field, values } => index
-            .lookup_in(field, values)
-            .ok_or_else(|| QueryError::Other("Error in In test".into())),
+        IndexConstraint::Eq { field, value } => index.lookup_eq(field, value),
+        IndexConstraint::In { field, values } => index.lookup_in(field, values),
     }
 }
 
-/// Apply sort clauses in-place.
+/// Apply sorting in-place using `FindOptions.sort`.
 ///
-/// `sort` is a Vec<(field_path, dir)> where dir is 1 (asc) or -1 (desc).
-fn apply_sort<'a, Id>(docs: &mut [QueryResult<'a, Id>], sort: &[(String, i8)]) {
-    if sort.is_empty() || docs.len() <= 1 {
+/// We rely on `get_field_value` to resolve the sort key path, and a simple
+/// JSON comparison that orders:
+/// - `None` (missing field) after `Some`
+/// - Within `Some`, compares only if types match (string, number, bool).
+fn apply_sort<Id>(results: &mut [QueryResult<Id>], opts: &FindOptions) {
+    if opts.sort.is_empty() {
         return;
     }
 
-    docs.sort_by(|a, b| {
-        for (field, dir) in sort {
-            let ord = compare_field(a.doc, b.doc, field);
-            if ord != Ordering::Equal {
-                return if *dir >= 0 { ord } else { ord.reverse() };
-            }
-        }
-        Ordering::Equal
-    });
+    results.sort_by(|a, b| compare_docs_for_sort(a, b, &opts.sort));
 }
 
-/// Compare a single field across two docs.
-fn compare_field(a: &Json, b: &Json, field: &str) -> Ordering {
-    use serde_json::Value as J;
+fn compare_docs_for_sort<Id>(
+    a: &QueryResult<Id>,
+    b: &QueryResult<Id>,
+    sort_keys: &[(String, i8)],
+) -> Ordering {
+    for (field, dir) in sort_keys {
+        let av = get_field_value(&a.doc, field);
+        let bv = get_field_value(&b.doc, field);
+        let ord = json_cmp(av, bv);
 
-    let va = field_value(a, field);
-    let vb = field_value(b, field);
+        if ord != Ordering::Equal {
+            return if *dir >= 0 { ord } else { ord.reverse() };
+        }
+    }
+    Ordering::Equal
+}
 
-    match (va, vb) {
+/// Compare two optional JSON values for sorting.
+///
+/// Rules:
+/// - `None` is considered greater than `Some` (so missing fields sort last).
+/// - If both are `Some`:
+///   - strings compare lexicographically,
+///   - numbers compare by numeric value,
+///   - bools compare `false < true`,
+///   - other types compare as `Equal` (stable but arbitrary).
+fn json_cmp(a: Option<&Json>, b: Option<&Json>) -> Ordering {
+    match (a, b) {
         (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (Some(J::Number(na)), Some(J::Number(nb))) => {
-            let fa = na.as_f64().unwrap_or(f64::NAN);
-            let fb = nb.as_f64().unwrap_or(f64::NAN);
-            fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
-        }
-        (Some(J::String(sa)), Some(J::String(sb))) => sa.cmp(sb),
-        (Some(J::Bool(ba)), Some(J::Bool(bb))) => ba.cmp(bb),
-        // Fallback: debug representation compare.
-        (Some(va), Some(vb)) => format!("{:?}", va).cmp(&format!("{:?}", vb)),
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(va), Some(vb)) => match (va, vb) {
+            (Json::String(sa), Json::String(sb)) => sa.cmp(sb),
+            (Json::Number(na), Json::Number(nb)) => {
+                let fa = na.as_f64();
+                let fb = nb.as_f64();
+                match (fa, fb) {
+                    (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+                    _ => Ordering::Equal,
+                }
+            }
+            (Json::Bool(ba), Json::Bool(bb)) => ba.cmp(bb),
+            // For mixed or other types, treat as equal to avoid weird ordering.
+            _ => Ordering::Equal,
+        },
     }
 }
 
-/// Resolve a dotted path into a nested JSON value.
-fn field_value<'a>(doc: &'a Json, path: &str) -> Option<&'a Json> {
-    let mut current = doc;
-    for part in path.split('.') {
-        current = current.get(part)?;
-    }
-    Some(current)
-}
-
-/// Apply skip + limit to a vector, returning a new owned Vec.
-fn apply_skip_limit<'a, Id>(
-    mut docs: Vec<QueryResult<'a, Id>>,
+/// Apply skip/limit to a vector of results and return the sliced vector.
+fn apply_skip_limit<Id: Clone>(
+    results: Vec<QueryResult<Id>>,
     skip: Option<usize>,
     limit: Option<usize>,
-) -> Vec<QueryResult<'a, Id>> {
-    let total = docs.len();
-    let start = skip.unwrap_or(0).min(total);
-
-    // Hard internal cap for safety; callers can pass a smaller explicit limit.
-    const MAX_LIMIT: usize = 1000;
-    let requested = limit.unwrap_or(MAX_LIMIT).min(MAX_LIMIT);
-    let end = (start + requested).min(total);
-
-    if start >= end {
+) -> Vec<QueryResult<Id>> {
+    let start = skip.unwrap_or(0);
+    if start >= results.len() {
         return Vec::new();
     }
 
-    docs.drain(start..end).collect()
-}
+    let end = if let Some(lim) = limit {
+        start.saturating_add(lim).min(results.len())
+    } else {
+        results.len()
+    };
 
-/// Convenience wrapper for typical usage:
-///
-/// - Parse filter & options from JSON.
-/// - Plan + execute query.
-/// - Return docs.
-pub fn execute_query<'a, S, I>(
-    store: &'a S,
-    index: &I,
-    index_config: &IndexConfig,
-    filter_json: &Json,
-    options_json: &Json,
-) -> Result<Vec<QueryResult<'a, S::Id>>, QueryError>
-where
-    S: JsonStore,
-    I: IndexBackend<Id = S::Id>,
-{
-    use super::parser::{parse_filter, parse_find_options};
-
-    let filter = parse_filter(filter_json)?;
-    let opts = parse_find_options(options_json)?;
-    let planner = QueryPlanner::new(index_config);
-    planner.execute(store, index, &filter, &opts)
+    results[start..end].to_vec()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value as Json};
+    use std::cell::RefCell;
+    use std::collections::{HashMap, HashSet};
 
-    // Convenience to build QueryResult values.
-    fn make_qr<'a, Id: Copy>(id: Id, doc: &'a Json) -> QueryResult<'a, Id> {
-        QueryResult { id, doc }
+    // ─────────────────────────────────────────────────────────────────────
+    // Test helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Simple in-memory JsonStore for tests.
+    #[derive(Debug, Clone)]
+    struct TestStore {
+        docs: Vec<Json>,
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // field_value
-    // ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn field_value_finds_top_level_field() {
-        let doc = json!({"a": 1, "b": "x"});
-        let v = field_value(&doc, "a");
-        assert_eq!(v, Some(&json!(1)));
-
-        let v2 = field_value(&doc, "b");
-        assert_eq!(v2, Some(&json!("x")));
+    impl TestStore {
+        fn new(docs: Vec<Json>) -> Self {
+            Self { docs }
+        }
     }
 
-    #[test]
-    fn field_value_finds_nested_dotted_path() {
-        let doc = json!({
-            "front_matter": {
-                "tags": ["rust", "cms"],
-                "meta": { "author": "phil" }
+    impl JsonStore for TestStore {
+        type Id = usize;
+
+        fn all_ids(&self) -> Vec<Self::Id> {
+            (0..self.docs.len()).collect()
+        }
+
+        fn get(&self, id: Self::Id) -> Option<Json> {
+            self.docs.get(id).cloned()
+        }
+    }
+
+    /// A simple IndexBackend that uses a `(field, value_string)` => set of IDs map.
+    ///
+    /// This lets us control index answers precisely in tests without knowing any
+    /// internal DB structure.
+    #[derive(Debug, Clone)]
+    struct TestIndex {
+        // field -> value_string -> set of IDs
+        map: HashMap<String, HashMap<String, HashSet<usize>>>,
+        // For debugging / verification if needed
+        eq_calls: RefCell<Vec<(String, String)>>,
+        in_calls: RefCell<Vec<(String, Vec<String>)>>,
+    }
+
+    impl TestIndex {
+        fn new() -> Self {
+            Self {
+                map: HashMap::new(),
+                eq_calls: RefCell::new(Vec::new()),
+                in_calls: RefCell::new(Vec::new()),
             }
-        });
+        }
 
+        /// Configure index entries: field, value_json, ids.
+        fn add_entry<I>(&mut self, field: &str, value: Json, ids: I)
+        where
+            I: IntoIterator<Item = usize>,
+        {
+            let key = value.to_string();
+            let field_map = self.map.entry(field.to_string()).or_default();
+            let set = field_map.entry(key).or_default();
+            set.extend(ids);
+        }
+    }
+
+    impl IndexBackend for TestIndex {
+        type Id = usize;
+
+        fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> {
+            let key = value.to_string();
+            self.eq_calls
+                .borrow_mut()
+                .push((field.to_string(), key.clone()));
+            self.map.get(field)?.get(&key).cloned()
+        }
+
+        fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> {
+            let mut keys = Vec::new();
+            for v in values {
+                keys.push(v.to_string());
+            }
+            self.in_calls
+                .borrow_mut()
+                .push((field.to_string(), keys.clone()));
+
+            let field_map = self.map.get(field)?;
+            let mut acc = HashSet::new();
+            for key in keys {
+                if let Some(ids) = field_map.get(&key) {
+                    acc.extend(ids.iter().copied());
+                }
+            }
+            if acc.is_empty() {
+                None
+            } else {
+                Some(acc)
+            }
+        }
+    }
+
+    /// Convenience to build a simple equality Field filter.
+    fn field_eq(path: &str, value: Json) -> Filter {
+        Filter::Field(FieldExpr {
+            path: path.to_string(),
+            op: CmpOp::Eq(value),
+        })
+    }
+
+    /// Convenience to build an IN Field filter.
+    fn field_in(path: &str, values: Vec<Json>) -> Filter {
+        Filter::Field(FieldExpr {
+            path: path.to_string(),
+            op: CmpOp::In(values),
+        })
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // collect_indexable_constraints tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn collect_indexable_constraints_picks_eq_and_in_on_indexed_fields_under_and() {
+        let config = IndexConfig::new(["kind", "front_matter.tags"]);
+
+        let filter = Filter::And(vec![
+            field_eq("kind", json!("post")),
+            field_in("front_matter.tags", vec![json!("rust"), json!("wasm")]),
+            // Non-indexed field should be ignored:
+            field_eq("draft", json!(false)),
+        ]);
+
+        let constraints = super::collect_indexable_constraints(&filter, &config);
+        assert_eq!(constraints.len(), 2);
+
+        // We don't care about order; just presence.
+        let mut has_kind = false;
+        let mut has_tags = false;
+
+        for c in constraints {
+            match c {
+                IndexConstraint::Eq { field, value } => {
+                    assert_eq!(field, "kind");
+                    assert_eq!(value, json!("post"));
+                    has_kind = true;
+                }
+                IndexConstraint::In { field, values } => {
+                    assert_eq!(field, "front_matter.tags");
+                    assert_eq!(values, vec![json!("rust"), json!("wasm")]);
+                    has_tags = true;
+                }
+            }
+        }
+
+        assert!(has_kind);
+        assert!(has_tags);
+    }
+
+    #[test]
+    fn collect_indexable_constraints_ignores_constraints_under_or() {
+        let config = IndexConfig::new(["kind"]);
+
+        let filter = Filter::Or(vec![
+            field_eq("kind", json!("post")),
+            field_eq("kind", json!("page")),
+        ]);
+
+        let constraints = super::collect_indexable_constraints(&filter, &config);
+        assert!(
+            constraints.is_empty(),
+            "constraints under OR must not be used for indexing"
+        );
+    }
+
+    #[test]
+    fn collect_indexable_constraints_empty_when_no_indexed_fields() {
+        let config = IndexConfig::new(Vec::<&str>::new());
+
+        let filter = Filter::And(vec![
+            field_eq("kind", json!("post")),
+            field_eq("draft", json!(false)),
+        ]);
+
+        let constraints = super::collect_indexable_constraints(&filter, &config);
+        assert!(constraints.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // execute / execute_query tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn execute_full_scan_when_no_constraints() {
+        // No indexes at all.
+        let config = IndexConfig::new(Vec::<&str>::new());
+
+        // Three docs, two posts and one page.
+        let docs = vec![
+            json!({ "kind": "post", "draft": false }),
+            json!({ "kind": "page", "draft": false }),
+            json!({ "kind": "post", "draft": true }),
+        ];
+        let store = TestStore::new(docs);
+
+        // Index backend that never answers anything (like having no indexes).
+        let index = TestIndex::new();
+
+        // Filter: kind == "post".
+        let filter = field_eq("kind", json!("post"));
+        let opts = FindOptions::default();
+
+        let planner = QueryPlanner::new(&config);
+        let results = planner
+            .execute(&store, &index, &filter, &opts)
+            .expect("query execute should succeed");
+
+        // Both posts should match because eval_filter will see kind == "post"
+        // and there is no index-based pruning.
+        let ids: std::collections::HashSet<_> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&0));
+        assert!(ids.contains(&2));
+    }
+
+    #[test]
+    fn execute_uses_index_constraints_when_available() {
+        // Index on "kind".
+        let config = IndexConfig::new(["kind"]);
+
+        let docs = vec![
+            json!({ "kind": "post", "draft": false }),
+            json!({ "kind": "page", "draft": false }),
+            json!({ "kind": "post", "draft": true }),
+            json!({ "kind": "post", "draft": false }),
+        ];
+        let store = TestStore::new(docs);
+
+        // Index: "kind" == "post" -> IDs {0, 2, 3}
+        let mut index = TestIndex::new();
+        index.add_entry("kind", json!("post"), [0, 2, 3]);
+
+        let filter = Filter::And(vec![
+            field_eq("kind", json!("post")),
+            field_eq("draft", json!(false)),
+        ]);
+
+        let opts = FindOptions::default();
+        let planner = QueryPlanner::new(&config);
+        let results = planner
+            .execute(&store, &index, &filter, &opts)
+            .expect("query execute should succeed");
+
+        // Filter: kind == "post" AND draft == false
+        // Among the candidate IDs {0,2,3}, doc 0 and 3 match, doc 2 is draft=true.
+        let ids: HashSet<_> = results.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&0));
+        assert!(ids.contains(&3));
+        assert!(!ids.contains(&2));
+    }
+
+    #[test]
+    fn execute_query_is_convenience_wrapper() {
+        let config = IndexConfig::new(["kind"]);
+
+        let docs = vec![
+            json!({ "kind": "post", "draft": false }),
+            json!({ "kind": "page", "draft": false }),
+        ];
+        let store = TestStore::new(docs);
+
+        let mut index = TestIndex::new();
+        index.add_entry("kind", json!("post"), [0]);
+
+        let filter = field_eq("kind", json!("post"));
+        let opts = FindOptions::default();
+
+        let results = execute_query(&config, &store, &index, &filter, &opts)
+            .expect("execute_query should succeed");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, 0);
+        assert_eq!(results[0].doc["kind"], json!("post"));
+    }
+
+    #[test]
+    fn execute_ignores_or_constraints_for_index_but_still_filters_correctly() {
+        let config = IndexConfig::new(["kind"]);
+
+        let docs = vec![
+            json!({ "kind": "post", "lang": "en" }),
+            json!({ "kind": "page", "lang": "en" }),
+            json!({ "kind": "post", "lang": "fr" }),
+        ];
+        let store = TestStore::new(docs);
+
+        // Index for kind == "post" -> {0, 2}
+        let mut index = TestIndex::new();
+        index.add_entry("kind", json!("post"), [0, 2]);
+
+        // Filter: kind == "post" OR lang == "en"
+        // Indexable part under Or is ignored, we only index on And context.
+        let filter = Filter::Or(vec![
+            field_eq("kind", json!("post")),
+            field_eq("lang", json!("en")),
+        ]);
+
+        let opts = FindOptions::default();
+        let planner = QueryPlanner::new(&config);
+        let results = planner
+            .execute(&store, &index, &filter, &opts)
+            .expect("query execute should succeed");
+
+        // Expected: all docs match because:
+        //  - doc 0: kind=post
+        //  - doc 1: lang=en
+        //  - doc 2: kind=post
+        assert_eq!(results.len(), 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Sorting tests (apply_sort / json_cmp)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_sort_sorts_by_single_key_ascending() {
+        let mut results = vec![
+            QueryResult {
+                id: 0,
+                doc: json!({ "order": 3 }),
+            },
+            QueryResult {
+                id: 1,
+                doc: json!({ "order": 1 }),
+            },
+            QueryResult {
+                id: 2,
+                doc: json!({ "order": 2 }),
+            },
+        ];
+
+        let opts = FindOptions {
+            sort: vec![("order".to_string(), 1)],
+            limit: None,
+            skip: None,
+        };
+
+        apply_sort(&mut results, &opts);
+        let orders: Vec<_> = results
+            .iter()
+            .map(|r| r.doc["order"].as_i64().unwrap())
+            .collect();
+        assert_eq!(orders, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn apply_sort_sorts_by_single_key_descending() {
+        let mut results = vec![
+            QueryResult {
+                id: 0,
+                doc: json!({ "order": 1 }),
+            },
+            QueryResult {
+                id: 1,
+                doc: json!({ "order": 3 }),
+            },
+            QueryResult {
+                id: 2,
+                doc: json!({ "order": 2 }),
+            },
+        ];
+
+        let opts = FindOptions {
+            sort: vec![("order".to_string(), -1)],
+            limit: None,
+            skip: None,
+        };
+
+        apply_sort(&mut results, &opts);
+        let orders: Vec<_> = results
+            .iter()
+            .map(|r| r.doc["order"].as_i64().unwrap())
+            .collect();
+        assert_eq!(orders, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn apply_sort_handles_missing_fields_last() {
+        let mut results = vec![
+            QueryResult {
+                id: 0,
+                doc: json!({ "order": 2 }),
+            },
+            QueryResult {
+                id: 1,
+                doc: json!({}),
+            },
+            QueryResult {
+                id: 2,
+                doc: json!({ "order": 1 }),
+            },
+        ];
+
+        let opts = FindOptions {
+            sort: vec![("order".to_string(), 1)],
+            limit: None,
+            skip: None,
+        };
+
+        apply_sort(&mut results, &opts);
+        let ids: Vec<_> = results.iter().map(|r| r.id).collect();
+        // Docs with order: 1, 2 come first; missing field last.
+        assert_eq!(ids, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn json_cmp_orders_none_after_some_and_compares_types() {
+        // None vs Some
+        assert_eq!(json_cmp(None, None), Ordering::Equal);
+        assert_eq!(json_cmp(None, Some(&json!(1))), Ordering::Greater);
+        assert_eq!(json_cmp(Some(&json!(1)), None), Ordering::Less);
+
+        // Strings
         assert_eq!(
-            field_value(&doc, "front_matter.tags"),
-            Some(&json!(["rust", "cms"]))
+            json_cmp(Some(&json!("a")), Some(&json!("b"))),
+            Ordering::Less
         );
         assert_eq!(
-            field_value(&doc, "front_matter.meta.author"),
-            Some(&json!("phil"))
+            json_cmp(Some(&json!("b")), Some(&json!("a"))),
+            Ordering::Greater
         );
-    }
 
-    #[test]
-    fn field_value_missing_segment_returns_none() {
-        let doc = json!({ "a": { "b": 1 } });
-
-        // Missing top-level
-        assert_eq!(field_value(&doc, "does_not_exist"), None);
-
-        // Missing nested
-        assert_eq!(field_value(&doc, "a.c"), None);
-        assert_eq!(field_value(&doc, "a.b.c"), None);
-    }
-
-    #[test]
-    fn field_value_empty_path_returns_none() {
-        let doc = json!({ "a": 1 });
-        // Splitting "" yields one empty segment -> doc.get("") is None.
-        assert_eq!(field_value(&doc, ""), None);
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // compare_field
-    // ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn compare_field_numbers() {
-        let a = json!({ "n": 1 });
-        let b = json!({ "n": 2 });
-
-        assert_eq!(compare_field(&a, &b, "n"), Ordering::Less);
-        assert_eq!(compare_field(&b, &a, "n"), Ordering::Greater);
+        // Numbers
+        assert_eq!(json_cmp(Some(&json!(1)), Some(&json!(2))), Ordering::Less);
         assert_eq!(
-            compare_field(&a, &json!({ "n": 1.0 }), "n"),
+            json_cmp(Some(&json!(2)), Some(&json!(1))),
+            Ordering::Greater
+        );
+
+        // Bools
+        assert_eq!(
+            json_cmp(Some(&json!(false)), Some(&json!(true))),
+            Ordering::Less
+        );
+        assert_eq!(
+            json_cmp(Some(&json!(true)), Some(&json!(false))),
+            Ordering::Greater
+        );
+
+        // Mixed types → Equal
+        assert_eq!(
+            json_cmp(Some(&json!("1")), Some(&json!(1))),
             Ordering::Equal
         );
     }
 
-    #[test]
-    fn compare_field_strings() {
-        let a = json!({ "s": "apple" });
-        let b = json!({ "s": "banana" });
-
-        assert_eq!(compare_field(&a, &b, "s"), Ordering::Less);
-        assert_eq!(compare_field(&b, &a, "s"), Ordering::Greater);
-        assert_eq!(
-            compare_field(&a, &json!({ "s": "apple" }), "s"),
-            Ordering::Equal
-        );
-    }
+    // ─────────────────────────────────────────────────────────────────────
+    // apply_skip_limit tests
+    // ─────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn compare_field_bools() {
-        let a = json!({ "b": false });
-        let b = json!({ "b": true });
-
-        assert_eq!(compare_field(&a, &b, "b"), Ordering::Less);
-        assert_eq!(compare_field(&b, &a, "b"), Ordering::Greater);
-        assert_eq!(
-            compare_field(&a, &json!({ "b": false }), "b"),
-            Ordering::Equal
-        );
-    }
-
-    #[test]
-    fn compare_field_missing_vs_present() {
-        let a = json!({}); // no "x"
-        let b = json!({ "x": 1 });
-
-        assert_eq!(compare_field(&a, &b, "x"), Ordering::Less);
-        assert_eq!(compare_field(&b, &a, "x"), Ordering::Greater);
-    }
-
-    #[test]
-    fn compare_field_both_missing_equal() {
-        let a = json!({ "foo": 1 });
-        let b = json!({ "bar": 2 });
-
-        assert_eq!(compare_field(&a, &b, "x"), Ordering::Equal);
-    }
-
-    #[test]
-    fn compare_field_mismatched_types_fallback_debug() {
-        let a = json!({ "v": 1 });
-        let b = json!({ "v": "1" });
-
-        // Not a panic; falls back to debug representation comparison
-        let ord = compare_field(&a, &b, "v");
-        // We don't assert exact ordering (depends on debug formatting),
-        // just that it produces a stable Ordering value (i.e. doesn't panic).
-        assert!(matches!(
-            ord,
-            Ordering::Less | Ordering::Equal | Ordering::Greater
-        ));
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // apply_sort
-    // ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn apply_sort_no_sort_or_single_doc_is_noop() {
-        let doc = json!({ "x": 10 });
-        let mut docs = vec![make_qr(1u32, &doc)];
-
-        apply_sort(&mut docs, &[]);
-        assert_eq!(docs[0].id, 1);
-
-        // With one doc and a sort spec, should still be fine
-        apply_sort(&mut docs, &[("x".to_string(), 1)]);
-        assert_eq!(docs[0].id, 1);
-    }
-
-    #[test]
-    fn apply_sort_single_key_ascending() {
-        let d1 = json!({ "x": 2 });
-        let d2 = json!({ "x": 1 });
-        let d3 = json!({ "x": 3 });
-
-        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2), make_qr(3u32, &d3)];
-
-        apply_sort(&mut docs, &[("x".to_string(), 1)]);
-
-        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
-        assert_eq!(ids, vec![2, 1, 3]); // 1,2,3 by x -> ids 2,1,3
-    }
-
-    #[test]
-    fn apply_sort_single_key_descending() {
-        let d1 = json!({ "x": 2 });
-        let d2 = json!({ "x": 1 });
-        let d3 = json!({ "x": 3 });
-
-        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2), make_qr(3u32, &d3)];
-
-        apply_sort(&mut docs, &[("x".to_string(), -1)]);
-
-        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
-        assert_eq!(ids, vec![3, 1, 2]); // 3,2,1 by x -> ids 3,1,2
-    }
-
-    #[test]
-    fn apply_sort_multiple_keys() {
-        let d1 = json!({ "a": 1, "b": 2 });
-        let d2 = json!({ "a": 1, "b": 1 });
-        let d3 = json!({ "a": 0, "b": 5 });
-
-        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2), make_qr(3u32, &d3)];
-
-        // sort by a asc, then b asc
-        apply_sort(&mut docs, &[("a".to_string(), 1), ("b".to_string(), 1)]);
-
-        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
-        // a: 0 -> id 3, a: 1 & b: 1 -> id 2, a: 1 & b: 2 -> id 1
-        assert_eq!(ids, vec![3, 2, 1]);
-    }
-
-    #[test]
-    fn apply_sort_missing_fields_ordering() {
-        let d1 = json!({ "x": 1 });
-        let d2 = json!({}); // missing x
-
-        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2)];
-
-        // Ascending: missing comes first (None < Some(_))
-        apply_sort(&mut docs, &[("x".to_string(), 1)]);
-        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
-        assert_eq!(ids, vec![2, 1]);
-
-        // Descending: missing comes last
-        apply_sort(&mut docs, &[("x".to_string(), -1)]);
-        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
-        assert_eq!(ids, vec![1, 2]);
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // apply_skip_limit
-    // ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn apply_skip_limit_basic() {
-        let docs_data: Vec<Json> = (0..5).map(|n| json!({ "n": n })).collect();
-        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
-            .iter()
-            .enumerate()
-            .map(|(i, j)| make_qr(i as u32, j))
+    fn apply_skip_limit_basic_cases() {
+        let results: Vec<QueryResult<usize>> = (0..5)
+            .map(|id| QueryResult {
+                id,
+                doc: json!({ "id": id }),
+            })
             .collect();
 
-        // skip 1, limit 2 -> ids 1,2
-        let sliced = apply_skip_limit(docs_vec, Some(1), Some(2));
-        let ids: Vec<u32> = sliced.iter().map(|qr| qr.id).collect();
-        assert_eq!(ids, vec![1, 2]);
+        // No skip/limit.
+        let slice = apply_skip_limit(results.clone(), None, None);
+        assert_eq!(slice.len(), 5);
+        assert_eq!(slice[0].id, 0);
+        assert_eq!(slice[4].id, 4);
+
+        // Limit only.
+        let slice = apply_skip_limit(results.clone(), None, Some(2));
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0].id, 0);
+        assert_eq!(slice[1].id, 1);
+
+        // Skip only.
+        let slice = apply_skip_limit(results.clone(), Some(2), None);
+        assert_eq!(slice.len(), 3);
+        assert_eq!(slice[0].id, 2);
+        assert_eq!(slice[2].id, 4);
+
+        // Skip + limit.
+        let slice = apply_skip_limit(results.clone(), Some(1), Some(2));
+        assert_eq!(slice.len(), 2);
+        assert_eq!(slice[0].id, 1);
+        assert_eq!(slice[1].id, 2);
+
+        // Skip beyond length -> empty.
+        let slice = apply_skip_limit(results.clone(), Some(10), Some(2));
+        assert!(slice.is_empty());
     }
 
     #[test]
-    fn apply_skip_limit_no_skip_no_limit_defaults_to_internal_cap() {
-        // Small test to ensure "no skip/limit" just returns everything if below cap.
-        let docs_data: Vec<Json> = (0..10).map(|n| json!({ "n": n })).collect();
-        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
-            .iter()
-            .enumerate()
-            .map(|(i, j)| make_qr(i as u32, j))
-            .collect();
+    fn apply_sort_no_sort_keys_keeps_order() {
+        let mut results = vec![
+            QueryResult {
+                id: 0,
+                doc: json!({ "order": 3 }),
+            },
+            QueryResult {
+                id: 1,
+                doc: json!({ "order": 1 }),
+            },
+        ];
 
-        let sliced = apply_skip_limit(docs_vec, None, None);
-        let ids: Vec<u32> = sliced.iter().map(|qr| qr.id).collect();
-        assert_eq!(ids, (0u32..10u32).collect::<Vec<_>>());
-    }
+        let opts = FindOptions::default();
 
-    #[test]
-    fn apply_skip_limit_skip_beyond_length_returns_empty() {
-        let docs_data: Vec<Json> = (0..3).map(|n| json!({ "n": n })).collect();
-        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
-            .iter()
-            .enumerate()
-            .map(|(i, j)| make_qr(i as u32, j))
-            .collect();
+        apply_sort(&mut results, &opts);
+        let ids: Vec<_> = results.iter().map(|r| r.id).collect();
 
-        let sliced = apply_skip_limit(docs_vec, Some(10), Some(5));
-        assert!(sliced.is_empty());
-    }
-
-    #[test]
-    fn apply_skip_limit_zero_limit_returns_empty() {
-        let docs_data: Vec<Json> = (0..5).map(|n| json!({ "n": n })).collect();
-        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
-            .iter()
-            .enumerate()
-            .map(|(i, j)| make_qr(i as u32, j))
-            .collect();
-
-        // Explicit limit = 0 currently means "no results".
-        let sliced = apply_skip_limit(docs_vec, Some(0), Some(0));
-        assert!(sliced.is_empty());
-    }
-
-    #[test]
-    fn apply_skip_limit_does_not_exceed_internal_max_limit() {
-        // Build more than MAX_LIMIT docs (internal const is 1000).
-        let num_docs = 1200;
-        let docs_data: Vec<Json> = (0..num_docs).map(|n| json!({ "n": n })).collect();
-        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
-            .iter()
-            .enumerate()
-            .map(|(i, j)| make_qr(i as u32, j))
-            .collect();
-
-        let sliced = apply_skip_limit(docs_vec, None, Some(num_docs)); // ask for more than cap
-                                                                       // We can't directly read MAX_LIMIT here, but we know it is <= num_docs.
-                                                                       // We assert it's less than or equal to 1000 (per code) and > 0.
-        assert!(sliced.len() <= 1000);
-        assert!(!sliced.is_empty());
+        // With no sort keys, order should remain as-is.
+        assert_eq!(ids, vec![0, 1]);
     }
 }
