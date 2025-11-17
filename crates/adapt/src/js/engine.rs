@@ -167,3 +167,238 @@ impl JsEngine for BoaEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::js::value::JsValue;
+    use std::collections::HashMap;
+
+    fn assert_number(v: &JsValue, expected: f64) {
+        match v {
+            JsValue::Number(n) => {
+                let diff = (n - expected).abs();
+                assert!(
+                    diff < 1e-9,
+                    "expected number {expected}, got {n} (diff {diff})"
+                );
+            }
+            other => panic!("expected JsValue::Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn eval_simple_number_expression() {
+        let mut engine = BoaEngine::new();
+        let result = engine.eval("1 + 2").expect("eval should succeed");
+        assert_number(&result, 3.0);
+    }
+
+    #[test]
+    fn eval_primitive_values() {
+        let mut engine = BoaEngine::new();
+
+        // Bool
+        let v = engine.eval("true").expect("eval bool");
+        assert_eq!(v, JsValue::Bool(true));
+
+        // String
+        let v = engine.eval("'hello'").expect("eval string");
+        assert_eq!(v, JsValue::String("hello".into()));
+
+        // Null
+        let v = engine.eval("null").expect("eval null");
+        assert_eq!(v, JsValue::Null);
+    }
+
+    #[test]
+    fn eval_object_and_array_literal() {
+        let mut engine = BoaEngine::new();
+        // Parentheses so it's treated as an expression, not a block.
+        let code = r#"
+            ({
+                a: 1,
+                b: true,
+                c: "hi",
+                d: [1, 2, 3]
+            })
+        "#;
+
+        let v = engine.eval(code).expect("eval object literal");
+
+        let obj = match v {
+            JsValue::Object(map) => map,
+            other => panic!("expected object, got {:?}", other),
+        };
+
+        assert_number(obj.get("a").expect("key a missing"), 1.0);
+        assert_eq!(obj.get("b"), Some(&JsValue::Bool(true)));
+        assert_eq!(obj.get("c"), Some(&JsValue::String("hi".into())));
+
+        match obj.get("d") {
+            Some(JsValue::Array(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_number(&arr[0], 1.0);
+                assert_number(&arr[1], 2.0);
+                assert_number(&arr[2], 3.0);
+            }
+            other => panic!("expected array for d, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn eval_syntax_error_returns_err() {
+        let mut engine = BoaEngine::new();
+        let result = engine.eval("let =");
+        assert!(result.is_err(), "expected syntax error, got {:?}", result);
+        if let Err(JsError::Eval(msg)) = result {
+            assert!(
+                msg.to_lowercase().contains("syntax"),
+                "expected syntax-related message, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_module_and_call_exported_function() {
+        let mut engine = BoaEngine::new();
+
+        let module_src = r#"
+            globalThis.plugin = {
+                add: (a, b) => a + b,
+            };
+        "#;
+        engine
+            .load_module("plugin", module_src)
+            .expect("load_module should succeed");
+
+        let res = engine
+            .call_function("plugin.add", &[JsValue::number(2.0), JsValue::number(3.0)])
+            .expect("call_function should succeed");
+
+        assert_number(&res, 5.0);
+    }
+
+    #[test]
+    fn load_module_with_syntax_error_returns_err() {
+        let mut engine = BoaEngine::new();
+
+        let bad_src = r#"
+            globalThis.plugin = {
+                bad: () => { let =; }
+            };
+        "#;
+
+        let res = engine.load_module("bad_plugin", bad_src);
+        assert!(res.is_err(), "expected load_module error, got {:?}", res);
+        if let Err(JsError::Eval(msg)) = res {
+            assert!(
+                msg.to_lowercase().contains("syntax") || msg.to_lowercase().contains("parse"),
+                "expected syntax/parse-related message, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_function_passes_and_returns_complex_value() {
+        let mut engine = BoaEngine::new();
+
+        let module_src = r#"
+            globalThis.id = (x) => x;
+        "#;
+        engine
+            .load_module("id_module", module_src)
+            .expect("load_module should succeed");
+
+        // Build a nested JsValue object/array.
+        let mut inner_obj = HashMap::new();
+        inner_obj.insert("x".to_string(), JsValue::number(42.0));
+        inner_obj.insert("flag".to_string(), JsValue::bool(true));
+
+        let arg = JsValue::array(vec![
+            JsValue::string("first"),
+            JsValue::object(inner_obj.clone()),
+        ]);
+
+        let result = engine
+            .call_function("id", &[arg.clone()])
+            .expect("call_function should succeed");
+
+        assert_eq!(result, arg);
+    }
+
+    #[test]
+    fn call_function_with_empty_path_is_error() {
+        let mut engine = BoaEngine::new();
+        let res = engine.call_function("", &[]);
+        assert!(res.is_err(), "expected error for empty path");
+
+        if let Err(JsError::Call(msg)) = res {
+            assert!(
+                msg.to_lowercase().contains("empty"),
+                "expected message mentioning 'empty', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_function_missing_property_is_error() {
+        let mut engine = BoaEngine::new();
+
+        // No module or global function set up -> path resolution should fail.
+        let res = engine.call_function("does.not.exist", &[]);
+        assert!(res.is_err(), "expected error for missing function path");
+
+        if let Err(JsError::Call(msg)) = res {
+            assert!(
+                msg.to_lowercase().contains("object") || msg.to_lowercase().contains("undefined"),
+                "expected message about non-object/undefined, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_function_target_is_not_a_function() {
+        let mut engine = BoaEngine::new();
+
+        // Set a non-function value on globalThis.
+        engine
+            .eval("globalThis.notAFunction = 123;")
+            .expect("setup should succeed");
+
+        let res = engine.call_function("notAFunction", &[]);
+        assert!(res.is_err(), "expected error for non-function target");
+
+        if let Err(JsError::Call(msg)) = res {
+            assert!(
+                msg.to_lowercase().contains("function value is not object")
+                    || msg.to_lowercase().contains("not object"),
+                "unexpected error message: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_function_that_throws_propagates_error() {
+        let mut engine = BoaEngine::new();
+
+        let src = r#"
+            globalThis.boom = () => {
+                throw new Error("boom!");
+            };
+        "#;
+        engine
+            .load_module("boom_module", src)
+            .expect("load_module should succeed");
+
+        let res = engine.call_function("boom", &[]);
+        assert!(res.is_err(), "expected error from thrown JS exception");
+
+        if let Err(JsError::Call(msg)) = res {
+            assert!(
+                msg.to_lowercase().contains("boom"),
+                "expected error mentioning 'boom', got: {msg}"
+            );
+        }
+    }
+}

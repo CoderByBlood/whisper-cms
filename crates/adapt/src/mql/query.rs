@@ -244,3 +244,299 @@ where
     let planner = QueryPlanner::new(index_config);
     planner.execute(store, index, &filter, &opts)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Convenience to build QueryResult values.
+    fn make_qr<'a, Id: Copy>(id: Id, doc: &'a Json) -> QueryResult<'a, Id> {
+        QueryResult { id, doc }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // field_value
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn field_value_finds_top_level_field() {
+        let doc = json!({"a": 1, "b": "x"});
+        let v = field_value(&doc, "a");
+        assert_eq!(v, Some(&json!(1)));
+
+        let v2 = field_value(&doc, "b");
+        assert_eq!(v2, Some(&json!("x")));
+    }
+
+    #[test]
+    fn field_value_finds_nested_dotted_path() {
+        let doc = json!({
+            "front_matter": {
+                "tags": ["rust", "cms"],
+                "meta": { "author": "phil" }
+            }
+        });
+
+        assert_eq!(
+            field_value(&doc, "front_matter.tags"),
+            Some(&json!(["rust", "cms"]))
+        );
+        assert_eq!(
+            field_value(&doc, "front_matter.meta.author"),
+            Some(&json!("phil"))
+        );
+    }
+
+    #[test]
+    fn field_value_missing_segment_returns_none() {
+        let doc = json!({ "a": { "b": 1 } });
+
+        // Missing top-level
+        assert_eq!(field_value(&doc, "does_not_exist"), None);
+
+        // Missing nested
+        assert_eq!(field_value(&doc, "a.c"), None);
+        assert_eq!(field_value(&doc, "a.b.c"), None);
+    }
+
+    #[test]
+    fn field_value_empty_path_returns_none() {
+        let doc = json!({ "a": 1 });
+        // Splitting "" yields one empty segment -> doc.get("") is None.
+        assert_eq!(field_value(&doc, ""), None);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // compare_field
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn compare_field_numbers() {
+        let a = json!({ "n": 1 });
+        let b = json!({ "n": 2 });
+
+        assert_eq!(compare_field(&a, &b, "n"), Ordering::Less);
+        assert_eq!(compare_field(&b, &a, "n"), Ordering::Greater);
+        assert_eq!(
+            compare_field(&a, &json!({ "n": 1.0 }), "n"),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn compare_field_strings() {
+        let a = json!({ "s": "apple" });
+        let b = json!({ "s": "banana" });
+
+        assert_eq!(compare_field(&a, &b, "s"), Ordering::Less);
+        assert_eq!(compare_field(&b, &a, "s"), Ordering::Greater);
+        assert_eq!(
+            compare_field(&a, &json!({ "s": "apple" }), "s"),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn compare_field_bools() {
+        let a = json!({ "b": false });
+        let b = json!({ "b": true });
+
+        assert_eq!(compare_field(&a, &b, "b"), Ordering::Less);
+        assert_eq!(compare_field(&b, &a, "b"), Ordering::Greater);
+        assert_eq!(
+            compare_field(&a, &json!({ "b": false }), "b"),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn compare_field_missing_vs_present() {
+        let a = json!({}); // no "x"
+        let b = json!({ "x": 1 });
+
+        assert_eq!(compare_field(&a, &b, "x"), Ordering::Less);
+        assert_eq!(compare_field(&b, &a, "x"), Ordering::Greater);
+    }
+
+    #[test]
+    fn compare_field_both_missing_equal() {
+        let a = json!({ "foo": 1 });
+        let b = json!({ "bar": 2 });
+
+        assert_eq!(compare_field(&a, &b, "x"), Ordering::Equal);
+    }
+
+    #[test]
+    fn compare_field_mismatched_types_fallback_debug() {
+        let a = json!({ "v": 1 });
+        let b = json!({ "v": "1" });
+
+        // Not a panic; falls back to debug representation comparison
+        let ord = compare_field(&a, &b, "v");
+        // We don't assert exact ordering (depends on debug formatting),
+        // just that it produces a stable Ordering value (i.e. doesn't panic).
+        assert!(matches!(
+            ord,
+            Ordering::Less | Ordering::Equal | Ordering::Greater
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // apply_sort
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_sort_no_sort_or_single_doc_is_noop() {
+        let doc = json!({ "x": 10 });
+        let mut docs = vec![make_qr(1u32, &doc)];
+
+        apply_sort(&mut docs, &[]);
+        assert_eq!(docs[0].id, 1);
+
+        // With one doc and a sort spec, should still be fine
+        apply_sort(&mut docs, &[("x".to_string(), 1)]);
+        assert_eq!(docs[0].id, 1);
+    }
+
+    #[test]
+    fn apply_sort_single_key_ascending() {
+        let d1 = json!({ "x": 2 });
+        let d2 = json!({ "x": 1 });
+        let d3 = json!({ "x": 3 });
+
+        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2), make_qr(3u32, &d3)];
+
+        apply_sort(&mut docs, &[("x".to_string(), 1)]);
+
+        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
+        assert_eq!(ids, vec![2, 1, 3]); // 1,2,3 by x -> ids 2,1,3
+    }
+
+    #[test]
+    fn apply_sort_single_key_descending() {
+        let d1 = json!({ "x": 2 });
+        let d2 = json!({ "x": 1 });
+        let d3 = json!({ "x": 3 });
+
+        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2), make_qr(3u32, &d3)];
+
+        apply_sort(&mut docs, &[("x".to_string(), -1)]);
+
+        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
+        assert_eq!(ids, vec![3, 1, 2]); // 3,2,1 by x -> ids 3,1,2
+    }
+
+    #[test]
+    fn apply_sort_multiple_keys() {
+        let d1 = json!({ "a": 1, "b": 2 });
+        let d2 = json!({ "a": 1, "b": 1 });
+        let d3 = json!({ "a": 0, "b": 5 });
+
+        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2), make_qr(3u32, &d3)];
+
+        // sort by a asc, then b asc
+        apply_sort(&mut docs, &[("a".to_string(), 1), ("b".to_string(), 1)]);
+
+        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
+        // a: 0 -> id 3, a: 1 & b: 1 -> id 2, a: 1 & b: 2 -> id 1
+        assert_eq!(ids, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn apply_sort_missing_fields_ordering() {
+        let d1 = json!({ "x": 1 });
+        let d2 = json!({}); // missing x
+
+        let mut docs = vec![make_qr(1u32, &d1), make_qr(2u32, &d2)];
+
+        // Ascending: missing comes first (None < Some(_))
+        apply_sort(&mut docs, &[("x".to_string(), 1)]);
+        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
+        assert_eq!(ids, vec![2, 1]);
+
+        // Descending: missing comes last
+        apply_sort(&mut docs, &[("x".to_string(), -1)]);
+        let ids: Vec<u32> = docs.iter().map(|qr| qr.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // apply_skip_limit
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_skip_limit_basic() {
+        let docs_data: Vec<Json> = (0..5).map(|n| json!({ "n": n })).collect();
+        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
+            .iter()
+            .enumerate()
+            .map(|(i, j)| make_qr(i as u32, j))
+            .collect();
+
+        // skip 1, limit 2 -> ids 1,2
+        let sliced = apply_skip_limit(docs_vec, Some(1), Some(2));
+        let ids: Vec<u32> = sliced.iter().map(|qr| qr.id).collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn apply_skip_limit_no_skip_no_limit_defaults_to_internal_cap() {
+        // Small test to ensure "no skip/limit" just returns everything if below cap.
+        let docs_data: Vec<Json> = (0..10).map(|n| json!({ "n": n })).collect();
+        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
+            .iter()
+            .enumerate()
+            .map(|(i, j)| make_qr(i as u32, j))
+            .collect();
+
+        let sliced = apply_skip_limit(docs_vec, None, None);
+        let ids: Vec<u32> = sliced.iter().map(|qr| qr.id).collect();
+        assert_eq!(ids, (0u32..10u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn apply_skip_limit_skip_beyond_length_returns_empty() {
+        let docs_data: Vec<Json> = (0..3).map(|n| json!({ "n": n })).collect();
+        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
+            .iter()
+            .enumerate()
+            .map(|(i, j)| make_qr(i as u32, j))
+            .collect();
+
+        let sliced = apply_skip_limit(docs_vec, Some(10), Some(5));
+        assert!(sliced.is_empty());
+    }
+
+    #[test]
+    fn apply_skip_limit_zero_limit_returns_empty() {
+        let docs_data: Vec<Json> = (0..5).map(|n| json!({ "n": n })).collect();
+        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
+            .iter()
+            .enumerate()
+            .map(|(i, j)| make_qr(i as u32, j))
+            .collect();
+
+        // Explicit limit = 0 currently means "no results".
+        let sliced = apply_skip_limit(docs_vec, Some(0), Some(0));
+        assert!(sliced.is_empty());
+    }
+
+    #[test]
+    fn apply_skip_limit_does_not_exceed_internal_max_limit() {
+        // Build more than MAX_LIMIT docs (internal const is 1000).
+        let num_docs = 1200;
+        let docs_data: Vec<Json> = (0..num_docs).map(|n| json!({ "n": n })).collect();
+        let docs_vec: Vec<QueryResult<'_, u32>> = docs_data
+            .iter()
+            .enumerate()
+            .map(|(i, j)| make_qr(i as u32, j))
+            .collect();
+
+        let sliced = apply_skip_limit(docs_vec, None, Some(num_docs)); // ask for more than cap
+                                                                       // We can't directly read MAX_LIMIT here, but we know it is <= num_docs.
+                                                                       // We assert it's less than or equal to 1000 (per code) and > 0.
+        assert!(sliced.len() <= 1000);
+        assert!(!sliced.is_empty());
+    }
+}
