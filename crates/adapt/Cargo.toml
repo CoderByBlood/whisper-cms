@@ -26,6 +26,10 @@ axum = { workspace = true }
 http = { workspace = true }
 form_urlencoded = { workspace = true }
 html-escape = { workspace = true }
+indexed_json = { workspace = true }
+chrono = { workspace = true }
+smallvec = { workspace = true }
+anyhow = { workspace = true }
 domain = { path = "../domain" }
 serve = { path = "../serve" }
 

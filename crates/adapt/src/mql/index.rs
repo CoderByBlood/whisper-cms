@@ -1,8 +1,18 @@
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::fmt::Debug;
 use std::hash::Hash;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Index configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Configuration: which fields are indexed.
+///
+/// This is used by the MQL query planner to decide which predicates
+/// can be answered by the index backend.
 #[derive(Debug, Clone)]
 pub struct IndexConfig {
     fields: HashSet<String>,
@@ -14,10 +24,10 @@ impl IndexConfig {
     /// Example:
     /// ```ignore
     /// let cfg = IndexConfig::new([
-    ///     "kind",
+    ///     "type",
     ///     "slug",
-    ///     "front_matter.date",
-    ///     "front_matter.tags",
+    ///     "publish.date",
+    ///     "tax.tags",
     /// ]);
     /// ```
     pub fn new<I, S>(fields: I) -> Self
@@ -41,7 +51,11 @@ impl IndexConfig {
     }
 }
 
-/// Abstraction over a JSON document store (in-memory or disk-backed).
+// ─────────────────────────────────────────────────────────────────────────────
+// Async JsonStore abstraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Async abstraction over a JSON document store (in-memory or disk-backed).
 ///
 /// The store is responsible for:
 /// - enumerating all document IDs
@@ -49,57 +63,30 @@ impl IndexConfig {
 ///
 /// Returning owned `Json` (rather than `&Json`) keeps this usable for both
 /// in-memory and disk-backed implementations (e.g. `indexed_json`).
+#[async_trait]
 pub trait JsonStore {
-    /// Document ID type (e.g. usize for in-memory, u64 for a DB).
-    type Id: Copy + Eq + Hash;
+    /// Document ID type (e.g. usize for in-memory, `IndexedId` for indexed_json).
+    type Id: Copy + Eq + Hash + Send + Sync + 'static;
 
     /// Get all document IDs.
-    fn all_ids(&self) -> Vec<Self::Id>;
+    async fn all_ids(&self) -> Vec<Self::Id>;
 
     /// Get a document by ID (owned JSON).
-    fn get(&self, id: Self::Id) -> Option<Json>;
+    async fn get(&self, id: Self::Id) -> Option<Json>;
 }
 
-/// Simple in-memory store of JSON documents.
-///
-/// This is primarily a reference implementation and is also useful for tests.
-#[derive(Debug, Clone)]
-pub struct InMemoryJsonStore {
-    pub docs: Vec<Json>,
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Async IndexBackend abstraction (used by QueryPlanner)
+// ─────────────────────────────────────────────────────────────────────────────
 
-impl InMemoryJsonStore {
-    pub fn new(docs: Vec<Json>) -> Self {
-        Self { docs }
-    }
-
-    pub fn len(&self) -> usize {
-        self.docs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.docs.is_empty()
-    }
-}
-
-impl JsonStore for InMemoryJsonStore {
-    type Id = usize;
-
-    fn all_ids(&self) -> Vec<Self::Id> {
-        (0..self.docs.len()).collect()
-    }
-
-    fn get(&self, id: Self::Id) -> Option<Json> {
-        self.docs.get(id).cloned()
-    }
-}
-
-/// Index backend API: equality / membership / range lookups on indexed fields.
+/// Async index backend API: equality / membership / range lookups on fields.
 ///
 /// Implementations are free to ignore any part of this contract by returning
-/// `None` (meaning "I don't have an index for this predicate").
+/// `None` (meaning "I don't have an index for this predicate") and letting
+/// the planner fall back to a broader scan.
+#[async_trait]
 pub trait IndexBackend {
-    type Id: Copy + Eq + Hash;
+    type Id: Copy + Eq + Hash + Send + Sync + 'static;
 
     /// Lookup IDs for `field == value`.
     ///
@@ -107,7 +94,7 @@ pub trait IndexBackend {
     /// - `Some(HashSet<Id>)` if the field is indexed and the index can answer
     ///   this predicate.
     /// - `None` if the field is not indexed or this backend cannot answer it.
-    fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>>;
+    async fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>>;
 
     /// Lookup IDs for `field IN values` (union).
     ///
@@ -115,14 +102,14 @@ pub trait IndexBackend {
     /// - `Some(HashSet<Id>)` if the field is indexed and the index can answer
     ///   this predicate.
     /// - `None` if the field is not indexed or this backend cannot answer it.
-    fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>>;
+    async fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>>;
 
     /// Range lookups (optional).
     ///
     /// Returns:
     /// - `Some(HashSet<Id>)` if the backend can handle the range query.
     /// - `None` if not supported / not indexed.
-    fn lookup_range(
+    async fn lookup_range(
         &self,
         _field: &str,
         _min: Option<&Json>,
@@ -132,645 +119,585 @@ pub trait IndexBackend {
     }
 }
 
-/// In-memory index backend.
+// ─────────────────────────────────────────────────────────────────────────────
+// IndexRecord: strongly-typed index projection of front matter
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Strongly-typed projection of the front matter that we index.
 ///
-/// For each indexed field, we build:
-///   field -> (value string) -> set of IDs
-///
-/// NOTE: we index the JSON's string representation for equality/membership.
-/// For a real `indexed_json` integration, you’d replace this implementation
-/// with one backed by its index structures.
-#[derive(Debug, Clone)]
-pub struct InMemoryIndexBackend {
-    pub field_value_to_ids: HashMap<String, HashMap<String, HashSet<usize>>>,
+/// This mirrors the “WordPress-ish” shape we agreed on.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IndexRecord {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub slug: Option<String>,
+    pub parent: Option<String>,
+
+    #[serde(default)]
+    pub content: ContentFields,
+    #[serde(default)]
+    pub publish: PublishFields,
+    #[serde(default)]
+    pub nav: NavFields,
+    #[serde(default)]
+    pub tax: TaxFields,
+    #[serde(default)]
+    pub i18n: I18nFields,
+    #[serde(default)]
+    pub author: AuthorFields,
 }
 
-impl InMemoryIndexBackend {
-    /// Build an in-memory index for the given config and store.
-    pub fn build(config: &IndexConfig, store: &InMemoryJsonStore) -> Self {
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContentFields {
+    pub title: Option<String>,
+    pub section: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PublishFields {
+    pub status: Option<String>,
+    /// ISO-8601 publish date
+    pub date: Option<String>,
+    /// ISO-8601 modified date
+    pub modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NavFields {
+    pub menu_order: Option<i64>,
+    pub menu_visible: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaxFields {
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub series: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct I18nFields {
+    pub lang: Option<String>,
+    pub canonical_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuthorFields {
+    pub author: Option<String>,
+    #[serde(default)]
+    pub co_authors: Vec<String>,
+}
+
+impl IndexRecord {
+    /// Build an IndexRecord from a raw document JSON and explicit id.
+    ///
+    /// Missing fields simply become `None` / `Vec::new()`.
+    pub fn from_json_with_id(id: String, doc: &Json) -> Self {
         use super::eval::get_field_value;
 
-        let mut field_value_to_ids: HashMap<String, HashMap<String, HashSet<usize>>> =
-            HashMap::new();
+        fn as_string(v: Option<&Json>) -> Option<String> {
+            v.and_then(|j| j.as_str().map(|s| s.to_owned()))
+        }
 
-        for (id, doc) in store.docs.iter().enumerate() {
-            for field in config.fields() {
-                if let Some(value) = get_field_value(doc, field) {
-                    let key = value_to_index_key(value);
-                    let field_map = field_value_to_ids.entry(field.to_string()).or_default();
-                    let ids = field_map.entry(key).or_default();
-                    ids.insert(id);
-                }
+        fn as_i64(v: Option<&Json>) -> Option<i64> {
+            v.and_then(|j| j.as_i64())
+        }
+
+        fn as_bool(v: Option<&Json>) -> Option<bool> {
+            v.and_then(|j| j.as_bool())
+        }
+
+        fn as_string_vec(v: Option<&Json>) -> Vec<String> {
+            match v {
+                Some(Json::Array(arr)) => arr
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_owned()))
+                    .collect(),
+                Some(Json::String(s)) => vec![s.clone()],
+                _ => Vec::new(),
             }
         }
 
-        Self { field_value_to_ids }
-    }
-}
+        let kind = as_string(get_field_value(doc, "type").or_else(|| get_field_value(doc, "kind")));
+        let slug = as_string(get_field_value(doc, "slug"));
+        let parent = as_string(get_field_value(doc, "parent"));
 
-impl IndexBackend for InMemoryIndexBackend {
-    type Id = usize;
+        let content = ContentFields {
+            title: as_string(get_field_value(doc, "content.title")),
+            section: as_string(get_field_value(doc, "content.section")),
+        };
 
-    fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> {
-        let key = value_to_index_key(value);
-        let field_map = self.field_value_to_ids.get(field)?;
-        field_map.get(&key).cloned()
-    }
+        let publish = PublishFields {
+            status: as_string(get_field_value(doc, "publish.status")),
+            date: as_string(get_field_value(doc, "publish.date")),
+            modified: as_string(get_field_value(doc, "publish.modified")),
+        };
 
-    fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> {
-        let field_map = self.field_value_to_ids.get(field)?;
-        let mut acc: HashSet<Self::Id> = HashSet::new();
-        for v in values {
-            let key = value_to_index_key(v);
-            if let Some(ids) = field_map.get(&key) {
-                acc.extend(ids.iter().copied());
-            }
+        let nav = NavFields {
+            menu_order: as_i64(get_field_value(doc, "nav.menu_order")),
+            menu_visible: as_bool(get_field_value(doc, "nav.menu_visible")),
+        };
+
+        let tax = TaxFields {
+            categories: as_string_vec(get_field_value(doc, "tax.categories")),
+            tags: as_string_vec(get_field_value(doc, "tax.tags")),
+            series: as_string_vec(get_field_value(doc, "tax.series")),
+        };
+
+        let i18n = I18nFields {
+            lang: as_string(get_field_value(doc, "i18n.lang")),
+            canonical_id: as_string(get_field_value(doc, "i18n.canonical_id")),
+        };
+
+        let author = AuthorFields {
+            author: as_string(get_field_value(doc, "author.author")),
+            co_authors: as_string_vec(get_field_value(doc, "author.co_authors")),
+        };
+
+        IndexRecord {
+            id,
+            kind,
+            slug,
+            parent,
+            content,
+            publish,
+            nav,
+            tax,
+            i18n,
+            author,
         }
-        if acc.is_empty() {
-            None
-        } else {
-            Some(acc)
-        }
-    }
-
-    // `lookup_range` keeps the default `None` implementation for now.
-}
-
-/// Convert a JSON value into an index key string.
-///
-/// For equality lookups we just use the JSON string representation; for a
-/// more robust disk-backed integration, you might:
-/// - normalize case,
-/// - use typed encodings,
-/// - or delegate to the underlying DB’s index key representation.
-fn value_to_index_key(v: &Json) -> String {
-    v.to_string()
-}
-// ─────────────────────────────────────────────────────────────────────────────
-// indexed_json-compatible backend (skeleton)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Minimal adapter over an indexed JSON database.
-///
-/// You will implement this for your concrete `indexed_json` handle type,
-/// e.g.:
-///
-/// ```ignore
-/// struct MyIndexedJsonDb { /* your DB handle(s) here */ }
-///
-/// impl IndexedJsonApi for MyIndexedJsonDb {
-///     type Id = u64;
-///
-///     fn all_ids(&self) -> Vec<Self::Id> { /* ... */ }
-///     fn get_json(&self, id: Self::Id) -> Option<Json> { /* ... */ }
-///     fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> { /* ... */ }
-///     fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> { /* ... */ }
-///     fn lookup_range(
-///         &self,
-///         field: &str,
-///         min: Option<&Json>,
-///         max: Option<&Json>,
-///     ) -> Option<HashSet<Self::Id>> {
-///         // optional
-///         None
-///     }
-/// }
-/// ```
-pub trait IndexedJsonApi {
-    /// Document identifier type in the underlying DB.
-    type Id: Copy + Eq + Hash;
-
-    /// Return all document IDs.
-    fn all_ids(&self) -> Vec<Self::Id>;
-
-    /// Load a document as serde_json::Value.
-    fn get_json(&self, id: Self::Id) -> Option<Json>;
-
-    /// Index-backed equality lookup: field == value.
-    fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>>;
-
-    /// Index-backed membership lookup: field IN values.
-    fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>>;
-
-    /// Optional: range lookup.
-    fn lookup_range(
-        &self,
-        _field: &str,
-        _min: Option<&Json>,
-        _max: Option<&Json>,
-    ) -> Option<HashSet<Self::Id>> {
-        None
     }
 }
 
-/// JsonStore implementation backed by an IndexedJsonApi database.
-///
-/// `DB` is typically an `Arc<MyIndexedJsonDb>` so that clones are cheap.
-#[derive(Debug, Clone)]
-pub struct IndexedJsonStore<DB> {
-    pub db: DB,
-}
-
-impl<DB> IndexedJsonStore<DB> {
-    pub fn new(db: DB) -> Self {
-        Self { db }
+// Convenience conversions from (id, Json) tuples.
+impl From<(&str, &Json)> for IndexRecord {
+    fn from((id, doc): (&str, &Json)) -> Self {
+        IndexRecord::from_json_with_id(id.to_owned(), doc)
     }
 }
 
-impl<DB> JsonStore for IndexedJsonStore<DB>
-where
-    DB: IndexedJsonApi,
-{
-    type Id = DB::Id;
-
-    fn all_ids(&self) -> Vec<Self::Id> {
-        self.db.all_ids()
-    }
-
-    fn get(&self, id: Self::Id) -> Option<Json> {
-        self.db.get_json(id)
-    }
-}
-
-/// IndexBackend implementation backed by IndexedJsonApi.
-///
-/// This delegates directly to the underlying DB for indexed lookups, and
-/// uses `IndexConfig` only to decide *whether* a field should be queried
-/// via the index at all.
-#[derive(Debug, Clone)]
-pub struct IndexedJsonIndexBackend<DB> {
-    pub db: DB,
-    pub config: IndexConfig,
-}
-
-impl<DB> IndexedJsonIndexBackend<DB> {
-    pub fn new(db: DB, config: IndexConfig) -> Self {
-        Self { db, config }
-    }
-
-    pub fn index_config(&self) -> &IndexConfig {
-        &self.config
-    }
-}
-
-impl<DB> IndexBackend for IndexedJsonIndexBackend<DB>
-where
-    DB: IndexedJsonApi,
-{
-    type Id = DB::Id;
-
-    fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> {
-        if !self.config.is_indexed(field) {
-            return None;
-        }
-        self.db.lookup_eq(field, value)
-    }
-
-    fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> {
-        if !self.config.is_indexed(field) {
-            return None;
-        }
-        self.db.lookup_in(field, values)
-    }
-
-    fn lookup_range(
-        &self,
-        field: &str,
-        min: Option<&Json>,
-        max: Option<&Json>,
-    ) -> Option<HashSet<Self::Id>> {
-        if !self.config.is_indexed(field) {
-            return None;
-        }
-        self.db.lookup_range(field, min, max)
+impl From<(String, &Json)> for IndexRecord {
+    fn from((id, doc): (String, &Json)) -> Self {
+        IndexRecord::from_json_with_id(id, doc)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value as Json};
-    use std::cell::RefCell;
+    use async_trait::async_trait;
+    use serde_json::json;
+    use std::collections::HashSet;
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
     // IndexConfig tests
-    // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn indexconfig_new_and_is_indexed() {
-        let cfg = IndexConfig::new(["kind", "slug", "front_matter.date", "front_matter.tags"]);
+    fn index_config_basic_usage() {
+        let cfg = IndexConfig::new(["type", "slug", "publish.date"]);
 
-        assert!(cfg.is_indexed("kind"));
-        assert!(cfg.is_indexed("front_matter.date"));
-        assert!(!cfg.is_indexed("draft"));
-        assert!(!cfg.is_indexed("nonexistent"));
+        assert!(cfg.is_indexed("type"));
+        assert!(cfg.is_indexed("slug"));
+        assert!(cfg.is_indexed("publish.date"));
+
+        assert!(!cfg.is_indexed("unknown"));
+        assert!(!cfg.is_indexed("publish.modified"));
     }
 
     #[test]
-    fn indexconfig_fields_iterates_all_fields() {
-        let cfg = IndexConfig::new(["a", "b", "c"]);
-        let mut fields: Vec<_> = cfg.fields().collect();
-        fields.sort(); // HashSet iteration order is undefined
+    fn index_config_deduplicates_fields() {
+        let cfg = IndexConfig::new(["slug", "slug", "publish.date", "publish.date"]);
 
-        assert_eq!(fields, vec!["a", "b", "c"]);
+        // Collect fields into a set to confirm uniqueness.
+        let fields: HashSet<&str> = cfg.fields().collect();
+
+        assert_eq!(fields.len(), 2);
+        assert!(fields.contains("slug"));
+        assert!(fields.contains("publish.date"));
     }
 
     #[test]
-    fn indexconfig_empty_has_no_indexed_fields() {
-        let cfg = IndexConfig::new(Vec::<&str>::new());
-        assert!(!cfg.is_indexed("anything"));
-        assert_eq!(cfg.fields().count(), 0);
+    fn index_config_fields_iterator_matches_inserted_fields() {
+        let cfg = IndexConfig::new(vec!["type", "slug", "tax.tags"]);
+
+        let mut fields: Vec<&str> = cfg.fields().collect();
+        fields.sort();
+
+        assert_eq!(fields, vec!["slug", "tax.tags", "type"]);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // InMemoryJsonStore tests
-    // ─────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    // IndexRecord::from_json_with_id tests (full + partial)
+    // ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn inmemoryjsonstore_len_and_is_empty() {
-        let empty = InMemoryJsonStore::new(Vec::new());
-        assert_eq!(empty.len(), 0);
-        assert!(empty.is_empty());
+    fn index_record_from_json_with_full_front_matter() {
+        let doc = json!({
+            "type": "post",
+            "slug": "hello-world",
+            "parent": "root",
 
-        let store = InMemoryJsonStore::new(vec![json!({ "id": 1 }), json!({ "id": 2 })]);
-        assert_eq!(store.len(), 2);
-        assert!(!store.is_empty());
-    }
+            "content": {
+                "title": "Hello World",
+                "section": "blog"
+            },
+            "publish": {
+                "status": "publish",
+                "date": "2024-01-01T12:34:56Z",
+                "modified": "2024-01-02T10:00:00Z"
+            },
+            "nav": {
+                "menu_order": 10,
+                "menu_visible": true
+            },
+            "tax": {
+                "categories": ["rust", "web"],
+                "tags": ["hello", "world"],
+                "series": ["intro"]
+            },
+            "i18n": {
+                "lang": "en",
+                "canonical_id": "post-001"
+            },
+            "author": {
+                "author": "Alice",
+                "co_authors": ["Bob", "Carol"]
+            }
+        });
 
-    #[test]
-    fn inmemoryjsonstore_all_ids_and_get() {
-        let store = InMemoryJsonStore::new(vec![
-            json!({ "id": 10 }),
-            json!({ "id": 11 }),
-            json!({ "id": 12 }),
-        ]);
+        let rec = IndexRecord::from_json_with_id("doc-1".to_string(), &doc);
 
-        let ids = store.all_ids();
-        assert_eq!(ids, vec![0, 1, 2]);
+        // Root fields
+        assert_eq!(rec.id, "doc-1");
+        assert_eq!(rec.kind.as_deref(), Some("post"));
+        assert_eq!(rec.slug.as_deref(), Some("hello-world"));
+        assert_eq!(rec.parent.as_deref(), Some("root"));
 
-        let doc0 = store.get(0).expect("doc 0 must exist");
-        let doc1 = store.get(1).expect("doc 1 must exist");
-        let doc2 = store.get(2).expect("doc 2 must exist");
-        assert_eq!(doc0["id"], json!(10));
-        assert_eq!(doc1["id"], json!(11));
-        assert_eq!(doc2["id"], json!(12));
+        // Content
+        assert_eq!(rec.content.title.as_deref(), Some("Hello World"));
+        assert_eq!(rec.content.section.as_deref(), Some("blog"));
 
-        // Out of bounds
-        assert!(store.get(3).is_none());
-        assert!(store.get(999).is_none());
-    }
-
-    #[test]
-    fn inmemoryjsonstore_get_returns_owned_json() {
-        let store = InMemoryJsonStore::new(vec![json!({ "value": 1 })]);
-
-        let mut doc = store.get(0).expect("doc must exist");
-        assert_eq!(doc["value"], json!(1));
-
-        // Modify the returned JSON and ensure store's internal data is unaffected.
-        doc["value"] = json!(999);
-
-        let original = store.get(0).expect("doc must exist again");
+        // Publish
+        assert_eq!(rec.publish.status.as_deref(), Some("publish"));
+        assert_eq!(rec.publish.date.as_deref(), Some("2024-01-01T12:34:56Z"));
         assert_eq!(
-            original["value"],
-            json!(1),
-            "store must not be mutated by changes to returned Json"
+            rec.publish.modified.as_deref(),
+            Some("2024-01-02T10:00:00Z")
+        );
+
+        // Nav
+        assert_eq!(rec.nav.menu_order, Some(10));
+        assert_eq!(rec.nav.menu_visible, Some(true));
+
+        // Tax
+        assert_eq!(
+            rec.tax.categories,
+            vec!["rust".to_string(), "web".to_string()]
+        );
+        assert_eq!(rec.tax.tags, vec!["hello".to_string(), "world".to_string()]);
+        assert_eq!(rec.tax.series, vec!["intro".to_string()]);
+
+        // I18n
+        assert_eq!(rec.i18n.lang.as_deref(), Some("en"));
+        assert_eq!(rec.i18n.canonical_id.as_deref(), Some("post-001"));
+
+        // Author
+        assert_eq!(rec.author.author.as_deref(), Some("Alice"));
+        assert_eq!(
+            rec.author.co_authors,
+            vec!["Bob".to_string(), "Carol".to_string()]
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // value_to_index_key tests
-    // ─────────────────────────────────────────────────────────────────────
-
     #[test]
-    fn value_to_index_key_uses_json_string_representation() {
-        // Strings
-        assert_eq!(value_to_index_key(&json!("post")), "\"post\"");
+    fn index_record_handles_missing_fields_with_defaults() {
+        // Completely empty doc: everything except id should be defaulted.
+        let doc = json!({});
 
-        // Numbers
-        assert_eq!(value_to_index_key(&json!(42)), "42");
+        let rec = IndexRecord::from_json_with_id("empty".to_string(), &doc);
 
-        // Bool
-        assert_eq!(value_to_index_key(&json!(true)), "true");
+        assert_eq!(rec.id, "empty");
 
-        // Null
-        assert_eq!(value_to_index_key(&Json::Null), "null");
+        // All Option fields should be None, Vec fields empty.
+        assert_eq!(rec.kind, None);
+        assert_eq!(rec.slug, None);
+        assert_eq!(rec.parent, None);
 
-        // Arrays
-        assert_eq!(value_to_index_key(&json!(["a", "b"])), "[\"a\",\"b\"]");
+        assert_eq!(rec.content.title, None);
+        assert_eq!(rec.content.section, None);
 
-        // Objects (ordering may differ but serde_json has stable ordering for
-        // construction via json! macro with literal keys).
-        assert_eq!(value_to_index_key(&json!({ "k": "v" })), "{\"k\":\"v\"}");
-    }
+        assert_eq!(rec.publish.status, None);
+        assert_eq!(rec.publish.date, None);
+        assert_eq!(rec.publish.modified, None);
 
-    // ─────────────────────────────────────────────────────────────────────
-    // InMemoryIndexBackend::build and lookups
-    // ─────────────────────────────────────────────────────────────────────
+        assert_eq!(rec.nav.menu_order, None);
+        assert_eq!(rec.nav.menu_visible, None);
 
-    #[test]
-    fn inmemoryindexbackend_build_creates_index_entries() {
-        // Three docs with different tag arrays.
-        let store = InMemoryJsonStore::new(vec![
-            json!({ "kind": "post", "front_matter": { "tags": ["rust", "wasm"] } }),
-            json!({ "kind": "page", "front_matter": { "tags": ["rust"] } }),
-            json!({ "kind": "post", "front_matter": { "tags": ["other"] } }),
-        ]);
+        assert!(rec.tax.categories.is_empty());
+        assert!(rec.tax.tags.is_empty());
+        assert!(rec.tax.series.is_empty());
 
-        let config = IndexConfig::new(["kind", "front_matter.tags"]);
-        let backend = InMemoryIndexBackend::build(&config, &store);
+        assert_eq!(rec.i18n.lang, None);
+        assert_eq!(rec.i18n.canonical_id, None);
 
-        // kind == "post" should map to IDs {0, 2}
-        let key_post = value_to_index_key(&json!("post"));
-        let kind_map = backend
-            .field_value_to_ids
-            .get("kind")
-            .expect("kind field must be indexed");
-        let ids_for_post = kind_map
-            .get(&key_post)
-            .expect("there must be an entry for kind=post");
-        let mut ids_vec: Vec<_> = ids_for_post.iter().copied().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![0, 2]);
-
-        // kind == "page" should map to ID {1}
-        let key_page = value_to_index_key(&json!("page"));
-        let ids_for_page = kind_map
-            .get(&key_page)
-            .expect("there must be an entry for kind=page");
-        let mut ids_vec: Vec<_> = ids_for_page.iter().copied().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![1]);
-
-        // front_matter.tags are indexed as full arrays, not individual elements.
-
-        let tags_map = backend
-            .field_value_to_ids
-            .get("front_matter.tags")
-            .expect("tags field must be indexed");
-
-        // Doc 0: ["rust", "wasm"]
-        let key_rust_wasm = value_to_index_key(&json!(["rust", "wasm"]));
-        let ids_for_rust_wasm = tags_map
-            .get(&key_rust_wasm)
-            .expect("there must be an entry for tags=[\"rust\",\"wasm\"]");
-        let mut ids_vec: Vec<_> = ids_for_rust_wasm.iter().copied().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![0]);
-
-        // Doc 1: ["rust"]
-        let key_rust = value_to_index_key(&json!(["rust"]));
-        let ids_for_rust = tags_map
-            .get(&key_rust)
-            .expect("there must be an entry for tags=[\"rust\"]");
-        let mut ids_vec: Vec<_> = ids_for_rust.iter().copied().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![1]);
-
-        // Doc 2: ["other"]
-        let key_other = value_to_index_key(&json!(["other"]));
-        let ids_for_other = tags_map
-            .get(&key_other)
-            .expect("there must be an entry for tags=[\"other\"]");
-        let mut ids_vec: Vec<_> = ids_for_other.iter().copied().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![2]);
+        assert_eq!(rec.author.author, None);
+        assert!(rec.author.co_authors.is_empty());
     }
 
     #[test]
-    fn inmemoryindexbackend_lookup_eq_hits_and_misses() {
-        let store = InMemoryJsonStore::new(vec![
-            json!({ "kind": "post" }),
-            json!({ "kind": "page" }),
-            json!({ "kind": "post" }),
-        ]);
+    fn index_record_type_falls_back_to_kind_when_type_missing() {
+        let doc = json!({
+            "kind": "page",
+            "slug": "about"
+        });
 
-        let config = IndexConfig::new(["kind"]);
-        let backend = InMemoryIndexBackend::build(&config, &store);
+        let rec = IndexRecord::from_json_with_id("k1".to_string(), &doc);
 
-        // Hit: kind == "post" -> {0, 2}
-        let ids = backend
-            .lookup_eq("kind", &json!("post"))
-            .expect("kind=post should be indexed");
-        let mut ids_vec: Vec<_> = ids.into_iter().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![0, 2]);
-
-        // Hit: kind == "page" -> {1}
-        let ids = backend
-            .lookup_eq("kind", &json!("page"))
-            .expect("kind=page should be indexed");
-        let mut ids_vec: Vec<_> = ids.into_iter().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![1]);
-
-        // Miss: kind == "unknown" -> None
-        let ids = backend.lookup_eq("kind", &json!("unknown"));
-        assert!(ids.is_none(), "unknown kind should not be present");
+        // "type" missing, so we should pick up "kind".
+        assert_eq!(rec.kind.as_deref(), Some("page"));
+        assert_eq!(rec.slug.as_deref(), Some("about"));
     }
 
     #[test]
-    fn inmemoryindexbackend_lookup_in_unions_results_and_returns_none_when_empty() {
-        let store = InMemoryJsonStore::new(vec![
-            json!({ "kind": "post" }),
-            json!({ "kind": "page" }),
-            json!({ "kind": "draft" }),
-            json!({ "kind": "post" }),
-        ]);
+    fn index_record_type_prefers_type_over_kind_when_both_present() {
+        let doc = json!({
+            "type": "post",
+            "kind": "page",
+            "slug": "confusing"
+        });
 
-        let config = IndexConfig::new(["kind"]);
-        let backend = InMemoryIndexBackend::build(&config, &store);
+        let rec = IndexRecord::from_json_with_id("k2".to_string(), &doc);
 
-        // Union of kind IN ["post", "page"] -> IDs {0,1,3}
-        let ids = backend
-            .lookup_in("kind", &[json!("post"), json!("page")])
-            .expect("kind in [post,page] should have hits");
-        let mut ids_vec: Vec<_> = ids.into_iter().collect();
-        ids_vec.sort();
-        assert_eq!(ids_vec, vec![0, 1, 3]);
-
-        // IN with no matches -> None
-        let ids = backend.lookup_in("kind", &[json!("unknown")]);
-        assert!(ids.is_none(), "no matches should return None");
+        // We expect "type" to win over "kind" if both exist.
+        assert_eq!(rec.kind.as_deref(), Some("post"));
+        assert_eq!(rec.slug.as_deref(), Some("confusing"));
     }
 
     #[test]
-    fn inmemoryindexbackend_lookup_range_default_is_none() {
-        let backend = InMemoryIndexBackend {
-            field_value_to_ids: HashMap::new(),
-        };
+    fn index_record_arrays_and_scalars_for_tax_and_author_are_normalized() {
+        let doc = json!({
+            "tax": {
+                "categories": "single-cat",
+                "tags": ["one", "two", 3],
+                "series": ["series1"]
+            },
+            "author": {
+                "author": "Alice",
+                "co_authors": "Bob"
+            }
+        });
 
-        let res = backend.lookup_range("kind", Some(&json!(1)), Some(&json!(10)));
-        assert!(res.is_none());
+        let rec = IndexRecord::from_json_with_id("norm".to_string(), &doc);
+
+        // categories: scalar string -> ["single-cat"]
+        assert_eq!(rec.tax.categories, vec!["single-cat".to_string()]);
+
+        // tags: mixed array -> only string elements kept
+        assert_eq!(rec.tax.tags, vec!["one".to_string(), "two".to_string()]);
+
+        // series: array of strings unchanged
+        assert_eq!(rec.tax.series, vec!["series1".to_string()]);
+
+        // author.author is scalar
+        assert_eq!(rec.author.author.as_deref(), Some("Alice"));
+
+        // co_authors: scalar string -> ["Bob"]
+        assert_eq!(rec.author.co_authors, vec!["Bob".to_string()]);
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // IndexedJsonStore & IndexedJsonIndexBackend tests with a TestDb
-    // ─────────────────────────────────────────────────────────────────────
+    #[test]
+    fn index_record_ignores_non_string_non_array_tax_values() {
+        let doc = json!({
+            "tax": {
+                "categories": 123,
+                "tags": { "not": "an array" },
+                "series": null
+            }
+        });
 
-    #[derive(Debug, Clone)]
-    struct TestDb {
-        ids: Vec<u64>,
-        docs: HashMap<u64, Json>,
-        eq_calls: RefCell<Vec<(String, String)>>,
-        in_calls: RefCell<Vec<(String, Vec<String>)>>,
-        range_calls: RefCell<Vec<(String, Option<String>, Option<String>)>>,
+        let rec = IndexRecord::from_json_with_id("bad-tax".to_string(), &doc);
+
+        // All should become empty vecs when types are unsupported.
+        assert!(rec.tax.categories.is_empty());
+        assert!(rec.tax.tags.is_empty());
+        assert!(rec.tax.series.is_empty());
     }
 
-    impl TestDb {
+    #[test]
+    fn index_record_i18n_and_nav_parsing_with_wrong_types() {
+        let doc = json!({
+            "nav": {
+                "menu_order": "not-a-number",
+                "menu_visible": "not-a-bool"
+            },
+            "i18n": {
+                "lang": 123,
+                "canonical_id": false
+            }
+        });
+
+        let rec = IndexRecord::from_json_with_id("weird-nav-i18n".to_string(), &doc);
+
+        // menu_order: wrong type -> None
+        assert_eq!(rec.nav.menu_order, None);
+        // menu_visible: wrong type -> None
+        assert_eq!(rec.nav.menu_visible, None);
+
+        // lang: wrong type -> None
+        assert_eq!(rec.i18n.lang, None);
+        // canonical_id: wrong type -> None
+        assert_eq!(rec.i18n.canonical_id, None);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // From<(&str, &Json)> and From<(String, &Json)> tests
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_str_and_string_tuple_constructors_work() {
+        let doc = json!({ "type": "post", "slug": "tuple" });
+
+        let rec1: IndexRecord = ("id-str", &doc).into();
+        assert_eq!(rec1.id, "id-str");
+        assert_eq!(rec1.kind.as_deref(), Some("post"));
+        assert_eq!(rec1.slug.as_deref(), Some("tuple"));
+
+        let rec2: IndexRecord = ("id-owned".to_string(), &doc).into();
+        assert_eq!(rec2.id, "id-owned");
+        assert_eq!(rec2.kind.as_deref(), Some("post"));
+        assert_eq!(rec2.slug.as_deref(), Some("tuple"));
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // JsonStore + IndexBackend minimal sanity tests
+    // ─────────────────────────────────────────────────────────────
+
+    #[derive(Debug)]
+    struct TestStore {
+        docs: Vec<Json>,
+    }
+
+    #[async_trait]
+    impl JsonStore for TestStore {
+        type Id = usize;
+
+        async fn all_ids(&self) -> Vec<Self::Id> {
+            (0..self.docs.len()).collect()
+        }
+
+        async fn get(&self, id: Self::Id) -> Option<Json> {
+            self.docs.get(id).cloned()
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestBackend {
+        // very small fake index: field -> Json -> ids
+        eq_index:
+            std::collections::HashMap<String, std::collections::HashMap<Json, HashSet<usize>>>,
+    }
+
+    impl TestBackend {
         fn new() -> Self {
             Self {
-                ids: Vec::new(),
-                docs: HashMap::new(),
-                eq_calls: RefCell::new(Vec::new()),
-                in_calls: RefCell::new(Vec::new()),
-                range_calls: RefCell::new(Vec::new()),
+                eq_index: std::collections::HashMap::new(),
             }
         }
 
-        fn insert(&mut self, id: u64, doc: Json) {
-            self.ids.push(id);
-            self.docs.insert(id, doc);
+        fn insert_eq(&mut self, field: &str, value: Json, id: usize) {
+            let field_map = self.eq_index.entry(field.to_string()).or_default();
+            let ids = field_map.entry(value).or_default();
+            ids.insert(id);
         }
     }
 
-    impl IndexedJsonApi for TestDb {
-        type Id = u64;
+    #[async_trait]
+    impl IndexBackend for TestBackend {
+        type Id = usize;
 
-        fn all_ids(&self) -> Vec<Self::Id> {
-            self.ids.clone()
+        async fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> {
+            let field_map = self.eq_index.get(field)?;
+            field_map.get(value).cloned()
         }
 
-        fn get_json(&self, id: Self::Id) -> Option<Json> {
-            self.docs.get(&id).cloned()
-        }
-
-        fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> {
-            let key = value_to_index_key(value);
-            self.eq_calls
-                .borrow_mut()
-                .push((field.to_string(), key.clone()));
-
-            // For tests, we hardcode some behavior:
-            // - field "kind", value "post" => all ids whose doc.kind == "post"
-            if field == "kind" && value == &json!("post") {
-                let mut out = HashSet::new();
-                for (id, doc) in &self.docs {
-                    if doc.get("kind") == Some(&json!("post")) {
-                        out.insert(*id);
-                    }
+        async fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> {
+            let field_map = self.eq_index.get(field)?;
+            let mut acc = HashSet::new();
+            for v in values {
+                if let Some(ids) = field_map.get(v) {
+                    acc.extend(ids.iter().copied());
                 }
-                if out.is_empty() {
-                    None
-                } else {
-                    Some(out)
-                }
-            } else {
+            }
+            if acc.is_empty() {
                 None
+            } else {
+                Some(acc)
             }
         }
 
-        fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> {
-            let keys: Vec<String> = values.iter().map(|v| value_to_index_key(v)).collect();
-            self.in_calls
-                .borrow_mut()
-                .push((field.to_string(), keys.clone()));
-
-            // For tests: kind IN values -> union of kind == each value
-            if field == "kind" {
-                let mut out = HashSet::new();
-                for v in values {
-                    if v == &json!("post") || v == &json!("page") {
-                        for (id, doc) in &self.docs {
-                            if doc.get("kind") == Some(v) {
-                                out.insert(*id);
-                            }
-                        }
-                    }
-                }
-                if out.is_empty() {
-                    None
-                } else {
-                    Some(out)
-                }
-            } else {
-                None
-            }
-        }
-
-        fn lookup_range(
+        async fn lookup_range(
             &self,
-            field: &str,
-            min: Option<&Json>,
-            max: Option<&Json>,
+            _field: &str,
+            _min: Option<&Json>,
+            _max: Option<&Json>,
         ) -> Option<HashSet<Self::Id>> {
-            let min_s = min.map(value_to_index_key);
-            let max_s = max.map(value_to_index_key);
-            self.range_calls
-                .borrow_mut()
-                .push((field.to_string(), min_s, max_s));
-
-            // For tests we do not support ranges -> always None
+            // Test backend does not support range.
             None
         }
     }
 
-    #[test]
-    fn indexedjsonstore_delegates_to_db_for_all_ids_and_get() {
-        let mut db = TestDb::new();
-        db.insert(1, json!({ "kind": "post" }));
-        db.insert(2, json!({ "kind": "page" }));
+    #[tokio::test]
+    async fn teststore_and_testbackend_basic_behavior() {
+        let docs = vec![
+            json!({ "type": "post", "slug": "a" }),
+            json!({ "type": "post", "slug": "b" }),
+            json!({ "type": "page", "slug": "c" }),
+        ];
 
-        let store = IndexedJsonStore::new(db.clone());
+        let store = TestStore { docs };
 
-        let mut ids = store.all_ids();
-        ids.sort();
-        assert_eq!(ids, vec![1, 2]);
+        // JsonStore::all_ids
+        let ids = store.all_ids().await;
+        assert_eq!(ids, vec![0, 1, 2]);
 
-        let doc1 = store.get(1).expect("doc 1 must exist");
-        let doc2 = store.get(2).expect("doc 2 must exist");
-        assert_eq!(doc1["kind"], json!("post"));
-        assert_eq!(doc2["kind"], json!("page"));
-        assert!(store.get(999).is_none());
-    }
+        // JsonStore::get
+        assert_eq!(store.get(1).await.unwrap()["slug"].as_str(), Some("b"));
+        assert!(store.get(999).await.is_none());
 
-    #[test]
-    fn indexedjsonindexbackend_respects_indexconfig_for_lookup_eq_and_in() {
-        let mut db = TestDb::new();
-        db.insert(1, json!({ "kind": "post" }));
-        db.insert(2, json!({ "kind": "page" }));
+        // IndexBackend: index on "type"
+        let mut backend = TestBackend::new();
+        backend.insert_eq("type", json!("post"), 0);
+        backend.insert_eq("type", json!("post"), 1);
+        backend.insert_eq("type", json!("page"), 2);
 
-        let config = IndexConfig::new(["kind"]);
-        let backend = IndexedJsonIndexBackend::new(db.clone(), config.clone());
+        // lookup_eq positive
+        let posts = backend.lookup_eq("type", &json!("post")).await.unwrap();
+        assert_eq!(posts.len(), 2);
+        assert!(posts.contains(&0));
+        assert!(posts.contains(&1));
 
-        // kind is indexed -> backend should delegate to db.lookup_eq
-        let ids = backend
-            .lookup_eq("kind", &json!("post"))
-            .expect("kind=post should be answered");
-        assert!(ids.contains(&1));
-        assert!(!ids.contains(&2));
+        // lookup_eq negative
+        assert!(backend.lookup_eq("type", &json!("missing")).await.is_none());
 
-        // Non-indexed field even if DB *could* answer it should be gated.
-        // Here DB will return None for any other field anyway, but we
-        // explicitly test that the backend checks IndexConfig:
-        let ids = backend.lookup_eq("draft", &json!(false));
-        assert!(ids.is_none());
+        // lookup_in union
+        let mixed = backend
+            .lookup_in("type", &[json!("post"), json!("page")])
+            .await
+            .unwrap();
+        assert_eq!(mixed.len(), 3);
 
-        // kind IN ["post","page"] -> union via db.lookup_in
-        let ids = backend
-            .lookup_in("kind", &[json!("post"), json!("page")])
-            .expect("kind in [post,page] should be answered");
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&2));
-    }
+        // lookup_in with no matches
+        assert!(backend
+            .lookup_in("type", &[json!("does-not-exist")])
+            .await
+            .is_none());
 
-    #[test]
-    fn indexedjsonindexbackend_lookup_range_default_is_none() {
-        let db = TestDb::new();
-        let config = IndexConfig::new(["kind"]);
-        let backend = IndexedJsonIndexBackend::new(db.clone(), config);
-
-        let res = backend.lookup_range("kind", Some(&json!(1)), Some(&json!(10)));
-        assert!(res.is_none());
+        // lookup_range not supported
+        assert!(backend.lookup_range("type", None, None).await.is_none());
     }
 }
