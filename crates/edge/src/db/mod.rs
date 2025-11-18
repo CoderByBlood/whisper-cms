@@ -1,4 +1,5 @@
 mod sqlite;
+pub mod tantivy;
 
 use serve::db::{DatabaseError, DatabaseService, SqlValue};
 use sqlite::{Bind, SqliteDbError};
