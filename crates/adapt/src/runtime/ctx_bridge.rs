@@ -11,14 +11,23 @@ use http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde_json::{json, Map as JsonMap, Value as Json};
 
 /// Build the JS context object for plugins.
-pub fn ctx_to_js_for_plugins(ctx: &RequestContext) -> JsValue {
-    ctx_to_js(ctx, None)
+///
+/// `plugin_id` is used to pick the correct per-plugin config from
+/// `RequestContext.plugin_configs`. The selected config is exposed to JS
+/// as `ctx.config`.
+pub fn ctx_to_js_for_plugins(ctx: &RequestContext, plugin_id: &str) -> JsValue {
+    let cfg = ctx.plugin_configs.get(plugin_id);
+    ctx_to_js(ctx, cfg)
 }
 
 /// Build the JS context object for themes.
-/// (Currently no separate theme config is wired, so we pass `None`.)
-pub fn ctx_to_js_for_theme(ctx: &RequestContext) -> JsValue {
-    ctx_to_js(ctx, None)
+///
+/// `theme_id` is not currently used to look up config (we only have a
+/// single `theme_config` in `RequestContext`), but is accepted for
+/// symmetry with plugins. The theme config is exposed as `ctx.config`.
+pub fn ctx_to_js_for_theme(ctx: &RequestContext, _theme_id: &str) -> JsValue {
+    let cfg = Some(&ctx.theme_config);
+    ctx_to_js(ctx, cfg)
 }
 
 /// Merge JS result back into Rust context for plugins.
@@ -544,7 +553,7 @@ mod tests {
     #[test]
     fn ctx_to_js_for_plugins_basic_shape() {
         let ctx = base_ctx();
-        let js = ctx_to_js_for_plugins(&ctx);
+        let js = ctx_to_js_for_plugins(&ctx, "test-plugin");
         let json = js.to_json();
 
         let obj = json.as_object().expect("root should be object");
@@ -615,7 +624,7 @@ mod tests {
             HashMap::new(),
         );
 
-        let js = ctx_to_js_for_plugins(&ctx);
+        let js = ctx_to_js_for_plugins(&ctx, "test-plugin");
         let json = js.to_json();
         let obj = json.as_object().unwrap();
         let req = obj.get("request").unwrap().as_object().unwrap();
@@ -1092,8 +1101,8 @@ mod tests {
     fn ctx_to_js_for_theme_matches_plugins_view_of_request() {
         let ctx = base_ctx();
 
-        let js_theme = ctx_to_js_for_theme(&ctx).to_json();
-        let js_plugins = ctx_to_js_for_plugins(&ctx).to_json();
+        let js_theme = ctx_to_js_for_theme(&ctx, "test-theme").to_json();
+        let js_plugins = ctx_to_js_for_plugins(&ctx, "test-plugin").to_json();
 
         assert_eq!(js_theme["request"]["path"], js_plugins["request"]["path"]);
         assert_eq!(

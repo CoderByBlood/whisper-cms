@@ -49,7 +49,8 @@ impl<E: JsEngine> ThemeRuntime<E> {
     ///
     /// This is optional and may be skipped if you don't need theme init.
     pub fn init(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
-        let js_ctx = ctx_to_js_for_theme(ctx);
+        // Thread theme config through to JS as ctx.config.
+        let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
 
         let _ = self
             .engine
@@ -74,7 +75,8 @@ impl<E: JsEngine> ThemeRuntime<E> {
     /// - mutate ctx.recommend and ctx.response
     /// - return ctx
     pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
-        let js_ctx = ctx_to_js_for_theme(ctx);
+        // Thread theme config through to JS as ctx.config.
+        let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
 
         let result = self
             .engine
