@@ -57,3 +57,8 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 parking_lot = "0.12.5"
 tantivy = "0.25.0"
+asciidocr = "0.1.12"
+comrak = "0.48.0"
+orgize = "0.9.0"
+rst_parser = "0.4.2"
+rst_renderer = "0.4.2"

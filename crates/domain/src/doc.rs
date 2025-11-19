@@ -11,7 +11,7 @@ use std::time::SystemTime;
 pub enum FmKind {
     Toml,
     Yaml,
-    // Add Json, etc. later.
+    Json,
 }
 
 /// The kind of body payload the document has.
@@ -63,6 +63,12 @@ pub struct Document {
     /// Last modification time, if known.
     pub mtime: Option<SystemTime>,
 
+    /// Cached file contents (if any).
+    pub cache: Option<String>,
+
+    /// Cached body contents (if any).
+    pub cached_body: Option<String>,
+
     /// Detected front matter kind (if any).
     pub fm_kind: Option<FmKind>,
 
@@ -90,6 +96,8 @@ impl Document {
             path,
             size: None,
             mtime: None,
+            cache: None,
+            cached_body: None,
             fm_kind: None,
             body_kind: None,
             open_bytes,
@@ -117,6 +125,16 @@ impl Document {
         self
     }
 
+    pub fn with_cache(mut self, cache: String) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub fn with_body(mut self, cached_body: String) -> Self {
+        self.cached_body = Some(cached_body);
+        self
+    }
+
     pub fn with_fm_kind(mut self, kind: FmKind) -> Self {
         self.fm_kind = Some(kind);
         self
@@ -134,6 +152,7 @@ impl Document {
     pub fn clear_analysis(mut self) -> Self {
         self.fm_kind = None;
         self.body_kind = None;
+        self.cache = None;
         self
     }
 
