@@ -2,8 +2,8 @@
 
 use super::error::RenderError;
 use super::html_rewriter::build_lol_settings_from_body_patches;
+use super::recommendation::{BodyPatch, BodyPatchKind};
 use super::template::TemplateEngine;
-use crate::core::recommendation::{BodyPatch, BodyPatchKind};
 use lol_html::rewrite_str;
 use regex::Regex;
 use serde::Serialize;
@@ -227,7 +227,7 @@ pub fn render_json_to<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::recommendation::{BodyPatch, DomOp};
+    use crate::render::recommendation::{BodyPatch, DomOp};
     use crate::render::template::HbsEngine;
     use serde::Serialize;
     use serde_json::json;

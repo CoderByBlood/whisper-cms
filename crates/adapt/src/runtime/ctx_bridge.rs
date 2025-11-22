@@ -2,14 +2,14 @@
 //! and the JavaScript world (plugins & themes).
 
 use crate::core::context::{ResponseBodySpec, ResponseSpec};
-use crate::core::recommendation::{
-    BodyPatch, BodyPatchKind, DomOp, HeaderPatch, HeaderPatchKind, ModelPatch, Recommendations,
-};
 use crate::core::RequestContext;
 use crate::js::value::JsValue;
 use crate::runtime::error::RuntimeError;
 use http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde_json::{json, Map as JsonMap, Value as Json};
+use serve::render::recommendation::{
+    BodyPatch, BodyPatchKind, DomOp, HeaderPatch, HeaderPatchKind, ModelPatch, Recommendations,
+};
 
 pub const CTX_SHIM_SRC: &str = r#"
 (function (global) {

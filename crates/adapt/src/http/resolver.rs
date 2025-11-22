@@ -1,8 +1,8 @@
 // crates/adapt/src/http/resolver.rs
 
-use crate::core::content::ContentKind;
 use crate::core::context::RequestContext;
 use crate::core::error::CoreError;
+use domain::content::ContentKind;
 use http::Method;
 use serde_json::json;
 use serde_json::Value as Json;
@@ -123,7 +123,7 @@ pub fn build_request_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content::ContentKind;
+    use domain::content::ContentKind;
     use http::Method;
     use serde_json::json;
     use std::path::PathBuf;

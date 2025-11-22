@@ -99,10 +99,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content::ContentKind;
     use crate::core::error::CoreError;
     use crate::http::resolver::ResolvedContent;
     use axum::response::Response as AxumResponse;
+    use domain::content::ContentKind;
     use futures::future::{ready, Ready};
     use futures::task::noop_waker;
     use http::Method;

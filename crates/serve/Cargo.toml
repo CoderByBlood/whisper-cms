@@ -15,6 +15,10 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
+handlebars = { workspace = true }
+json-patch = { workspace = true }
+lol_html = { workspace = true }
+http = { workspace = true }
 domain = { path = "../domain" }
 
 [dev-dependencies]

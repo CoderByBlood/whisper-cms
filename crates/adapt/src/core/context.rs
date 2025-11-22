@@ -1,10 +1,10 @@
 // crates/adapt/src/core/context.rs
 
 use super::error::CoreError;
-use super::recommendation::Recommendations;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
+use serve::render::recommendation::Recommendations;
 use std::collections::HashMap;
 use uuid::Uuid;
 

@@ -1,9 +1,8 @@
+use adapt::mql::{IndexBackend, IndexConfig, JsonStore};
 use async_trait::async_trait;
 use serde_json::Value as Json;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-
-use crate::mql::{IndexBackend, IndexConfig, JsonStore};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory JsonStore implementation
@@ -75,7 +74,7 @@ pub struct InMemoryIndexBackend {
 impl InMemoryIndexBackend {
     /// Build an in-memory index for the given config and store.
     pub async fn build(config: &IndexConfig, store: &InMemoryJsonStore) -> Self {
-        use crate::mql::eval::get_field_value;
+        use adapt::mql::eval::get_field_value;
 
         let mut field_value_to_ids: HashMap<String, HashMap<String, HashSet<usize>>> =
             HashMap::new();
@@ -138,7 +137,7 @@ mod tests {
     use serde_json::json;
     use tokio;
 
-    use crate::mql::IndexConfig;
+    use adapt::mql::IndexConfig;
 
     // ─────────────────────────────────────────────────────────────
     // InMemoryJsonStore tests

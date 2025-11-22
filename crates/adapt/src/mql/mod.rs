@@ -4,7 +4,6 @@ pub mod eval;
 pub mod index;
 pub mod parser;
 pub mod query;
-pub mod store;
 
 pub use ast::{CmpOp, FieldExpr, Filter, FindOptions};
 pub use error::QueryError;
@@ -16,7 +15,3 @@ pub use index::{
     JsonStore,
 };
 pub use query::{execute_query, QueryPlanner, QueryResult};
-pub use store::{
-    json::{IndexedJsonIndexBackend, IndexedJsonStore},
-    mem::{InMemoryIndexBackend, InMemoryJsonStore},
-};

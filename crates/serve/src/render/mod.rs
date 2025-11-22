@@ -2,6 +2,7 @@ pub mod body_regex;
 pub mod error;
 pub mod html_rewriter;
 pub mod pipeline;
+pub mod recommendation;
 pub mod template;
 
 pub use body_regex::BodyRegexWriter;

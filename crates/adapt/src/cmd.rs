@@ -1,17 +1,14 @@
 use clap::{builder::ValueHint, Parser, Subcommand};
-use serve::ctx::AppCtx;
-use serve::ctx::AppError;
 use std::path::PathBuf;
-use std::{future::Future, pin::Pin, process::ExitCode, time::Duration};
-use tower::limit::ConcurrencyLimitLayer;
-use tower::timeout::TimeoutLayer;
-use tower::{Service, ServiceBuilder, ServiceExt};
+use std::{future::Future, pin::Pin, process::ExitCode};
+use tower::Service;
 
-type Result<T> = std::result::Result<T, AppError>;
+use crate::core::CoreError;
+
+type Result<T> = std::result::Result<T, CoreError>;
 
 /// Unified request passed into Tower pipeline
 pub struct CliReq {
-    pub ctx: AppCtx,
     pub cmd: Commands,
 }
 
@@ -52,7 +49,7 @@ pub struct Dispatcher;
 
 impl Service<CliReq> for Dispatcher {
     type Response = ExitCode;
-    type Error = AppError;
+    type Error = CoreError;
     type Future = Pin<Box<dyn Future<Output = Result<ExitCode>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<()>> {
@@ -62,270 +59,8 @@ impl Service<CliReq> for Dispatcher {
     fn call(&mut self, req: CliReq) -> Self::Future {
         Box::pin(async move {
             match req.cmd {
-                Commands::Start(cmd) => start_command(&req.ctx, cmd).await,
+                Commands::Start(_cmd) => todo!("Implement Start Command"),
             }
         })
-    }
-}
-
-/// Run the dispatcher through Tower layers
-pub async fn run_cli(ctx: AppCtx, cmd: Commands) -> ExitCode {
-    let req = CliReq { ctx, cmd };
-
-    let svc = ServiceBuilder::new()
-        .layer(ConcurrencyLimitLayer::new(1))
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
-        // .layer(your custom tracing / confirm layers here)
-        .service(Dispatcher);
-
-    match svc.oneshot(req).await {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-// ---------------- Business logic layer ----------------
-
-async fn start_command(ctx: &AppCtx, _cmd: StartCmd) -> Result<ExitCode> {
-    // Delegate to the serve tier
-    serve::start::find_content(ctx)
-        .await
-        .and(Ok(ExitCode::SUCCESS))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::error::ErrorKind;
-    use clap::Parser;
-    use std::fs;
-    use std::sync::{Mutex, OnceLock};
-    use std::{
-        collections::HashMap,
-        env,
-        path::{Path, PathBuf},
-        sync::Arc,
-        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
-    };
-    use tempfile::{tempdir, NamedTempFile};
-    use tokio;
-
-    // Bring in settings and file types for the minimal service
-    use domain::setting::{Server, Settings};
-    use serve::file::{File, FileService, ScanReport, ScannedFolder};
-
-    // ── Minimal FileService (real fs read/write; empty scan) ─────────────────
-    fn fs_read(p: &Path) -> std::io::Result<Vec<u8>> {
-        std::fs::read(p)
-    }
-    fn fs_write(p: &Path, data: &[u8]) -> std::io::Result<()> {
-        std::fs::write(p, data)
-    }
-    fn fs_lookup(
-        by_abs: &HashMap<PathBuf, Arc<File>>,
-        abs: &Path,
-    ) -> std::io::Result<Option<Arc<File>>> {
-        Ok(by_abs.get(abs).cloned())
-    }
-    fn fs_scan(
-        root: &Path,
-        _dir_re: Option<&regex::Regex>,
-        _file_re: Option<&regex::Regex>,
-    ) -> std::io::Result<(ScannedFolder, ScanReport)> {
-        let svc = test_service();
-        let folder = ScannedFolder::new(
-            root.to_path_buf(),
-            Vec::new(),
-            HashMap::new(),
-            HashMap::new(),
-            None,
-            None,
-            svc,
-        );
-        Ok((folder, ScanReport::default()))
-    }
-    fn test_service() -> FileService {
-        FileService::from_fns(fs_read, fs_write, fs_scan, fs_lookup)
-    }
-
-    // ── Env serialization (avoid races on WHISPERCMS_DIR) ────────────────────
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-    fn with_env_var<F: FnOnce() -> T, T>(key: &str, val: Option<&str>, f: F) -> T {
-        let _g = env_lock().lock().unwrap();
-        let prev = env::var_os(key);
-        match val {
-            Some(v) => env::set_var(key, v),
-            None => env::remove_var(key),
-        }
-        let out = f();
-        match prev {
-            Some(v) => env::set_var(key, v),
-            None => env::remove_var(key),
-        }
-        out
-    }
-
-    // ── Minimal noop waker (no futures crate needed) ─────────────────────────
-    fn noop_waker() -> Waker {
-        fn no_op(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            raw_waker()
-        }
-        fn raw_waker() -> RawWaker {
-            RawWaker::new(
-                std::ptr::null(),
-                &RawWakerVTable::new(clone, no_op, no_op, no_op),
-            )
-        }
-        unsafe { Waker::from_raw(raw_waker()) }
-    }
-
-    // ── dir_must_exist (unit) ────────────────────────────────────────────────
-    #[test]
-    fn dir_validator_ok_for_existing_dir() {
-        let td = tempdir().expect("tmpdir");
-        let p = td.path().to_str().unwrap();
-        let out = dir_must_exist(p).expect("validator should accept existing dir");
-        assert_eq!(out, td.path());
-    }
-
-    #[test]
-    fn dir_validator_err_for_missing_path() {
-        let missing: PathBuf = if cfg!(windows) {
-            r"C:\__definitely__\__not__\__here__".into()
-        } else {
-            "/definitely/not/here/__whispercms__".into()
-        };
-        let err = dir_must_exist(missing.to_str().unwrap()).unwrap_err();
-        assert!(err.to_lowercase().contains("not found"));
-    }
-
-    #[test]
-    fn dir_validator_err_when_path_is_a_file() {
-        let f = NamedTempFile::new().unwrap();
-        let err = dir_must_exist(f.path().to_str().unwrap()).unwrap_err();
-        assert!(err.to_lowercase().contains("not a directory"));
-    }
-
-    // ── StartCmd parsing (derive) ────────────────────────────────────────────
-    #[test]
-    fn startcmd_parses_with_positional_dir() {
-        let td = tempdir().unwrap();
-        let args = ["whispercms", td.path().to_str().unwrap()];
-        let parsed = StartCmd::try_parse_from(args).expect("parse positional dir");
-        assert_eq!(parsed.dir, td.path());
-    }
-
-    #[test]
-    fn startcmd_parses_with_env_when_no_positional() {
-        let td = tempdir().unwrap();
-        with_env_var("WHISPERCMS_DIR", Some(td.path().to_str().unwrap()), || {
-            let parsed = StartCmd::try_parse_from(["whispercms"]).expect("parse from env");
-            assert_eq!(parsed.dir, td.path());
-        });
-    }
-
-    #[test]
-    fn startcmd_fails_when_missing_both_env_and_arg() {
-        with_env_var("WHISPERCMS_DIR", None, || {
-            let err = StartCmd::try_parse_from(["whispercms"]).unwrap_err();
-            use clap::error::ErrorKind::*;
-            assert!(
-                matches!(
-                    err.kind(),
-                    MissingRequiredArgument | DisplayHelpOnMissingArgumentOrSubcommand
-                ),
-                "unexpected error kind: {:?}",
-                err.kind()
-            );
-        });
-    }
-
-    #[test]
-    fn startcmd_fails_when_positional_is_file() {
-        let f = NamedTempFile::new().unwrap();
-        let err = StartCmd::try_parse_from(["whispercms", f.path().to_str().unwrap()]).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ValueValidation);
-        assert!(err.to_string().to_lowercase().contains("not a directory"));
-    }
-
-    #[test]
-    fn startcmd_fails_when_positional_missing_path() {
-        let missing: PathBuf = if cfg!(windows) {
-            r"C:\__definitely__\__not__\__here__".into()
-        } else {
-            "/definitely/not/here/__whispercms__".into()
-        };
-        let err = StartCmd::try_parse_from(["whispercms", missing.to_str().unwrap()]).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ValueValidation);
-        assert!(err.to_string().to_lowercase().contains("not found"));
-    }
-
-    // ── Dispatcher / run_cli (attach Settings to ctx) ────────────────────────
-    #[tokio::test]
-    async fn run_cli_returns_success_on_valid_dir_with_settings() {
-        let td = tempdir().unwrap();
-
-        // Create content directory
-        fs::create_dir(td.path().join("content")).unwrap();
-
-        // Minimal, valid settings (if your start logic requires them)
-        let settings = Settings {
-            server: Some(Server {
-                ip: "127.0.0.1".parse().unwrap(),
-                port: 8080,
-            }),
-        };
-
-        let ctx = AppCtx::new()
-            .set_file_service(test_service())
-            .set_root(td.path())
-            .set_settings(settings);
-
-        let cmd = Commands::Start(StartCmd {
-            dir: td.path().to_path_buf(),
-        });
-        let code = run_cli(ctx, cmd).await;
-        assert_eq!(code, ExitCode::SUCCESS);
-    }
-
-    #[tokio::test]
-    async fn run_cli_returns_nonzero_on_bogus_dir_even_with_settings() {
-        let bogus: PathBuf = if cfg!(windows) {
-            r"C:\__definitely__\__not__\__here__".into()
-        } else {
-            "/definitely/not/here/__whispercms__".into()
-        };
-
-        let settings = Settings {
-            server: Some(Server {
-                ip: "127.0.0.1".parse().unwrap(),
-                port: 8080,
-            }),
-        };
-
-        let ctx = AppCtx::new()
-            .set_file_service(test_service())
-            .set_root(&bogus)
-            .set_settings(settings);
-
-        let cmd = Commands::Start(StartCmd { dir: bogus });
-        let code = run_cli(ctx, cmd).await;
-        assert_ne!(code, ExitCode::SUCCESS, "expected non-zero exit on failure");
-    }
-
-    #[test]
-    fn dispatcher_ready_ok() {
-        let mut d = Dispatcher;
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let ready = d.poll_ready(&mut cx);
-        assert!(matches!(ready, Poll::Ready(Ok(()))));
     }
 }

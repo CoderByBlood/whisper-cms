@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::core::error::CoreError;
-use crate::render::error::RenderError;
+use serve::render::error::RenderError;
 
 #[derive(Debug, Error)]
 pub enum HttpError {

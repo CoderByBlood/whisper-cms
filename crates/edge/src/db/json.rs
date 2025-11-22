@@ -1,20 +1,14 @@
-use crate::mql::index::IndexRecord;
-use crate::mql::{IndexBackend, IndexConfig, JsonStore};
+use adapt::mql::index::{BoolField, I64Field, IndexRecord, StringField};
+use adapt::mql::{IndexBackend, IndexConfig, JsonStore};
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, Utc};
-use indexed_json::{IndexEntry, Indexable as IjIndexable, IndexableField, IndexedJson, Query};
+use chrono::Datelike;
+use indexed_json::{IndexEntry, IndexableField, IndexedJson, Query};
 use serde_json::Value as Json;
-use smallvec::SmallVec;
-use std::any::Any;
-use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-// indexed_json uses anyhow::Result in its traits; we must match that signature
-use anyhow::Result as AnyResult;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // indexed_json-backed JsonStore and IndexBackend
@@ -259,342 +253,22 @@ impl IndexBackend for IndexedJsonIndexBackend {
         self.run_query(&q).await
     }
 }
-// ─────────────────────────────────────────────────────────────────────────────
-// IndexableField implementations for IndexRecord fields
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Debug)]
-struct StringField {
-    key: &'static str,
-    value: String,
-}
-
-impl StringField {
-    fn new(key: &'static str, value: String) -> Self {
-        Self { key, value }
-    }
-}
-
-impl Display for StringField {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value)
-    }
-}
-
-impl IndexableField for StringField {
-    fn key(&self) -> &'static str {
-        self.key
-    }
-
-    fn byte_compareable(&self) -> bool {
-        true // UTF-8 lexicographic matches string ordering
-    }
-
-    fn encode(&self, buf: &mut SmallVec<[u8; 128]>) -> AnyResult<()> {
-        buf.clear();
-        buf.extend_from_slice(self.value.as_bytes());
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-#[derive(Debug)]
-struct I64Field {
-    key: &'static str,
-    value: i64,
-}
-
-impl I64Field {
-    fn new(key: &'static str, value: i64) -> Self {
-        Self { key, value }
-    }
-}
-
-impl Display for I64Field {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value)
-    }
-}
-
-impl IndexableField for I64Field {
-    fn key(&self) -> &'static str {
-        self.key
-    }
-
-    fn byte_compareable(&self) -> bool {
-        true // big-endian encoding preserves numeric order
-    }
-
-    fn encode(&self, buf: &mut SmallVec<[u8; 128]>) -> AnyResult<()> {
-        buf.clear();
-        buf.extend_from_slice(&self.value.to_be_bytes());
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-#[derive(Debug)]
-struct BoolField {
-    key: &'static str,
-    value: bool,
-}
-
-impl BoolField {
-    fn new(key: &'static str, value: bool) -> Self {
-        Self { key, value }
-    }
-}
-
-impl Display for BoolField {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value)
-    }
-}
-
-impl IndexableField for BoolField {
-    fn key(&self) -> &'static str {
-        self.key
-    }
-
-    fn byte_compareable(&self) -> bool {
-        true // 0 < 1 works fine
-    }
-
-    fn encode(&self, buf: &mut SmallVec<[u8; 128]>) -> AnyResult<()> {
-        buf.clear();
-        buf.push(if self.value { 1 } else { 0 });
-        Ok(())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// impl indexed_json::Indexable for IndexRecord
-// ─────────────────────────────────────────────────────────────────────────────
-
-impl IjIndexable for IndexRecord {
-    type Iter = Vec<Box<dyn IndexableField>>;
-
-    fn index(&self) -> Self::Iter {
-        let mut out: Vec<Box<dyn IndexableField>> = Vec::new();
-
-        // Root fields
-        out.push(Box::new(StringField::new("id", self.id.clone())));
-
-        if let Some(kind) = &self.kind {
-            out.push(Box::new(StringField::new("type", kind.clone())));
-        }
-        if let Some(slug) = &self.slug {
-            out.push(Box::new(StringField::new("slug", slug.clone())));
-        }
-        if let Some(parent) = &self.parent {
-            out.push(Box::new(StringField::new("parent", parent.clone())));
-        }
-
-        // content.*
-        if let Some(title) = &self.content.title {
-            out.push(Box::new(StringField::new("content.title", title.clone())));
-        }
-        if let Some(section) = &self.content.section {
-            out.push(Box::new(StringField::new(
-                "content.section",
-                section.clone(),
-            )));
-        }
-
-        // publish.*
-        if let Some(status) = &self.publish.status {
-            out.push(Box::new(StringField::new("publish.status", status.clone())));
-        }
-        if let Some(date) = &self.publish.date {
-            out.push(Box::new(StringField::new("publish.date", date.clone())));
-        }
-        if let Some(modified) = &self.publish.modified {
-            out.push(Box::new(StringField::new(
-                "publish.modified",
-                modified.clone(),
-            )));
-        }
-
-        // nav.*
-        if let Some(order) = self.nav.menu_order {
-            out.push(Box::new(I64Field::new("nav.menu_order", order)));
-        }
-        if let Some(visible) = self.nav.menu_visible {
-            out.push(Box::new(BoolField::new("nav.menu_visible", visible)));
-        }
-
-        // tax.* (multi-valued: one index entry per category/tag/series item)
-        for cat in &self.tax.categories {
-            out.push(Box::new(StringField::new("tax.categories", cat.clone())));
-        }
-        for tag in &self.tax.tags {
-            out.push(Box::new(StringField::new("tax.tags", tag.clone())));
-        }
-        for series in &self.tax.series {
-            out.push(Box::new(StringField::new("tax.series", series.clone())));
-        }
-
-        // i18n.*
-        if let Some(lang) = &self.i18n.lang {
-            out.push(Box::new(StringField::new("i18n.lang", lang.clone())));
-        }
-        if let Some(cid) = &self.i18n.canonical_id {
-            out.push(Box::new(StringField::new("i18n.canonical_id", cid.clone())));
-        }
-
-        // author.*
-        if let Some(author) = &self.author.author {
-            out.push(Box::new(StringField::new("author.author", author.clone())));
-        }
-        for co in &self.author.co_authors {
-            out.push(Box::new(StringField::new("author.co_authors", co.clone())));
-        }
-
-        out
-    }
-
-    fn timestamp(&self) -> DateTime<Utc> {
-        // Prefer publish.date if present and parseable; otherwise now().
-        if let Some(date_str) = &self.publish.date {
-            if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
-                return dt.with_timezone(&Utc);
-            }
-        }
-        Utc::now()
-    }
-
-    fn dyn_partial_cmp(&self, i: &dyn IndexableField) -> Option<Ordering> {
-        match i.key() {
-            // Root
-            "id" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                Some(self.id.cmp(&f.value))
-            }
-            "type" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.kind.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "slug" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.slug.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "parent" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.parent.as_ref().map(|v| v.cmp(&f.value))
-            }
-
-            // content.*
-            "content.title" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.content.title.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "content.section" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.content.section.as_ref().map(|v| v.cmp(&f.value))
-            }
-
-            // publish.*
-            "publish.status" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.publish.status.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "publish.date" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.publish.date.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "publish.modified" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.publish.modified.as_ref().map(|v| v.cmp(&f.value))
-            }
-
-            // nav.*
-            "nav.menu_order" => {
-                let f = i.as_any().downcast_ref::<I64Field>()?;
-                self.nav.menu_order.map(|v| v.cmp(&f.value))
-            }
-            "nav.menu_visible" => {
-                let f = i.as_any().downcast_ref::<BoolField>()?;
-                self.nav.menu_visible.map(|v| v.cmp(&f.value))
-            }
-
-            // tax.*: treat "contains" as Equal
-            "tax.categories" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                if self.tax.categories.iter().any(|c| c == &f.value) {
-                    Some(Ordering::Equal)
-                } else {
-                    None
-                }
-            }
-            "tax.tags" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                if self.tax.tags.iter().any(|t| t == &f.value) {
-                    Some(Ordering::Equal)
-                } else {
-                    None
-                }
-            }
-            "tax.series" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                if self.tax.series.iter().any(|s| s == &f.value) {
-                    Some(Ordering::Equal)
-                } else {
-                    None
-                }
-            }
-
-            // i18n.*
-            "i18n.lang" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.i18n.lang.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "i18n.canonical_id" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.i18n.canonical_id.as_ref().map(|v| v.cmp(&f.value))
-            }
-
-            // author.*
-            "author.author" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                self.author.author.as_ref().map(|v| v.cmp(&f.value))
-            }
-            "author.co_authors" => {
-                let f = i.as_any().downcast_ref::<StringField>()?;
-                if self.author.co_authors.iter().any(|c| c == &f.value) {
-                    Some(Ordering::Equal)
-                } else {
-                    None
-                }
-            }
-
-            _ => None,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adapt::mql::index::IndexRecord;
+    use adapt::mql::IndexConfig;
     use chrono::{NaiveDate, Timelike};
+    use indexed_json::Indexable;
     use serde_json::json;
+    use smallvec::SmallVec;
+    use std::cmp::Ordering;
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio;
-
-    use crate::mql::index::IndexRecord;
-    use crate::mql::IndexConfig;
 
     // ─────────────────────────────────────────────────────────────
     // Helpers

@@ -1,6 +1,6 @@
 // crates/adapt/src/render/html_rewriter.rs
 
-use crate::core::recommendation::{BodyPatch, BodyPatchKind, DomOp};
+use super::recommendation::{BodyPatch, BodyPatchKind, DomOp};
 use lol_html::{
     element,
     html_content::{ContentType, Element},
@@ -158,7 +158,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::recommendation::{BodyPatch, DomOp};
+    use crate::render::recommendation::{BodyPatch, DomOp};
     use lol_html::rewrite_str;
 
     // Helper to run rewrite_str using our Settings builder.

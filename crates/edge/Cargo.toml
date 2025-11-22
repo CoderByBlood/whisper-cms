@@ -40,6 +40,8 @@ bytes = { workspace = true }
 toml = { workspace = true }
 form_urlencoded = { workspace = true }
 uuid = { workspace = true }
+chrono = { workspace = true }
+smallvec = { workspace = true }
 
 domain = { path = "../domain" }
 adapt = { path = "../adapt" }

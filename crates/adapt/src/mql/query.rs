@@ -289,12 +289,99 @@ fn apply_skip_limit<Id: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mql::store::mem::{InMemoryIndexBackend, InMemoryJsonStore};
+    use async_trait::async_trait;
     use serde_json::json;
-    use std::collections::HashSet;
-
-    // We use tokio because QueryPlanner::execute is async.
+    use std::collections::{HashMap, HashSet};
     use tokio;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Local test implementations: JsonStore + IndexBackend
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Simple in-memory JsonStore used only for tests.
+    #[derive(Debug, Clone)]
+    struct TestStore {
+        docs: Vec<Json>,
+    }
+
+    impl TestStore {
+        fn new(docs: Vec<Json>) -> Self {
+            Self { docs }
+        }
+    }
+
+    #[async_trait]
+    impl JsonStore for TestStore {
+        type Id = usize;
+
+        async fn all_ids(&self) -> Vec<Self::Id> {
+            (0..self.docs.len()).collect()
+        }
+
+        async fn get(&self, id: Self::Id) -> Option<Json> {
+            self.docs.get(id).cloned()
+        }
+    }
+
+    /// Small helper to build a key for the test index map.
+    fn key_for(field: &str, value: &Json) -> (String, String) {
+        (field.to_string(), value.to_string())
+    }
+
+    /// IndexBackend used only by tests. It is configured explicitly per test to
+    /// return precomputed ID sets for (field, value) equality lookups.
+    #[derive(Debug, Default, Clone)]
+    struct TestIndex {
+        /// Mapping: (field, value_json_string) -> set of IDs
+        eq_map: HashMap<(String, String), HashSet<usize>>,
+    }
+
+    impl TestIndex {
+        fn new(eq_map: HashMap<(String, String), HashSet<usize>>) -> Self {
+            Self { eq_map }
+        }
+
+        fn empty() -> Self {
+            Self {
+                eq_map: HashMap::new(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl IndexBackend for TestIndex {
+        type Id = usize;
+
+        async fn lookup_eq(&self, field: &str, value: &Json) -> Option<HashSet<Self::Id>> {
+            let k = key_for(field, value);
+            self.eq_map.get(&k).cloned()
+        }
+
+        async fn lookup_in(&self, field: &str, values: &[Json]) -> Option<HashSet<Self::Id>> {
+            let mut acc: HashSet<Self::Id> = HashSet::new();
+            for v in values {
+                let k = key_for(field, v);
+                if let Some(ids) = self.eq_map.get(&k) {
+                    acc.extend(ids.iter().copied());
+                }
+            }
+            if acc.is_empty() {
+                None
+            } else {
+                Some(acc)
+            }
+        }
+
+        async fn lookup_range(
+            &self,
+            _field: &str,
+            _min: Option<&Json>,
+            _max: Option<&Json>,
+        ) -> Option<HashSet<Self::Id>> {
+            // Test index doesn’t support range queries yet.
+            None
+        }
+    }
 
     // ─────────────────────────────────────────────────────────────────────
     // collect_indexable_constraints tests
@@ -597,7 +684,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // QueryPlanner + InMemoryJsonStore / InMemoryIndexBackend tests
+    // QueryPlanner + TestStore / TestIndex tests
     // ─────────────────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -608,11 +695,9 @@ mod tests {
             json!({ "type": "page", "slug": "c", "draft": false }),
         ];
 
-        let store = InMemoryJsonStore::new(docs);
+        let store = TestStore::new(docs);
         let config = IndexConfig::new([] as [&str; 0]); // no indexed fields
-        let index = InMemoryIndexBackend {
-            field_value_to_ids: Default::default(),
-        };
+        let index = TestIndex::empty(); // should never be used
 
         // Filter: type == "post" AND draft == false
         let filter = Filter::And(vec![
@@ -646,10 +731,17 @@ mod tests {
             json!({ "type": "page", "slug": "c", "draft": false }),
         ];
 
-        let store = InMemoryJsonStore::new(docs);
+        let store = TestStore::new(docs);
         // Index on "type" only.
         let config = IndexConfig::new(["type"]);
-        let index = InMemoryIndexBackend::build(&config, &store).await;
+
+        // Build eq_map for type == "post"
+        let mut eq_map: HashMap<(String, String), HashSet<usize>> = HashMap::new();
+        eq_map.insert(
+            key_for("type", &json!("post")),
+            HashSet::from([0usize, 1usize]),
+        );
+        let index = TestIndex::new(eq_map);
 
         // Filter: type == "post"
         let filter = Filter::Field(FieldExpr {
@@ -685,11 +777,29 @@ mod tests {
             json!({ "type": "page", "slug": "d", "draft": false }),
         ];
 
-        let store = InMemoryJsonStore::new(docs);
+        let store = TestStore::new(docs);
 
         // Index on all fields we’re going to constrain.
         let config = IndexConfig::new(["type", "draft", "slug"]);
-        let index = InMemoryIndexBackend::build(&config, &store).await;
+
+        // Build eq_map:
+        // type == "post" -> {0,1,2}
+        // draft == false -> {0,1,3}
+        // slug == "a" -> {0}
+        // slug == "b" -> {1}
+        let mut eq_map: HashMap<(String, String), HashSet<usize>> = HashMap::new();
+        eq_map.insert(
+            key_for("type", &json!("post")),
+            HashSet::from([0usize, 1usize, 2usize]),
+        );
+        eq_map.insert(
+            key_for("draft", &json!(false)),
+            HashSet::from([0usize, 1usize, 3usize]),
+        );
+        eq_map.insert(key_for("slug", &json!("a")), HashSet::from([0usize]));
+        eq_map.insert(key_for("slug", &json!("b")), HashSet::from([1usize]));
+
+        let index = TestIndex::new(eq_map);
 
         // Filter:
         //   type == "post"
@@ -738,9 +848,16 @@ mod tests {
             json!({ "type": "post", "slug": "b", "draft": true }),
         ];
 
-        let store = InMemoryJsonStore::new(docs);
+        let store = TestStore::new(docs);
         let config = IndexConfig::new(["type"]);
-        let index = InMemoryIndexBackend::build(&config, &store).await;
+
+        // Only map type == "post" -> {0,1}; no mapping for "page".
+        let mut eq_map: HashMap<(String, String), HashSet<usize>> = HashMap::new();
+        eq_map.insert(
+            key_for("type", &json!("post")),
+            HashSet::from([0usize, 1usize]),
+        );
+        let index = TestIndex::new(eq_map);
 
         // Filter: type == "page" (no pages in data)
         let filter = Filter::Field(FieldExpr {
@@ -770,9 +887,12 @@ mod tests {
             json!({ "type": "page", "slug": "b" }),
         ];
 
-        let store = InMemoryJsonStore::new(docs);
+        let store = TestStore::new(docs);
         let config = IndexConfig::new(["type"]);
-        let index = InMemoryIndexBackend::build(&config, &store).await;
+
+        let mut eq_map: HashMap<(String, String), HashSet<usize>> = HashMap::new();
+        eq_map.insert(key_for("type", &json!("page")), HashSet::from([1usize]));
+        let index = TestIndex::new(eq_map);
 
         let filter = Filter::Field(FieldExpr {
             path: "type".to_string(),
