@@ -1,3 +1,5 @@
+// crates/adapt/src/render/pipeline.rs
+
 use super::error::RenderError;
 use super::html_rewriter::build_lol_settings_from_body_patches;
 use super::template::TemplateEngine;
@@ -34,7 +36,6 @@ where
             BodyPatchKind::Regex {
                 pattern,
                 replacement,
-                ..
             } => {
                 // Compile regex; invalid ones are treated as patch errors.
                 match Regex::new(pattern) {
@@ -80,10 +81,75 @@ where
         let settings = build_lol_settings_from_body_patches(&html_dom_patches);
         let rewritten =
             rewrite_str(&html_text, settings).map_err(|e| RenderError::LolHtml(e.to_string()))?;
-        out.write_all(rewritten.as_bytes())?;
+        out.write_all(rewritten.as_bytes())
+            .map_err(RenderError::Io)?;
     } else {
         // No HtmlDom patches; write regex-transformed HTML directly.
-        out.write_all(html_text.as_bytes())?;
+        out.write_all(html_text.as_bytes())
+            .map_err(RenderError::Io)?;
+    }
+
+    Ok(())
+}
+
+/// Render a *raw HTML string* into the given writer, applying:
+///
+/// 1) Regex patches on the HTML text
+/// 2) HtmlDom patches via lol_html
+pub fn render_html_string_to<W: Write>(
+    html: &str,
+    body_patches: &[BodyPatch],
+    mut out: W,
+) -> Result<(), RenderError> {
+    let mut regex_specs = Vec::new();
+    let mut html_dom_patches = Vec::new();
+
+    for patch in body_patches {
+        match &patch.kind {
+            BodyPatchKind::Regex {
+                pattern,
+                replacement,
+            } => match Regex::new(pattern) {
+                Ok(re) => {
+                    regex_specs.push((re, replacement.clone()));
+                }
+                Err(e) => {
+                    return Err(RenderError::InvalidRegex {
+                        pattern: pattern.clone(),
+                        error: e.to_string(),
+                    });
+                }
+            },
+            BodyPatchKind::HtmlDom { .. } => {
+                html_dom_patches.push(patch.clone());
+            }
+            BodyPatchKind::JsonPatch { .. } => {
+                // Ignored for HTML responses.
+            }
+        }
+    }
+
+    // 1) Start from the raw HTML string.
+    let mut html_text = html.to_owned();
+
+    // 2) Apply regex patches over the full HTML text (in order).
+    for (re, replacement) in &regex_specs {
+        html_text = re
+            .replace_all(&html_text, replacement.as_str())
+            .into_owned();
+    }
+
+    // 3) Apply HtmlDom patches using lol_html if any exist.
+    if !html_dom_patches.is_empty() {
+        let settings = build_lol_settings_from_body_patches(&html_dom_patches);
+        let rewritten =
+            rewrite_str(&html_text, settings).map_err(|e| RenderError::LolHtml(e.to_string()))?;
+        out.write_all(rewritten.as_bytes())
+            .map_err(RenderError::Io)?;
+    } else {
+        // No HtmlDom patches; write regex-transformed HTML directly.
+        out.write_all(html_text.as_bytes())
+            .map_err(RenderError::Io)?;
     }
 
     Ok(())
@@ -109,7 +175,6 @@ pub fn render_json_to<W: Write>(
             BodyPatchKind::Regex {
                 pattern,
                 replacement,
-                ..
             } => match Regex::new(pattern) {
                 Ok(re) => {
                     regex_specs.push((re, replacement.clone()));
@@ -150,7 +215,6 @@ pub fn render_json_to<W: Write>(
 
     // 4) Apply JSON Patch body patches.
     for patch_doc in json_patches {
-        // NOTE: json-patch expects a Patch (Vec<PatchOperation>), not raw JSON.
         let patch: json_patch::Patch = serde_json::from_value(patch_doc.clone())?;
         json_patch::patch(&mut patched_value, &patch)?;
     }

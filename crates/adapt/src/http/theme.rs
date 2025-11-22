@@ -1,352 +1,304 @@
-use super::error::HttpError;
+// crates/adapt/src/http/theme.rs
+
 use crate::core::context::{RequestContext, ResponseBodySpec};
-use crate::core::recommendation::{BodyPatch, HeaderPatchKind};
-use crate::render::{render_html_template_to, render_json_to, TemplateEngine};
-use axum::body::Body;
-use axum::response::Response;
-use http::Request;
-use serde_json::Value as Json;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use tower::Service;
+use crate::http::app::AppState;
+use crate::http::resolver::{build_request_context, ContentResolver};
+use axum::{
+    body::Body,
+    extract::{Path, State},
+    http::Request,
+    response::Response,
+};
+use std::borrow::Cow;
+use std::collections::HashMap;
 
-/// Trait implemented by a theme in Phase 3 (Rust-side).
-///
-/// Later phases will replace the implementation with JS `handle(ctx)`.
-pub trait ThemeHandler: Send + Sync + 'static {
-    fn handle(&self, ctx: &mut RequestContext) -> Result<(), HttpError>;
-}
+/// Axum handler that resolves content and then delegates to the theme runtime.
+pub async fn theme_entrypoint(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    req: Request<Body>,
+) -> Result<Response, Response> {
+    // Resolve content by path + method.
+    let resolved = state.resolver.resolve(&path, req.method()).map_err(|e| {
+        Response::builder()
+            .status(e.to_status())
+            .body(Body::from(format!("Resolve error: {e}")))
+            .unwrap()
+    })?;
 
-/// A simple example theme handler used for Phase 3.
-///
-/// It looks at the content kind and:
-/// - For HtmlContent: uses a hard-coded template name "default" and model = front_matter.
-/// - For JsonContent: uses JsonValue = { "ok": true }.
-/// This is just to validate the pipeline; real themes will come later.
-pub struct SimpleThemeHandler;
-
-impl ThemeHandler for SimpleThemeHandler {
-    fn handle(&self, ctx: &mut RequestContext) -> Result<(), HttpError> {
-        // For now, we let the outer layers set up the ResponseBodySpec.
-        // This simple handler is mostly a placeholder. You could imagine:
-        //
-        // - Choosing template based on front matter.
-        // - Populating ctx.response_spec.model from front matter + content.
-        //
-        // In this phase, assume ctx.response_spec was already set up.
-        if let ResponseBodySpec::Unset = ctx.response_spec.body {
-            // Fallback: basic JSON response to prove the path works.
-            ctx.response_spec.body = ResponseBodySpec::JsonValue(Json::from(serde_json::json!({
-                "ok": true,
-                "path": ctx.path,
-            })));
-        }
-
-        Ok(())
-    }
-}
-
-/// ThemeService drives the theme + render pipeline for a single request.
-///
-/// It expects a RequestContext to have been inserted into the request
-/// extensions by an outer layer (e.g. PluginMiddleware).
-pub struct ThemeService<H, T>
-where
-    H: ThemeHandler,
-    T: TemplateEngine,
-{
-    theme: Arc<H>,
-    template_engine: T,
-}
-
-impl<H, T> ThemeService<H, T>
-where
-    H: ThemeHandler,
-    T: TemplateEngine,
-{
-    pub fn new(theme: H, template_engine: T) -> Self {
-        Self {
-            theme: Arc::new(theme),
-            template_engine,
+    // Very simple query string parsing into a HashMap<String, String>.
+    let mut query_params = HashMap::new();
+    if let Some(q) = req.uri().query() {
+        for pair in q.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let mut it = pair.splitn(2, '=');
+            let k = it.next().unwrap_or("").to_string();
+            if k.is_empty() {
+                continue;
+            }
+            let v = it.next().unwrap_or("").to_string();
+            query_params.insert(k, v);
         }
     }
+
+    // Build RequestContext from HTTP request + resolved content.
+    let ctx: RequestContext = build_request_context(
+        path.clone(),
+        req.method().clone(),
+        req.headers().clone(),
+        query_params,
+        resolved,
+    );
+
+    // Decide which theme to use. For Phase 3, we always use "default".
+    // This can be extended later to inspect front matter / config.
+    let theme_id = Cow::Borrowed("default").into_owned();
+
+    // Render via theme runtime actor.
+    let body_spec = state.theme_rt.render(&theme_id, ctx).await.map_err(|e| {
+        Response::builder()
+            .status(500)
+            .body(Body::from(format!("Theme runtime error: {e}")))
+            .unwrap()
+    })?;
+
+    Ok(response_from_body_spec(body_spec))
 }
 
-impl<H, T> Service<Request<Body>> for ThemeService<H, T>
-where
-    H: ThemeHandler,
-    T: TemplateEngine + Clone + Send + 'static,
-{
-    type Response = Response<Body>;
-    type Error = HttpError;
-    type Future = futures::future::BoxFuture<'static, Result<Response<Body>, HttpError>>;
+/// Helper: map ResponseBodySpec -> hyper::Response<Body>.
+fn response_from_body_spec(spec: ResponseBodySpec) -> Response {
+    match spec {
+        ResponseBodySpec::HtmlString(s) => Response::builder()
+            .status(200)
+            .header("content-type", "text/html; charset=utf-8")
+            .body(Body::from(s))
+            .unwrap(),
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // ThemeService has no internal backpressure.
-        Poll::Ready(Ok(()))
-    }
+        ResponseBodySpec::JsonValue(v) => Response::builder()
+            .status(200)
+            .header("content-type", "application/json; charset=utf-8")
+            .body(Body::from(v.to_string()))
+            .unwrap(),
 
-    fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-        let theme = Arc::clone(&self.theme);
-        let template_engine = self.template_engine.clone();
+        // For now, we just dump the template name and JSON model.
+        // Later this can be hooked up to a real templating engine.
+        ResponseBodySpec::HtmlTemplate { template, model } => {
+            let rendered = format!("TEMPLATE: {template}\nMODEL: {}", model.to_string());
+            Response::builder()
+                .status(200)
+                .header("content-type", "text/html; charset=utf-8")
+                .body(Body::from(rendered))
+                .unwrap()
+        }
 
-        // Extract RequestContext from extensions.
-        let mut ctx = match req.extensions_mut().remove::<RequestContext>() {
-            Some(c) => c,
-            None => return Box::pin(async { Err(HttpError::MissingContext) }),
-        };
-
-        Box::pin(async move {
-            // Let the theme populate ResponseSpec.
-            theme.handle(&mut ctx)?;
-
-            // 1. Apply header patches.
-            for hp in &ctx.recommendations.header_patches {
-                match hp.kind {
-                    HeaderPatchKind::Set | HeaderPatchKind::Append | HeaderPatchKind::Remove => {
-                        hp.apply_to_headers(&mut ctx.response_spec.headers);
-                    }
-                }
-            }
-
-            // 2. Apply model patches if this is an HtmlTemplate.
-            if let ResponseBodySpec::HtmlTemplate { ref mut model, .. } = ctx.response_spec.body {
-                for mp in &ctx.recommendations.model_patches {
-                    if let Err(e) = mp.apply_to_model(model) {
-                        // In this pipeline, a failed model patch should not crash the request;
-                        // we log and continue instead of turning it into an HttpError.
-                        eprintln!("model patch failed: {}", e);
-                    }
-                }
-            }
-
-            // 3. Render body with body patches (BodyRegex + HtmlDom/JsonPatch).
-            let mut body_bytes: Vec<u8> = Vec::new();
-            let body_patches: &[BodyPatch] = &ctx.recommendations.body_patches;
-
-            match &ctx.response_spec.body {
-                ResponseBodySpec::HtmlTemplate { template, model } => {
-                    render_html_template_to(
-                        &template_engine,
-                        template,
-                        model,
-                        body_patches,
-                        &mut body_bytes,
-                    )?;
-                }
-                ResponseBodySpec::HtmlString(html) => {
-                    // Run body regex + HtmlDom over a single string.
-                    render_html_template_to(
-                        &template_engine,
-                        "__inline_html__",
-                        &serde_json::json!({ "body": html }),
-                        body_patches,
-                        &mut body_bytes,
-                    )?;
-                    // Note: in a real system you'd have a dedicated path for raw HTML.
-                }
-                ResponseBodySpec::JsonValue(value) => {
-                    render_json_to(value, body_patches, &mut body_bytes)?;
-                }
-                ResponseBodySpec::None => {
-                    // Explicit "no body" – leave body_bytes empty.
-                    // The builder below will turn this into an empty response body.
-                }
-                ResponseBodySpec::Unset => {
-                    // If still unset, this is an internal error in the theme.
-                    return Err(HttpError::Other("missing body spec in theme".to_string()));
-                }
-            }
-
-            // 4. Build the final http::Response using the status + headers from ctx.response_spec.
-            let mut builder = http::Response::builder().status(ctx.response_spec.status);
-
-            for (name, value) in ctx.response_spec.headers.iter() {
-                builder = builder.header(name, value);
-            }
-
-            let body = if body_bytes.is_empty() {
-                Body::empty()
-            } else {
-                Body::from(body_bytes)
-            };
-
-            let response = builder
-                .body(body)
-                .map_err(|e| HttpError::Other(e.to_string()))?;
-
-            Ok(response)
-        })
+        ResponseBodySpec::None | ResponseBodySpec::Unset => {
+            Response::builder().status(204).body(Body::empty()).unwrap()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content::ContentKind;
-    use crate::core::context::{RequestContext, ResponseBodySpec, ResponseSpec};
-    use http::{HeaderMap, Method};
+    use axum::body::to_bytes;
     use serde_json::json;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
 
-    /// Helper: construct a RequestContext with a specific ResponseBodySpec.
-    fn mk_ctx_with_body(body: ResponseBodySpec, path: &str) -> RequestContext {
-        let headers = HeaderMap::new();
-        let query_params: HashMap<String, String> = HashMap::new();
-        let content_kind = ContentKind::Html;
-        let front_matter = json!({"title": "Test"});
-        let body_path = PathBuf::from("/tmp/content.html");
-        let theme_config = json!({});
-        let plugin_configs: HashMap<String, serde_json::Value> = HashMap::new();
+    // ─────────────────────────────────────────────────────────────────────────
+    // ResponseBodySpec → Response mapping tests
+    // ─────────────────────────────────────────────────────────────────────────
 
-        let mut ctx = RequestContext::new(
-            path.to_string(),
-            Method::GET,
-            headers,
-            query_params,
-            content_kind,
-            front_matter,
-            body_path,
-            theme_config,
-            plugin_configs,
+    #[tokio::test]
+    async fn html_string_maps_to_200_and_html_content_type() {
+        let spec = ResponseBodySpec::HtmlString("<h1>Hello</h1>".to_string());
+
+        let resp = response_from_body_spec(spec);
+
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let content_type = resp.headers().get("content-type").unwrap();
+        assert_eq!(
+            content_type.to_str().unwrap(),
+            "text/html; charset=utf-8",
+            "HtmlString responses should have HTML content-type"
         );
 
-        ctx.response_spec = ResponseSpec {
-            status: ctx.response_spec.status, // keep default 200
-            headers: HeaderMap::new(),
-            body,
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert_eq!(
+            &body_bytes[..],
+            b"<h1>Hello</h1>",
+            "HtmlString body should be passed through as-is"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_value_maps_to_200_and_json_content_type() {
+        let value = json!({ "ok": true, "answer": 42 });
+        let spec = ResponseBodySpec::JsonValue(value.clone());
+
+        let resp = response_from_body_spec(spec);
+
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let content_type = resp.headers().get("content-type").unwrap();
+        assert_eq!(
+            content_type.to_str().unwrap(),
+            "application/json; charset=utf-8",
+            "JsonValue responses should have JSON content-type"
+        );
+
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("body should be valid JSON");
+
+        assert_eq!(
+            decoded, value,
+            "JSON content should round-trip correctly through the response body"
+        );
+    }
+
+    #[tokio::test]
+    async fn html_template_renders_template_and_model() {
+        let template = "page.html".to_string();
+        let model = json!({
+            "title": "Hello",
+            "count": 3,
+            "nested": { "k": "v" }
+        });
+
+        let spec = ResponseBodySpec::HtmlTemplate {
+            template: template.clone(),
+            model: model.clone(),
         };
 
-        ctx
-    }
+        let resp = response_from_body_spec(spec);
 
-    // ─────────────────────────────────────────────────────────────
-    // SimpleThemeHandler::handle
-    // ─────────────────────────────────────────────────────────────
+        assert_eq!(resp.status().as_u16(), 200);
 
-    #[test]
-    fn simple_theme_sets_default_json_when_body_unset() {
-        let handler = SimpleThemeHandler;
-        let path = "/some/path";
-        let mut ctx = mk_ctx_with_body(ResponseBodySpec::Unset, path);
-
-        handler
-            .handle(&mut ctx)
-            .expect("SimpleThemeHandler should not error");
-
-        match &ctx.response_spec.body {
-            ResponseBodySpec::JsonValue(val) => {
-                assert_eq!(val["ok"], json!(true));
-                assert_eq!(val["path"], json!(path));
-            }
-            other => panic!("expected JsonValue default body, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn simple_theme_does_not_overwrite_existing_html_template() {
-        let handler = SimpleThemeHandler;
-        let path = "/html/page";
-
-        let initial_model = json!({ "title": "Existing" });
-        let mut ctx = mk_ctx_with_body(
-            ResponseBodySpec::HtmlTemplate {
-                template: "my_template".to_string(),
-                model: initial_model.clone(),
-            },
-            path,
+        let content_type = resp.headers().get("content-type").unwrap();
+        assert_eq!(
+            content_type.to_str().unwrap(),
+            "text/html; charset=utf-8",
+            "HtmlTemplate responses should have HTML content-type"
         );
 
-        let before_spec = ctx.response_spec.clone();
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let body = String::from_utf8(body_bytes.to_vec()).expect("body should be UTF-8");
 
-        handler
-            .handle(&mut ctx)
-            .expect("SimpleThemeHandler should not error");
+        // Should follow the "TEMPLATE: {template}\nMODEL: {json}" pattern.
+        assert!(
+            body.starts_with("TEMPLATE: "),
+            "body should start with TEMPLATE: prefix, got: {body}"
+        );
+        assert!(
+            body.contains(&template),
+            "body should contain template name {template}, got: {body}"
+        );
+        assert!(
+            body.contains("MODEL: "),
+            "body should contain MODEL: prefix, got: {body}"
+        );
 
-        match &ctx.response_spec.body {
-            ResponseBodySpec::HtmlTemplate { template, model } => {
-                assert_eq!(template, "my_template");
-                assert_eq!(model, &initial_model);
-            }
-            other => panic!("expected HtmlTemplate to be preserved, got {:?}", other),
-        }
+        // Extract the MODEL portion roughly and ensure the JSON parses/equates.
+        let model_prefix = "MODEL: ";
+        let model_pos = body
+            .find(model_prefix)
+            .expect("body should contain MODEL: segment");
+        let json_str = &body[model_pos + model_prefix.len()..];
 
-        // Should not have changed status or headers.
-        assert_eq!(ctx.response_spec.status, before_spec.status);
-        assert_eq!(ctx.response_spec.headers, before_spec.headers);
-    }
-
-    #[test]
-    fn simple_theme_does_not_overwrite_existing_json_value() {
-        let handler = SimpleThemeHandler;
-        let path = "/api/data";
-
-        let initial_body = json!({ "foo": "bar", "ok": false });
-        let mut ctx = mk_ctx_with_body(ResponseBodySpec::JsonValue(initial_body.clone()), path);
-
-        let before_spec = ctx.response_spec.clone();
-
-        handler
-            .handle(&mut ctx)
-            .expect("SimpleThemeHandler should not error");
-
-        match &ctx.response_spec.body {
-            ResponseBodySpec::JsonValue(val) => {
-                assert_eq!(val, &initial_body);
-            }
-            other => panic!("expected JsonValue to be preserved, got {:?}", other),
-        }
-
-        // Status/headers unchanged.
-        assert_eq!(ctx.response_spec.status, before_spec.status);
-        assert_eq!(ctx.response_spec.headers, before_spec.headers);
-    }
-
-    #[test]
-    fn simple_theme_does_not_overwrite_none_body() {
-        let handler = SimpleThemeHandler;
-        let path = "/no/body";
-
-        let mut ctx = mk_ctx_with_body(ResponseBodySpec::None, path);
-        let before_spec = ctx.response_spec.clone();
-
-        handler
-            .handle(&mut ctx)
-            .expect("SimpleThemeHandler should not error");
-
-        match &ctx.response_spec.body {
-            ResponseBodySpec::None => { /* expected */ }
-            other => panic!("expected ResponseBodySpec::None, got {:?}", other),
-        }
-
-        // Status/headers unchanged.
-        assert_eq!(ctx.response_spec.status, before_spec.status);
-        assert_eq!(ctx.response_spec.headers, before_spec.headers);
-    }
-
-    #[test]
-    fn simple_theme_is_idempotent_when_body_already_set() {
-        let handler = SimpleThemeHandler;
-        let path = "/already/set";
-
-        let initial_body = json!({ "hello": "world" });
-        let mut ctx = mk_ctx_with_body(ResponseBodySpec::JsonValue(initial_body.clone()), path);
-
-        handler.handle(&mut ctx).expect("first call should succeed");
-
-        let after_first = ctx.response_spec.clone();
-
-        handler
-            .handle(&mut ctx)
-            .expect("second call should also succeed");
-
-        // After multiple calls, body should remain unchanged.
-        assert_eq!(ctx.response_spec.status, after_first.status);
-        assert_eq!(ctx.response_spec.headers, after_first.headers);
+        let parsed_model: serde_json::Value =
+            serde_json::from_str(json_str).expect("MODEL JSON should parse");
         assert_eq!(
-            format!("{:?}", ctx.response_spec.body),
-            format!("{:?}", after_first.body),
+            parsed_model, model,
+            "MODEL JSON in rendered body should match the original model"
+        );
+    }
+
+    #[tokio::test]
+    async fn none_maps_to_204_with_empty_body_and_no_content_type() {
+        let spec = ResponseBodySpec::None;
+
+        let resp = response_from_body_spec(spec);
+
+        assert_eq!(
+            resp.status().as_u16(),
+            204,
+            "None body should map to 204 No Content"
+        );
+
+        // No content-type header should be set for an empty body.
+        assert!(
+            resp.headers().get("content-type").is_none(),
+            "204 responses for None should not set content-type"
+        );
+
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert!(
+            body_bytes.is_empty(),
+            "204 responses should have an empty body for None"
+        );
+    }
+
+    #[tokio::test]
+    async fn unset_maps_to_204_with_empty_body_and_no_content_type() {
+        let spec = ResponseBodySpec::Unset;
+
+        let resp = response_from_body_spec(spec);
+
+        assert_eq!(
+            resp.status().as_u16(),
+            204,
+            "Unset body should map to 204 No Content"
+        );
+
+        assert!(
+            resp.headers().get("content-type").is_none(),
+            "204 responses for Unset should not set content-type"
+        );
+
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert!(
+            body_bytes.is_empty(),
+            "204 responses should have an empty body for Unset"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_value_with_complex_nested_structure_still_serializes_correctly() {
+        let value = json!({
+            "arr": [1, 2, 3],
+            "obj": {
+                "a": true,
+                "b": null,
+                "c": [ {"x": 1}, {"y": 2} ]
+            }
+        });
+
+        let spec = ResponseBodySpec::JsonValue(value.clone());
+
+        let resp = response_from_body_spec(spec);
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let decoded: serde_json::Value = serde_json::from_slice(&body_bytes)
+            .expect("body should be valid JSON even when nested");
+
+        assert_eq!(
+            decoded, value,
+            "complex nested JSON should survive serialization unchanged"
         );
     }
 }

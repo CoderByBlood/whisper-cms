@@ -1,3 +1,5 @@
+// crates/adapt/src/http/resolver.rs
+
 use crate::core::content::ContentKind;
 use crate::core::context::RequestContext;
 use crate::core::error::CoreError;
@@ -22,9 +24,7 @@ pub trait ContentResolver: Send + Sync {
 
 /// A simple resolver that maps URI paths to files under a root directory,
 /// with naive content-kind detection based on file extension.
-///
-/// This is a placeholder for Phase 3; a more complete resolver can be
-/// provided in later phases.
+#[derive(Debug, Clone)]
 pub struct SimpleContentResolver {
     pub root: PathBuf,
 }
@@ -63,6 +63,25 @@ impl ContentResolver for SimpleContentResolver {
     }
 }
 
+fn canonicalize_header_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut upper_next = true;
+
+    for ch in raw.chars() {
+        if ch == '-' {
+            out.push('-');
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+    }
+
+    out
+}
+
 /// Helper to build an initial RequestContext from HTTP parts + ResolvedContent.
 pub fn build_request_context(
     path: String,
@@ -71,29 +90,42 @@ pub fn build_request_context(
     query_params: HashMap<String, String>,
     resolved: ResolvedContent,
 ) -> RequestContext {
-    let theme_config = Json::Object(Default::default());
-    let plugin_configs = HashMap::new();
+    use serde_json::{Map as JsonMap, Value as Json};
 
-    RequestContext::new(
-        path,
-        method,
-        headers,
-        query_params,
-        resolved.content_kind,
-        resolved.front_matter,
-        resolved.body_path,
-        theme_config,
-        plugin_configs,
-    )
+    // headers -> JSON object
+    let mut hdr_obj = JsonMap::new();
+    for (name, value) in headers.iter() {
+        let canonical = canonicalize_header_name(name.as_str());
+        hdr_obj.insert(canonical, json!(value.to_str().unwrap_or("")));
+    }
+
+    // query_params -> JSON object
+    let mut qp_obj = JsonMap::new();
+    for (k, v) in query_params.iter() {
+        qp_obj.insert(k.clone(), Json::String(v.clone()));
+    }
+
+    RequestContext::builder()
+        // req_* fields
+        .path(Json::String(path))
+        .method(Json::String(method.to_string()))
+        // let version default from the builder; resolver doesn't know the real version
+        .headers(Json::Object(hdr_obj))
+        .params(Json::Object(qp_obj))
+        // front_matter becomes the initial content_meta shape
+        .content_meta(resolved.front_matter)
+        // start empty; can be filled later by higher layers
+        .theme_config(Json::Object(JsonMap::new()))
+        .plugin_configs(HashMap::new())
+        .build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::content::ContentKind;
-    use http::{HeaderMap, Method};
+    use http::Method;
     use serde_json::json;
-    use std::collections::HashMap;
     use std::path::PathBuf;
 
     // ─────────────────────────────────────────────────────────────────────
@@ -207,6 +239,12 @@ mod tests {
 
     #[test]
     fn build_request_context_populates_all_fields_correctly() {
+        use http::HeaderMap;
+        use http::Method;
+        use serde_json::{json, Value as Json};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
         let path = "/blog/post.html".to_string();
         let method = Method::GET;
 
@@ -230,40 +268,86 @@ mod tests {
             resolved,
         );
 
-        assert_eq!(ctx.path, path);
-        assert_eq!(ctx.method, method);
-        assert_eq!(ctx.headers, headers);
-        assert_eq!(ctx.query_params, query_params);
-        assert_eq!(ctx.content_kind, ContentKind::Html);
-        assert_eq!(ctx.front_matter["title"], "My Post");
-        assert_eq!(ctx.body_path, PathBuf::from("/var/www/blog/post.html"));
+        // req_path
+        assert_eq!(
+            ctx.req_path,
+            Json::String(path),
+            "req_path must reflect the original path"
+        );
 
-        // Theme config should start as empty object
+        // req_method
+        assert_eq!(
+            ctx.req_method,
+            Json::String(method.to_string()),
+            "req_method must reflect the original method"
+        );
+
+        // req_headers JSON object
+        let hdrs = ctx
+            .req_headers
+            .as_object()
+            .expect("req_headers must be a JSON object");
+        assert_eq!(
+            hdrs.get("X-Test-Header").unwrap(),
+            "value",
+            "header value should be serialized into JSON"
+        );
+
+        // req_params JSON object
+        let params = ctx
+            .req_params
+            .as_object()
+            .expect("req_params must be a JSON object");
+        assert_eq!(params.get("q").unwrap(), "rust");
+
+        // content_meta from front_matter
+        assert_eq!(
+            ctx.content_meta["title"],
+            json!("My Post"),
+            "front_matter.title should be in content_meta"
+        );
+
+        // theme_config should start as empty object
         assert!(ctx.theme_config.is_object());
         assert!(ctx.theme_config.as_object().unwrap().is_empty());
 
-        // Plugin configs should start empty
+        // plugin_configs should start empty
         assert!(ctx.plugin_configs.is_empty());
 
-        // Recommendations should start empty
-        assert!(ctx.recommendations.is_empty());
-
-        // Response spec should be default (200 OK, empty headers, Unset body)
-        assert_eq!(ctx.response_spec.status, http::StatusCode::OK);
-        assert!(ctx.response_spec.headers.is_empty());
-        match ctx.response_spec.body {
-            crate::core::context::ResponseBodySpec::Unset => {}
-            other => panic!("expected ResponseBodySpec::Unset, got {:?}", other),
+        // req_id is an auto-generated UUID in JSON
+        match &ctx.req_id {
+            Json::String(s) => {
+                assert!(
+                    uuid::Uuid::parse_str(s).is_ok(),
+                    "req_id must be a valid UUID string"
+                )
+            }
+            other => panic!("req_id must be a JSON string, got {other:?}"),
         }
+
+        // req_version is a JSON string
+        assert!(
+            ctx.req_version.is_string(),
+            "req_version must be a JSON string"
+        );
+
+        // Streams start unset
+        assert!(ctx.req_body.is_none());
+        assert!(ctx.content_body.is_none());
     }
 
     #[test]
     fn build_request_context_allows_empty_headers_and_query_params() {
+        use http::{HeaderMap, Method};
+        use serde_json::{json, Value as Json};
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
         let path = "/no/headers/or/query".to_string();
         let method = Method::HEAD;
 
         let headers = HeaderMap::new();
-        let query_params = HashMap::new();
+        let query_params: HashMap<String, String> = HashMap::new();
 
         let resolved = ResolvedContent {
             content_kind: ContentKind::Asset,
@@ -274,17 +358,30 @@ mod tests {
         let ctx = build_request_context(
             path.clone(),
             method.clone(),
-            headers.clone(),
-            query_params.clone(),
+            headers,
+            query_params,
             resolved,
         );
 
-        assert_eq!(ctx.path, path);
-        assert_eq!(ctx.method, method);
-        assert!(ctx.headers.is_empty());
-        assert!(ctx.query_params.is_empty());
-        assert_eq!(ctx.content_kind, ContentKind::Asset);
-        assert_eq!(ctx.front_matter, json!({}));
-        assert_eq!(ctx.body_path, PathBuf::from("/assets/file.bin"));
+        assert_eq!(ctx.req_path, Json::String(path));
+        assert_eq!(ctx.req_method, Json::String(method.to_string()));
+
+        let hdrs = ctx
+            .req_headers
+            .as_object()
+            .expect("req_headers must be object");
+        assert!(hdrs.is_empty(), "headers should be empty object");
+
+        let params = ctx
+            .req_params
+            .as_object()
+            .expect("req_params must be object");
+        assert!(params.is_empty(), "params should be empty object");
+
+        assert_eq!(
+            ctx.content_meta,
+            json!({}),
+            "content_meta should match provided empty front_matter"
+        );
     }
 }

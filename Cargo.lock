@@ -10,6 +10,7 @@ dependencies = [
  "async-trait",
  "axum",
  "boa_engine",
+ "bytes",
  "chrono",
  "clap 4.5.51",
  "domain",
@@ -1578,6 +1579,7 @@ dependencies = [
  "comrak",
  "config",
  "domain",
+ "form_urlencoded",
  "futures",
  "gray_matter",
  "http",
@@ -1605,6 +1607,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "walkdir",
 ]
 
@@ -4852,6 +4855,7 @@ dependencies = [
 name = "serve"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "domain",
  "futures",
  "gray_matter",

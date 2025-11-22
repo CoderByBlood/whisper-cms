@@ -38,6 +38,8 @@ rst_parser = { workspace = true }
 rst_renderer = { workspace = true }
 bytes = { workspace = true }
 toml = { workspace = true }
+form_urlencoded = { workspace = true }
+uuid = { workspace = true }
 
 domain = { path = "../domain" }
 adapt = { path = "../adapt" }

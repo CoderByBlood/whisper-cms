@@ -1,12 +1,22 @@
+// crates/adapt/src/runtime/theme.rs
+
 use super::ctx_bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js};
 use super::error::RuntimeError;
-use crate::core::context::RequestContext;
+use crate::core::RequestContext;
 use crate::js::{JsEngine, JsValue};
+use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
 
 /// Theme specification for loading a JS theme.
+#[derive(Debug, Clone)]
 pub struct ThemeSpec {
+    /// Host-facing identifier – usually derived from disk folder, config, etc.
+    /// This is *not* required to be visible in JS.
     pub id: String,
+
+    /// Friendly display name.
     pub name: String,
+
+    /// JavaScript source code of the theme module.
     pub source: String,
 }
 
@@ -20,24 +30,45 @@ impl ThemeSpec {
     }
 }
 
-/// ThemeRuntime manages a single JS theme.
+/// ThemeRuntime manages a single theme.
 ///
-/// It assumes the theme source, when evaluated, attaches an object like:
+/// JS side is expected to export lifecycle functions under the theme's
+/// *internal* ID assigned by the host:
 ///
-///   globalThis.themeId = {
+/// ```js
+/// globalThis["theme_abc123"] = {
 ///     init(ctx)   { /* optional */ },
 ///     handle(ctx) { /* required */ return ctx; }
-///   };
+/// };
+/// ```
+///
+/// The host calls:
+///     `<internalId>.init(ctx)`
+///     `<internalId>.handle(ctx)`
 pub struct ThemeRuntime<E: JsEngine> {
     engine: E,
+
+    /// Internal theme identifier used for JS lookup.
+    ///
+    /// *Not* necessarily the same as the folder name, TOML name, etc.
     id: String,
+
+    /// Display name (not used internally).
     _name: String,
 }
 
 impl<E: JsEngine> ThemeRuntime<E> {
-    /// Create a new ThemeRuntime by loading the theme module.
+    /// Load a single theme module into the JS engine.
+    ///
+    /// The JS file must attach its lifecycle object under `spec.id`.
     pub fn new(mut engine: E, spec: ThemeSpec) -> Result<Self, RuntimeError> {
+        // Load/evaluate the JavaScript theme module
         engine.load_module(&spec.id, &spec.source)?;
+        // Load the ctx shim into this engine.
+        // You can handle error propagation more gracefully if your JsEngine
+        // exposes a concrete error type; keeping it simple here.
+        engine.load_module("__ctx_shim__", CTX_SHIM_SRC)?;
+
         Ok(Self {
             engine,
             id: spec.id,
@@ -45,20 +76,22 @@ impl<E: JsEngine> ThemeRuntime<E> {
         })
     }
 
-    /// Optionally call `init(ctx)` once (e.g. at startup).
+    /// Optionally call `themeId.init(ctx)` once.
     ///
-    /// This is optional and may be skipped if you don't need theme init.
+    /// If the theme does not export `.init`, we silently ignore it.
     pub fn init(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
-        // Thread theme config through to JS as ctx.config.
+        // Per-theme context: ctx.config contains theme.toml, etc.
         let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
 
-        let _ = self
-            .engine
+        // Apply the JS-side shim to get the nice header API
+        let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
+
+        self.engine
             .call_function(&format!("{}.init", self.id), &[js_ctx])
             .or_else(|err| {
+                // Missing method = no-op
                 if let crate::js::JsError::Call(msg) = &err {
                     if msg.contains("is not a function") {
-                        // No init defined; ignore.
                         return Ok(JsValue::Null);
                     }
                 }
@@ -68,24 +101,26 @@ impl<E: JsEngine> ThemeRuntime<E> {
         Ok(())
     }
 
-    /// Call `handle(ctx)` on the theme.
+    /// Call `<internalId>.handle(ctx)` on the theme.
     ///
-    /// The theme is expected to:
-    /// - inspect `ctx.request`, `ctx.content`, `ctx.config`, `ctx.recommend`, `ctx.response`
-    /// - mutate ctx.recommend and ctx.response
-    /// - return ctx
+    /// This is the *required* lifecycle method for rendering and modifying:
+    ///   - response spec
+    ///   - recommendations
+    ///   - config-dependent logic
     pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
-        // Thread theme config through to JS as ctx.config.
         let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
+
+        // Apply the JS-side shim to get the nice header API
+        let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
         let result = self
             .engine
             .call_function(&format!("{}.handle", self.id), &[js_ctx])?;
 
+        // Theme should return a ctx object, but if it's not an object
+        // we simply apply no updates.
         if let JsValue::Object(_) = result {
             merge_theme_ctx_from_js(&result, ctx)?;
-        } else {
-            // If theme didn't return ctx, we still allow that, but no updates are applied.
         }
 
         Ok(())
@@ -95,13 +130,10 @@ impl<E: JsEngine> ThemeRuntime<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::content::ContentKind;
-    use crate::core::context::RequestContext;
+    use crate::core::RequestContext;
     use crate::js::{JsEngine, JsError, JsValue};
-    use http::{HeaderMap, Method};
     use serde_json::json;
     use std::collections::HashMap;
-    use std::path::PathBuf;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Test helpers
@@ -161,17 +193,17 @@ mod tests {
     }
 
     fn dummy_ctx() -> RequestContext {
-        RequestContext::new(
-            "/test".to_string(),
-            Method::GET,
-            HeaderMap::new(),
-            HashMap::new(),
-            ContentKind::Html,
-            json!({"title": "test"}),
-            PathBuf::from("content/test.html"),
-            json!({}),
-            HashMap::new(),
-        )
+        RequestContext::builder()
+            .path("/test")
+            .method("GET")
+            .version("HTTP/1.1")
+            .headers(json!({}))
+            .params(json!({}))
+            .content_meta(json!({ "title": "test" }))
+            .theme_config(json!({}))
+            .plugin_configs(HashMap::new())
+            // No streams for this test
+            .build()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -199,10 +231,7 @@ mod tests {
         let rt = ThemeRuntime::new(engine, spec);
 
         assert!(rt.is_ok());
-        let rt = rt.unwrap();
-        // We can't access engine internals here (moved), but we at least know
-        // construction succeeded and did not panic.
-        let _ = rt;
+        let _rt = rt.unwrap();
     }
 
     #[test]
@@ -219,20 +248,17 @@ mod tests {
     }
 
     #[test]
-    fn theme_runtime_new_records_load_call_on_mock() {
-        let engine = MockEngine::default();
+    fn theme_runtime_new_calls_load_module_with_spec_id_and_source() {
+        let mut engine = MockEngine::default();
         let spec = ThemeSpec::new("themeX", "Theme X", "/* theme js */");
 
-        let _ = ThemeRuntime::new(engine, spec);
-        // engine has been moved, but we can re-create a more direct test
-        // specifically about load_module behavior:
-        let engine2 = MockEngine::default();
-        let spec2 = ThemeSpec::new("themeY", "Theme Y", "/* js */");
-        let _ = ThemeRuntime::new(engine2, spec2);
-        // can't see the internal log after move, so this test is mostly for
-        // compile-time sanity; detailed logging is covered by other tests
-        // in MockEngine-specific blocks below.
-        let _ = ();
+        // call load_module directly on the mock to verify behavior
+        let res = engine.load_module(&spec.id, &spec.source);
+        assert!(res.is_ok());
+
+        assert_eq!(engine.load_calls.len(), 1);
+        assert_eq!(engine.load_calls[0].0, "themeX");
+        assert_eq!(engine.load_calls[0].1, "/* theme js */");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -254,11 +280,8 @@ mod tests {
         );
 
         // Ensure call_function was invoked for "theme1.init"
-        let mock_engine = &rt.engine as *const _ as *mut MockEngine;
-        // SAFETY: tests are single-threaded and we know the concrete type.
-        let mock_engine = unsafe { &*mock_engine };
         assert!(
-            mock_engine.call_log.contains(&"theme1.init".to_string()),
+            rt.engine.call_log.contains(&"theme1.init".to_string()),
             "expected call to theme1.init"
         );
     }
@@ -279,6 +302,12 @@ mod tests {
             result.is_ok(),
             "init should ignore 'is not a function' errors and succeed"
         );
+
+        // Still should have attempted the call
+        assert!(
+            rt.engine.call_log.contains(&"theme2.init".to_string()),
+            "expected call to theme2.init"
+        );
     }
 
     #[test]
@@ -294,6 +323,11 @@ mod tests {
         assert!(
             result.is_err(),
             "init should propagate call errors that are not 'is not a function'"
+        );
+
+        assert!(
+            rt.engine.call_log.contains(&"theme3.init".to_string()),
+            "expected call to theme3.init"
         );
     }
 
@@ -315,8 +349,12 @@ mod tests {
             result.is_ok(),
             "handle should succeed when theme returns an object ctx"
         );
-        // We don't assert specific ctx mutations here; that's the responsibility
-        // of merge_theme_ctx_from_js's own tests.
+
+        assert!(
+            rt.engine.call_log.contains(&"theme4.handle".to_string()),
+            "expected call to theme4.handle"
+        );
+        // Actual ctx mutation behavior is covered by merge_theme_ctx_from_js tests.
     }
 
     #[test]
@@ -333,6 +371,11 @@ mod tests {
             result.is_ok(),
             "handle should succeed even when theme returns a non-object value"
         );
+
+        assert!(
+            rt.engine.call_log.contains(&"theme5.handle".to_string()),
+            "expected call to theme5.handle"
+        );
     }
 
     #[test]
@@ -348,6 +391,11 @@ mod tests {
         assert!(
             result.is_err(),
             "handle should propagate errors from engine.call_function"
+        );
+
+        assert!(
+            rt.engine.call_log.contains(&"theme6.handle".to_string()),
+            "expected call to theme6.handle"
         );
     }
 }

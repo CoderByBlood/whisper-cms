@@ -53,7 +53,7 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::SetInnerText(text) => {
-                            // FIXED: let lol_html escape text; no manual escaping.
+                            // Let lol_html escape text; no manual escaping.
                             let _ = el.set_inner_content(text, ContentType::Text);
                         }
 
@@ -70,7 +70,7 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::ReplaceWithText(text) => {
-                            // FIXED: let lol_html escape text; no manual escaping.
+                            // Let lol_html escape text; no manual escaping.
                             let _ = el.replace(text, ContentType::Text);
                         }
 
@@ -79,7 +79,6 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::InsertBeforeText(text) => {
-                            // FIXED
                             let _ = el.before(text, ContentType::Text);
                         }
 
@@ -88,7 +87,6 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::InsertAfterText(text) => {
-                            // FIXED
                             let _ = el.after(text, ContentType::Text);
                         }
 

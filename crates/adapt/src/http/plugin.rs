@@ -196,6 +196,8 @@ mod tests {
 
     #[test]
     fn plugin_middleware_inserts_request_context() {
+        use serde_json::{json, Value as Json};
+
         let inner = InspectingService::default();
         let seen_ctx = inner.seen_ctx.clone();
         let resolver = FakeResolver::default();
@@ -214,12 +216,35 @@ mod tests {
         let ctx_opt = seen_ctx.lock().unwrap().clone();
         let ctx = ctx_opt.expect("RequestContext should be present in extensions");
 
-        assert_eq!(ctx.path, "/foo/bar");
-        assert_eq!(ctx.method, Method::GET);
-        assert_eq!(ctx.content_kind, ContentKind::Html);
-        assert_eq!(ctx.front_matter["title"], "test");
-        assert_eq!(ctx.query_params.get("x").map(String::as_str), Some("1"));
-        assert_eq!(ctx.query_params.get("y").map(String::as_str), Some("2"));
+        // req_path
+        assert_eq!(
+            ctx.req_path,
+            Json::String("/foo/bar".to_string()),
+            "req_path should be JSON string '/foo/bar'"
+        );
+
+        // req_method
+        assert_eq!(
+            ctx.req_method,
+            Json::String("GET".to_string()),
+            "req_method should be JSON string 'GET'"
+        );
+
+        // content_meta must contain title from FakeResolver
+        assert_eq!(
+            ctx.content_meta["title"],
+            json!("test"),
+            "FakeResolver front matter"
+        );
+
+        // query params → req_params JSON object
+        let params = ctx
+            .req_params
+            .as_object()
+            .expect("req_params should be a JSON object");
+
+        assert_eq!(params.get("x").unwrap(), "1");
+        assert_eq!(params.get("y").unwrap(), "2");
     }
 
     #[test]
@@ -244,13 +269,15 @@ mod tests {
             .clone()
             .expect("RequestContext should be present");
 
-        // form_urlencoded::parse -> into_owned().collect() into HashMap<String, String>
+        let params = ctx
+            .req_params
+            .as_object()
+            .expect("req_params should be a JSON object");
+
+        // form_urlencoded::parse → collect into HashMap<String, String>
         // For duplicate keys, the last wins.
-        assert_eq!(ctx.query_params.get("q").map(String::as_str), Some("rust"));
-        assert_eq!(
-            ctx.query_params.get("tags").map(String::as_str),
-            Some("async")
-        );
+        assert_eq!(params.get("q").unwrap(), "rust");
+        assert_eq!(params.get("tags").unwrap(), "async");
     }
 
     #[test]
