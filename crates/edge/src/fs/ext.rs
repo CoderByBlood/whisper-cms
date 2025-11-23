@@ -46,15 +46,12 @@ pub struct DiscoveredTheme {
 struct PluginManifest {
     pub id: Option<String>,
     pub name: Option<String>,
-    pub main: Option<String>, // defaults to "plugin.js"
 }
 
 #[derive(Debug, Deserialize)]
 struct ThemeManifest {
     pub id: Option<String>,
     pub name: Option<String>,
-    pub main: Option<String>,       // defaults to "theme.js"
-    pub assets_dir: Option<String>, // optional
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,7 +105,7 @@ pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>,
 
         let id = manifest.id.unwrap_or_else(|| dir_name.clone());
         let name = manifest.name.unwrap_or_else(|| id.clone());
-        let main = manifest.main.unwrap_or_else(|| "plugin.js".to_string());
+        let main = "plugin.js".to_string();
         let main_path = path.join(&main);
 
         let js_src = fs::read_to_string(&main_path).map_err(|e| {
@@ -181,14 +178,17 @@ pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, R
 
         let id = manifest.id.unwrap_or_else(|| dir_name.clone());
         let name = manifest.name.unwrap_or_else(|| id.clone());
-        let main = manifest.main.unwrap_or_else(|| "theme.js".to_string());
+        let main = "theme.js".to_string();
         let main_path = path.join(&main);
 
         let js_src = fs::read_to_string(&main_path).map_err(|e| {
             RuntimeError::Other(format!("failed reading theme JS file {:?}: {e}", main_path))
         })?;
 
-        let assets_dir = manifest.assets_dir.map(|rel| path.join(rel));
+        let assets_dir = match path.join("assets/") {
+            p if p.exists() => Some(p),
+            _ => None,
+        };
 
         let spec = ThemeSpec {
             id,
