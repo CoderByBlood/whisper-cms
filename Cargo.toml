@@ -48,7 +48,7 @@ form_urlencoded = "1.2.2"
 html-escape = "0.2.13"
 bytes = "1.11.0"
 indexed_json = "0.3.2"
-chrono = "0.4.42"
+chrono = { version = "0.4.42", features = ["serde"] }
 smallvec = "1.15.1"
 anyhow = "1.0.22"
 pingora = { version = "0.6.0", features = ["proxy", "lb", "time", "openssl"] }
@@ -62,3 +62,4 @@ comrak = "0.48.0"
 orgize = "0.9.0"
 rst_parser = "0.4.2"
 rst_renderer = "0.4.2"
+tokio-util = "0.7.17"

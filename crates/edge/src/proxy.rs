@@ -1,21 +1,28 @@
+use adapt::runtime::RuntimeError;
 use axum::Router;
 use http::{Response, StatusCode};
 use parking_lot::RwLock;
 use pingora::apps::http_app::{HttpServer as PingoraHttpServer, ServeHttp};
 use pingora::prelude::*;
 use pingora::protocols::http::server::Session as HttpSession;
+use pingora::protocols::raw_connect::ConnectProxyError;
 use pingora::proxy::{http_proxy_service, ProxyHttp, Session as ProxySession};
 use pingora::server::Server;
 use pingora::services::listening::Service as ListeningService;
 use pingora::upstreams::peer::HttpPeer;
 use std::{
     net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::oneshot};
+
+// Adjust this import path to wherever your Settings type lives
+use domain::setting::Settings;
+
+use crate::db::tantivy::ContentIndexError;
 
 /// Shared state: which loopback port is currently "active" for the WebServer.
 ///
@@ -41,31 +48,6 @@ impl BackendState {
     }
 }
 
-/// EdgeController + WebServer configuration
-#[derive(Debug, Clone)]
-pub struct EdgeConfig {
-    /// Directory that MUST contain at least one TLS certificate (for validation only).
-    pub cert_dir: PathBuf,
-
-    /// Public HTTP listener for EdgeController (will respond with redirect only).
-    pub edge_http: SocketAddr,
-
-    /// Public HTTPS listener for EdgeController (proxied to Axum).
-    pub edge_https: SocketAddr,
-
-    /// Loopback IP for Axum WebServer (e.g. 127.0.0.1).
-    pub loopback_ip: IpAddr,
-
-    /// First loopback port for WebServer (A side).
-    pub web_port_a: u16,
-
-    /// Second loopback port for WebServer (B side).
-    pub web_port_b: u16,
-
-    /// External HTTPS port for building redirect URLs (usually 443).
-    pub external_https_port: u16,
-}
-
 #[derive(Debug, Error)]
 pub enum EdgeError {
     #[error("I/O error: {0}")]
@@ -80,6 +62,18 @@ pub enum EdgeError {
 
     #[error("Channel closed")]
     Channel,
+
+    #[error("Proxy error: {0}")]
+    Proxy(#[from] ConnectProxyError),
+
+    #[error("Content Index Error {0}")]
+    ContentIndex(#[from] ContentIndexError),
+
+    #[error("Regex error: {0}")]
+    Regex(#[from] regex::Error),
+
+    #[error("Runtime error: {0}")]
+    Runtime(#[from] RuntimeError),
 
     #[error("Other: {0}")]
     Other(String),
@@ -277,24 +271,35 @@ impl EdgeRuntime {
     /// * If **no TLS certificates are found**, we:
     ///   - **Do not bind any EdgeController listeners**
     ///   - **Still start the WebServer** (on loopback) so you can configure/fix certs.
-    pub async fn start<F>(config: EdgeConfig, make_router: F) -> Result<Self, EdgeError>
+    pub async fn start<F>(settings: Settings, make_router: F) -> Result<Self, EdgeError>
     where
         F: Fn() -> Router + Send + Sync + 'static,
     {
         tracing_subscriber::fmt().with_env_filter("info").init();
 
+        // Derive runtime values from Settings
+        let cert_dir = settings.cert.dir;
+        let edge_ip = settings.edge.ip;
+        let edge_http = SocketAddr::from((edge_ip, settings.edge.http_port));
+        let edge_https = SocketAddr::from((edge_ip, settings.edge.https_port));
+
+        let loopback_ip = settings.loopback.ip;
+        let web_port_a = settings.loopback.port_a;
+        let web_port_b = settings.loopback.port_b;
+        let external_https_port = settings.edge.https_port;
+
         // 1) Cert directory check (require at least one file)
-        let has_cert = cert_dir_has_files(&config.cert_dir)?;
+        let has_cert = cert_dir_has_files(&cert_dir)?;
         if !has_cert {
             tracing::warn!(
                 "No TLS certificates found in {:?}; EdgeController will NOT bind listeners, \
                  but WebServer will still start.",
-                config.cert_dir
+                cert_dir
             );
         }
 
         // 2) Start initial Axum WebServer (port A)
-        let initial_addr = SocketAddr::from((config.loopback_ip, config.web_port_a));
+        let initial_addr = SocketAddr::from((loopback_ip, web_port_a));
         let listener = TcpListener::bind(initial_addr).await?;
 
         let backend_state = Arc::new(BackendState::new(initial_addr));
@@ -314,16 +319,12 @@ impl EdgeRuntime {
         let web_handle = WebServerHandle::new(
             backend_state.clone(),
             shutdown_tx,
-            config.loopback_ip,
-            config.web_port_a,
-            config.web_port_b,
+            loopback_ip,
+            web_port_a,
+            web_port_b,
         );
 
         // 3) Start Pingora EdgeController on a dedicated thread
-        let edge_http = config.edge_http;
-        let edge_https = config.edge_https;
-        let external_https_port = config.external_https_port;
-
         let pingora_thread = std::thread::spawn(move || {
             if let Err(err) = run_pingora_edge(
                 backend_state,
@@ -423,6 +424,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
     use std::time::Duration;
     use tokio::time::timeout;
 

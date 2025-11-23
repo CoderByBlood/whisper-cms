@@ -1,6 +1,5 @@
 pub mod bootstrap;
 pub mod ctx_bridge;
-pub mod discovery;
 pub mod error;
 pub mod plugin;
 pub mod plugin_actor;

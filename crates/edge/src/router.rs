@@ -1,9 +1,9 @@
 // crates/edge/src/router.rs
 
+use crate::fs::ext::ThemeBinding;
 use adapt::core::context::{RequestContext, ResponseBodySpec};
 use adapt::http::plugin_middleware::PluginLayer;
 use adapt::runtime::bootstrap::RuntimeHandles;
-use adapt::runtime::discovery::ThemeBinding;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 
 use axum::{

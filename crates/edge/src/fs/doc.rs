@@ -1,9 +1,13 @@
 use crate::db::tantivy::{ContentIndex, ContentIndexError};
+use crate::fs::scan::{start_folder_scan, FolderScanConfig};
+use crate::proxy::EdgeError;
 use adapt::mql::index::IndexRecord;
+use bytes::Bytes;
 use domain::doc::{BodyKind, Document, FmKind};
 
 use anyhow::Error as AnyError;
 use comrak::{markdown_to_html, Options as MarkdownOptions};
+use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use gray_matter::engine::YAML;
 use gray_matter::Matter;
@@ -17,6 +21,9 @@ use thiserror::Error;
 use asciidocr::backends::htmls::render_htmlbook;
 use asciidocr::parser::Parser;
 use asciidocr::scanner::Scanner;
+use tokio::fs::File;
+use tokio::sync::mpsc;
+use tokio_util::io::ReaderStream;
 
 use std::fs;
 use std::io;
@@ -89,6 +96,123 @@ fn default_markdown_options() -> MarkdownOptions<'static> {
     options
 }
 
+/// Stream the file at `path` as chunks of `Bytes`.
+///
+/// - Uses `std::fs::File::open` synchronously just to get a handle,
+///   then wraps it in `tokio::fs::File::from_std` for async reads.
+/// - Uses `tokio_util::io::ReaderStream` to produce a stream of
+///   `Result<Bytes, io::Error>`.
+/// - On open failure, returns a one-item stream that yields `Err(e)`
+///   and then ends.
+pub fn open_bytes(path: &PathBuf) -> BoxStream<'static, io::Result<Bytes>> {
+    match fs::File::open(path) {
+        Ok(std_file) => {
+            // Safe, non-async conversion from std::File → tokio::File
+            let file = File::from_std(std_file);
+
+            // ReaderStream<Item = Result<Bytes, io::Error>>
+            let stream = ReaderStream::new(file);
+
+            // Box it as BoxStream<'static, io::Result<Bytes>>
+            Box::pin(stream)
+        }
+        Err(e) => {
+            // Represent the open error as a single error item in the stream.
+            Box::pin(stream::once(async { Err(e) }))
+        }
+    }
+}
+
+/// Stream the file at `path` as UTF-8 `String` chunks.
+///
+/// - Underlying I/O is the same as `open_bytes` (ReaderStream over a tokio `File`).
+/// - Each chunk is converted from `Bytes` → `String` via `String::from_utf8`.
+/// - If any chunk is not valid UTF-8, yields `io::ErrorKind::InvalidData`
+///   and then continues according to how you handle the error in your caller.
+pub fn open_utf8(path: &PathBuf) -> BoxStream<'static, io::Result<String>> {
+    match fs::File::open(path) {
+        Ok(std_file) => {
+            let file = File::from_std(std_file);
+
+            let stream = ReaderStream::new(file).map(|res| {
+                res.and_then(|bytes| {
+                    String::from_utf8(bytes.to_vec())
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+                })
+            });
+
+            Box::pin(stream)
+        }
+        Err(e) => Box::pin(stream::once(async { Err(e) })),
+    }
+}
+
+/// Synchronous pipeline:
+/// - starts a folder scan via `start_folder_scan`
+/// - receives debounced `PathBuf`s from a bounded channel
+/// - turns each into a `Document` via `make_document`
+/// - runs `upsert_front_matter_db` and `upsert_body_db`
+/// - collects all `Document`s and per-file `DocContextError`s
+///
+/// A single error does *not* stop the pipeline; it is recorded and
+/// processing continues with the next path.
+///
+/// `make_document` is a thin adapter from a filesystem path into your
+/// domain-level `Document` type (e.g. attaching root, metadata, etc.).
+pub async fn scan_and_process_docs(
+    root: &Path,
+    cfg: FolderScanConfig,
+    index_dir: PathBuf,
+) -> Result<(Vec<Document>, Vec<(PathBuf, DocContextError)>), EdgeError> {
+    let root = root.to_path_buf();
+    // We’ll move these into the async block.
+    let fm_index_dir = index_dir.clone();
+    let content_index = Arc::new(ContentIndex::open_or_create(index_dir, 15000000)?);
+
+    // Bounded channel for debounced paths.
+    let (tx, mut rx) = mpsc::channel::<PathBuf>(cfg.channel_capacity);
+
+    // Start the folder scan; it will send paths into `tx`.
+    dbg!(&root);
+    dbg!(&root.as_os_str());
+    let stop = start_folder_scan(&root, cfg, tx)?;
+    dbg!(&fm_index_dir);
+    dbg!(&fm_index_dir.as_os_str());
+
+    let mut docs = Vec::new();
+    let mut errors = Vec::new();
+
+    // Drain the receiver and process each path.
+    while let Some(path) = rx.recv().await {
+        // Turn the filesystem path into a domain `Document`.
+        let document = Document::new(path.clone(), open_bytes, open_utf8);
+
+        let ctx = DocContext {
+            fm_index_dir: fm_index_dir.clone(),
+            content_index: content_index.clone(),
+            document,
+        };
+
+        // Run the async pipeline: FM → IndexedJson, then body → HTML → Tantivy.
+        let result = async { upsert_body_db(upsert_front_matter_db(ctx).await?).await }.await;
+
+        match result {
+            Ok(ctx_done) => {
+                docs.push(ctx_done.document);
+            }
+            Err(e) => {
+                // Non-fatal: record and continue.
+                errors.push((path, e));
+            }
+        }
+    }
+
+    // Ensure scan tasks are stopped (idempotent if they already finished).
+    stop();
+
+    Ok((docs, errors))
+}
+
 // ─────────────────────────────────────────────
 // Helper: read & cache full UTF-8 contents
 // ─────────────────────────────────────────────
@@ -97,7 +221,7 @@ fn default_markdown_options() -> MarkdownOptions<'static> {
 ///
 /// - If `cache` is already Some, returns unchanged.
 /// - Otherwise, reads from `utf8_stream` and sets `cache` via `with_cache`.
-pub async fn read_document_utf8(mut ctx: DocContext) -> Result<DocContext, DocContextError> {
+async fn read_document_utf8(mut ctx: DocContext) -> Result<DocContext, DocContextError> {
     if ctx.document.cache.is_some() {
         return Ok(ctx);
     }

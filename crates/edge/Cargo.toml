@@ -42,10 +42,16 @@ form_urlencoded = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 smallvec = { workspace = true }
+tokio-util = { workspace = true }
 
 domain = { path = "../domain" }
 adapt = { path = "../adapt" }
 serve = { path = "../serve" }
+
+
+[[bin]]
+name = "whispercms"
+path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = { workspace = true }

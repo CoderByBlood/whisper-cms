@@ -1,11 +1,9 @@
+use adapt::runtime::error::RuntimeError;
+use adapt::runtime::plugin::PluginSpec;
+use adapt::runtime::theme::ThemeSpec;
+use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
-
-use crate::runtime::error::RuntimeError;
-use crate::runtime::plugin::PluginSpec;
-use crate::runtime::theme::ThemeSpec;
 
 /// A mapping from a mount path (URL prefix) to a theme name.
 ///
