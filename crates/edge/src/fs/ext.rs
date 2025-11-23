@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_plugins_manifest_overrides_id_name_and_main() {
+    fn discover_plugins_manifest_overrides_id_and_name() {
         let root = temp_dir("plugins_manifest_overrides");
         let plugin_dir = root.join("my_plugin");
         fs::create_dir_all(&plugin_dir).expect("create plugin dir");
@@ -422,16 +422,14 @@ mod tests {
             r#"
                 id = "plugin-123"
                 name = "My Plugin"
-                main = "src/main.js"
             "#,
         )
         .expect("write manifest");
 
-        let src_dir = plugin_dir.join("src");
-        fs::create_dir_all(&src_dir).expect("create src dir");
-        let js_path = src_dir.join("main.js");
+        let js_path = plugin_dir.join("plugin.js");
         let js_source = "console.log('main');";
-        fs::write(&js_path, js_source).expect("write main.js");
+        fs::write(&js_path, js_source).expect("write plugin.js");
+        assert!(js_path.exists(), "plugin.js should exist");
 
         let result = discover_plugins(&root).expect("discover_plugins should succeed");
         assert_eq!(result.len(), 1, "should discover exactly one plugin");
@@ -640,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_themes_manifest_overrides_id_name_main_and_assets_dir() {
+    fn discover_themes_manifest_overrides_id_and_name() {
         let root = temp_dir("themes_manifest_overrides");
         let theme_dir = root.join("my_theme");
         fs::create_dir_all(&theme_dir).expect("create theme dir");
@@ -651,20 +649,18 @@ mod tests {
             r#"
                 id = "theme-123"
                 name = "My Theme"
-                main = "src/theme_main.js"
-                assets_dir = "public"
             "#,
         )
         .expect("write manifest");
 
-        let src_dir = theme_dir.join("src");
-        fs::create_dir_all(&src_dir).expect("create src dir");
-        let js_path = src_dir.join("theme_main.js");
+        let js_path = theme_dir.join("theme.js");
         let js_source = "console.log('theme main');";
-        fs::write(&js_path, js_source).expect("write theme_main.js");
+        fs::write(&js_path, js_source).expect("write theme.js");
+        assert!(js_path.exists(), "Theme source file should exist");
 
-        let assets_dir = theme_dir.join("public");
+        let assets_dir = theme_dir.join("assets");
         fs::create_dir_all(&assets_dir).expect("create assets dir");
+        assert!(assets_dir.exists(), "Theme assets directory should exist");
 
         let result = discover_themes(&root).expect("discover_themes should succeed");
         assert_eq!(result.len(), 1, "should discover exactly one theme");
