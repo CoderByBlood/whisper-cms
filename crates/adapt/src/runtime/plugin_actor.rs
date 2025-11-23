@@ -38,15 +38,17 @@ pub struct PluginRuntimeClient {
 }
 
 impl PluginRuntimeClient {
-    /// Spawn the plugin actor on its own dedicated thread.
+    /// Spawn the plugin actor on the Tokio `LocalSet` thread.
     ///
     /// The `PluginRuntime<BoaEngine>` (and the underlying Boa context)
     /// will **never leave** that thread, satisfying the single-threaded
-    /// requirement.
+    /// requirement. This function **must** be called from within a
+    /// `tokio::task::LocalSet::run_until(...)` context so that
+    /// `spawn_local` is allowed.
     pub fn spawn(runtime: PluginRuntime<BoaEngine>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<PluginCommand>();
 
-        // Move runtime and receiver into a new OS thread.
+        // Spawn the actor loop as a !Send task bound to the LocalSet thread.
         tokio::task::spawn_local(async move {
             plugin_actor_loop(runtime, rx).await;
         });
@@ -71,13 +73,6 @@ impl PluginRuntimeClient {
     }
 
     /// Run `before_all` against the runtime and return the updated ctx.
-    ///
-    /// Typical usage:
-    ///
-    /// ```ignore
-    /// let new_ctx = plugin_client.before_all(ctx).await?;
-    /// ctx = new_ctx;
-    /// ```
     pub async fn before_all(&self, ctx: RequestContext) -> Result<RequestContext, RuntimeError> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -123,7 +118,10 @@ fn channel_error(msg: &str) -> RuntimeError {
     RuntimeError::ThemeBootstrap(msg.to_string())
 }
 
-/// Actor event loop – runs on a dedicated OS thread + current-thread runtime.
+/// Actor event loop – runs on the Tokio `LocalSet` thread.
+///
+/// All interaction with `PluginRuntime<BoaEngine>` happens here, on a single
+/// thread, so Boa's single-threaded requirement is upheld.
 async fn plugin_actor_loop(
     mut runtime: PluginRuntime<BoaEngine>,
     mut rx: mpsc::UnboundedReceiver<PluginCommand>,
@@ -154,7 +152,7 @@ async fn plugin_actor_loop(
             }
 
             PluginCommand::Shutdown => {
-                // Just break the loop; actor thread will exit.
+                // Break the loop; actor task will exit and drop the runtime.
                 break;
             }
         }

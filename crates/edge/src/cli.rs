@@ -5,16 +5,22 @@ use crate::{
         filter::{self, DEFAULT_CONTENT_EXTS},
         scan::FolderScanConfig,
     },
-    proxy::EdgeError,
+    proxy::{EdgeError, EdgeRuntime},
+    router::build_app_router,
 };
-use adapt::cmd::{Commands, StartCmd};
+use adapt::{
+    cmd::{Commands, StartCmd},
+    runtime::bootstrap::bootstrap_all,
+};
+use axum::Router;
 use chrono::Utc;
 use clap::Parser;
 use domain::{
     doc::Document,
     setting::{ContentSettings, ExtensionSettings, Settings},
 };
-use std::{path::PathBuf, process::ExitCode};
+use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
+use tokio::task::LocalSet;
 
 pub type Result<T> = std::result::Result<T, EdgeError>;
 
@@ -28,151 +34,287 @@ pub struct Cli {
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn start() -> ExitCode {
-    let cli = Cli::parse();
+    let local = LocalSet::new();
 
-    let result = match &cli.command {
-        Commands::Start(start) => do_start(start).await,
-    };
+    local
+        .run_until(async {
+            // Everything in here can safely call spawn_local,
+            // including bootstrap_all → PluginRuntimeClient::spawn.
+            let cli = Cli::parse();
 
-    dbg!(&result);
+            let result = match cli.command {
+                Commands::Start(start) => do_start(start).await,
+            };
 
-    result
-        .map(|_| ExitCode::SUCCESS)
-        .unwrap_or(ExitCode::FAILURE)
+            dbg!(&result);
+
+            result
+                .map(|_| ExitCode::SUCCESS)
+                .unwrap_or(ExitCode::FAILURE)
+        })
+        .await
 }
 
-async fn do_start(start: &StartCmd) -> Result<()> {
+struct CommandIssued;
+struct SettingsLoaded;
+struct ContentLoaded;
+struct ExtensionsLoaded;
+struct RouterCreated;
+struct ServerStarted;
+
+struct StartProcess<State> {
+    command: StartCmd,
+    settings: Settings,
+    content_settings: Option<ContentSettings>,
+    documents: Option<Vec<Document>>,
+    extensions: Option<(Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>)>,
+    router: Option<Router>,
+    runtime: Option<EdgeRuntime>,
+    _state: PhantomData<State>,
+}
+
+impl StartProcess<CommandIssued> {
+    /// Load settings from `<dir>/settings.toml`.
+    ///
+    /// `dir` is the directory that contains `settings.toml`.
+    fn parse_settings_file(command: StartCmd) -> Result<StartProcess<SettingsLoaded>> {
+        let dir = command.dir.clone();
+        // Ensure directory exists
+        if !dir.exists() {
+            return Err(EdgeError::Config(format!(
+                "Settings directory does not exist: {}",
+                dir.display()
+            )));
+        }
+
+        // Construct full path to file
+        let mut path = PathBuf::from(dir);
+        path.push("settings.toml");
+
+        // Ensure file exists
+        if !path.exists() {
+            return Err(EdgeError::Config(format!(
+                "settings.toml not found at {}",
+                path.display()
+            )));
+        }
+
+        // Read the file
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            EdgeError::Config(format!("Failed reading {}: {}", path.display(), err))
+        })?;
+
+        // Deserialize
+        let settings: Settings = toml::from_str(&text).map_err(|err| {
+            EdgeError::Config(format!(
+                "Invalid settings.toml at {}: {}",
+                path.display(),
+                err
+            ))
+        })?;
+
+        Ok(StartProcess::<SettingsLoaded>::new(command, settings))
+    }
+}
+
+impl StartProcess<SettingsLoaded> {
+    fn new(command: StartCmd, settings: Settings) -> Self {
+        Self {
+            command,
+            settings,
+            content_settings: None,
+            documents: None,
+            extensions: None,
+            router: None,
+            runtime: None,
+            _state: PhantomData,
+        }
+    }
+    async fn scan_content_directory(self) -> Result<StartProcess<ContentLoaded>> {
+        let dir = self.command.dir.clone();
+        let content_settings = match self.settings.content.clone() {
+            Some(settings) => settings,
+            None => ContentSettings {
+                dir: PathBuf::from("./content/"),
+                index_dir: None,
+                extensions: vec![],
+            },
+        };
+
+        let index_dir = match content_settings.index_dir.clone() {
+            Some(d) => dir.join(d),
+            None => dir.join("./content_index/"),
+        };
+
+        let index_dir = index_dir.join(
+            regex::Regex::new(r"[^A-Za-z0-9]")
+                .unwrap()
+                .replace_all(Utc::now().to_rfc3339().as_str(), "_")
+                .to_string(),
+        );
+
+        let root = dir.join(&content_settings.dir);
+        let mut cfg = FolderScanConfig::default();
+
+        cfg.file_re = Some(filter::build_filename_regex(
+            match content_settings.extensions.len() {
+                0 => DEFAULT_CONTENT_EXTS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                _ => content_settings.extensions.clone(),
+            },
+        )?);
+
+        let (docs, errs) = scan_and_process_docs(&root, cfg, index_dir).await?;
+        dbg!(docs.len());
+        dbg!(errs.len());
+        dbg!(errs.first());
+        Ok(self.done(content_settings, docs))
+    }
+
+    fn done(self, cnt_sets: ContentSettings, docs: Vec<Document>) -> StartProcess<ContentLoaded> {
+        StartProcess {
+            command: self.command,
+            settings: self.settings,
+            documents: Some(docs),
+            content_settings: Some(cnt_sets),
+            extensions: self.extensions,
+            router: self.router,
+            runtime: self.runtime,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl StartProcess<ContentLoaded> {
+    fn scan_extensions_directory(self) -> Result<StartProcess<ExtensionsLoaded>> {
+        let dir = self.command.dir.clone();
+        let ext_settings = match &self.settings.ext {
+            Some(ext) => ext,
+            None => &ExtensionSettings {
+                dir: PathBuf::from("./extensions/"),
+            },
+        };
+
+        let ext_dir = dir.join(&ext_settings.dir);
+
+        let plugins = ext::discover_plugins(ext_dir.join("plugins/"))?;
+        let themes = ext::discover_themes(ext_dir.join("themes/"))?;
+
+        Ok(self.done(plugins, themes))
+    }
+
+    fn done(
+        self,
+        plugins: Vec<DiscoveredPlugin>,
+        themes: Vec<DiscoveredTheme>,
+    ) -> StartProcess<ExtensionsLoaded> {
+        StartProcess {
+            command: self.command,
+            settings: self.settings,
+            documents: self.documents,
+            content_settings: self.content_settings,
+            extensions: Some((plugins, themes)),
+            router: self.router,
+            runtime: self.runtime,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl StartProcess<ExtensionsLoaded> {
+    fn register_routes_and_middleware(self) -> Result<StartProcess<RouterCreated>> {
+        let (plugins, themes) = self.extensions.as_ref().unwrap();
+        let plugin_cfgs = plugins.iter().map(|p| (&p.spec).into()).collect();
+        let theme_cfgs = themes.iter().map(|t| (&t.spec).into()).collect();
+        let theme_bnds = themes.iter().map(|t| (&t.spec).into()).collect();
+        let handles = bootstrap_all(plugin_cfgs, theme_cfgs)?;
+        let router = build_app_router(
+            self.content_settings.as_ref().unwrap().dir.clone(),
+            handles,
+            theme_bnds,
+        );
+        Ok(self.done(router))
+    }
+
+    fn done(self, router: Router) -> StartProcess<RouterCreated> {
+        StartProcess {
+            command: self.command,
+            settings: self.settings,
+            documents: self.documents,
+            content_settings: self.content_settings,
+            extensions: self.extensions,
+            router: Some(router),
+            runtime: self.runtime,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl StartProcess<RouterCreated> {
+    async fn start_servers(mut self) -> Result<StartProcess<ServerStarted>> {
+        let router = self.router.take().unwrap();
+        let settings = self.settings.clone();
+        let make_router = move || router;
+
+        Ok(self.done(EdgeRuntime::start(settings, make_router).await?))
+    }
+
+    fn done(self, rt: EdgeRuntime) -> StartProcess<ServerStarted> {
+        StartProcess {
+            command: self.command,
+            settings: self.settings,
+            documents: self.documents,
+            content_settings: self.content_settings,
+            extensions: self.extensions,
+            router: self.router,
+            runtime: Some(rt),
+            _state: PhantomData,
+        }
+    }
+}
+
+impl StartProcess<ServerStarted> {
+    async fn is_running(&self) -> Result<()> {
+        Ok(futures::future::pending::<()>().await)
+    }
+}
+
+async fn do_start(start: StartCmd) -> Result<()> {
     // parse settings file -> does the settings file exist?  If yes, parse it
     let then = Utc::now();
-    let settings = parse_settings_file(&start.dir)?;
+    let process = StartProcess::<CommandIssued>::parse_settings_file(start)?;
     dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
-    //dbg!(&settings);
+    dbg!("Settings parsed");
 
     // scan for content -> does the content directory exist?  If yes, scan it
     let then = Utc::now();
-    let _docs = scan_content_directory(&start.dir, &settings).await?;
+    let process = process.scan_content_directory().await?;
     dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
+    dbg!("Content scanned");
 
     // scan for extensions -> does the extensions directory exist?  If yes, scan it
     let then = Utc::now();
-    let (_plugins, _extensions) = scan_extensions_directory(&start.dir, &settings)?;
+    let process = process.scan_extensions_directory()?;
     dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
+    dbg!("Extensions scanned");
 
     // register routes and middleware in Axum
-    // start Axum (web server)
-    // start Pingora (edge controller)
+    let then = Utc::now();
+    let process = process.register_routes_and_middleware()?;
+    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
+    dbg!("Routes registered");
+
+    // start servers (Axum web server/Pingora edge controller)
+    let then = Utc::now();
+    let process = process.start_servers().await?;
+    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
+    dbg!("Servers started");
+
+    while let Ok(()) = process.is_running().await {
+        dbg!("Restarting the server");
+    }
+
     Ok(())
-}
-
-/// Load settings from `<dir>/settings.toml`.
-///
-/// `dir` is the directory that contains `settings.toml`.
-fn parse_settings_file(dir: &PathBuf) -> Result<Settings> {
-    // Ensure directory exists
-    if !dir.exists() {
-        return Err(EdgeError::Config(format!(
-            "Settings directory does not exist: {}",
-            dir.display()
-        )));
-    }
-
-    // Construct full path to file
-    let mut path = PathBuf::from(dir);
-    path.push("settings.toml");
-
-    // Ensure file exists
-    if !path.exists() {
-        return Err(EdgeError::Config(format!(
-            "settings.toml not found at {}",
-            path.display()
-        )));
-    }
-
-    // Read the file
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| EdgeError::Config(format!("Failed reading {}: {}", path.display(), err)))?;
-
-    // Deserialize
-    let settings: Settings = toml::from_str(&text).map_err(|err| {
-        EdgeError::Config(format!(
-            "Invalid settings.toml at {}: {}",
-            path.display(),
-            err
-        ))
-    })?;
-
-    Ok(settings)
-}
-
-async fn scan_content_directory(dir: &PathBuf, settings: &Settings) -> Result<Vec<Document>> {
-    let content_settings = match &settings.content {
-        Some(settings) => settings,
-        None => &ContentSettings {
-            dir: PathBuf::from("./content/"),
-            index_dir: None,
-            extensions: vec![],
-        },
-    };
-
-    let index_dir = match content_settings.index_dir.clone() {
-        Some(d) => dir.join(d),
-        None => dir.join("./content_index/"),
-    };
-
-    let index_dir = index_dir.join(
-        regex::Regex::new(r"[^A-Za-z0-9]")
-            .unwrap()
-            .replace_all(Utc::now().to_rfc3339().as_str(), "_")
-            .to_string(),
-    );
-
-    let root = dir.join(&content_settings.dir);
-    let mut cfg = FolderScanConfig::default();
-
-    cfg.file_re = Some(filter::build_filename_regex(
-        match content_settings.extensions.len() {
-            0 => DEFAULT_CONTENT_EXTS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
-            _ => content_settings.extensions.clone(),
-        },
-    )?);
-
-    let (docs, errs) = scan_and_process_docs(&root, cfg, index_dir).await?;
-    dbg!(docs.len());
-    dbg!(errs.len());
-    dbg!(errs.first());
-    Ok(docs)
-}
-
-fn scan_extensions_directory(
-    dir: &PathBuf,
-    settings: &Settings,
-) -> Result<(Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>)> {
-    let ext_settings = match &settings.ext {
-        Some(ext) => ext,
-        None => &ExtensionSettings {
-            dir: PathBuf::from("./extensions/"),
-        },
-    };
-
-    let ext_dir = dir.join(&ext_settings.dir);
-
-    let plugins = ext::discover_plugins(ext_dir.join("plugins/"))?;
-    let themes = ext::discover_themes(ext_dir.join("themes/"))?;
-
-    Ok((plugins, themes))
-}
-
-fn _register_routes_and_middleware() {
-    // Implementation details
-}
-
-fn _start_axum_web_server() {
-    // Implementation details
-}
-
-fn _start_pingora_edge_controller() {
-    // Implementation details
 }

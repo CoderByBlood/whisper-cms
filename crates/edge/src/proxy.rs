@@ -273,7 +273,7 @@ impl EdgeRuntime {
     ///   - **Still start the WebServer** (on loopback) so you can configure/fix certs.
     pub async fn start<F>(settings: Settings, make_router: F) -> Result<Self, EdgeError>
     where
-        F: Fn() -> Router + Send + Sync + 'static,
+        F: FnOnce() -> Router + Send + Sync + 'static,
     {
         tracing_subscriber::fmt().with_env_filter("info").init();
 
@@ -309,6 +309,8 @@ impl EdgeRuntime {
         let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
         });
+
+        tracing::info!("Axum WebServer started on {}", initial_addr);
 
         tokio::spawn(async move {
             if let Err(err) = serve.await {

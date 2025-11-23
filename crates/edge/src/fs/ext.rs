@@ -23,6 +23,15 @@ impl ThemeBinding {
     }
 }
 
+impl From<&ThemeSpec> for ThemeBinding {
+    fn from(spec: &ThemeSpec) -> Self {
+        ThemeBinding {
+            mount_path: spec.mount_path.to_owned(),
+            theme_name: spec.name.to_owned(),
+        }
+    }
+}
+
 /// A plugin discovered on disk.
 #[derive(Debug, Clone)]
 pub struct DiscoveredPlugin {
@@ -33,6 +42,7 @@ pub struct DiscoveredPlugin {
 /// A theme discovered on disk.
 #[derive(Debug, Clone)]
 pub struct DiscoveredTheme {
+    pub mount_path: String,
     pub dir: PathBuf,
     pub assets_dir: Option<PathBuf>,
     pub spec: ThemeSpec,
@@ -50,6 +60,7 @@ struct PluginManifest {
 
 #[derive(Debug, Deserialize)]
 struct ThemeManifest {
+    pub mount: String,
     pub id: Option<String>,
     pub name: Option<String>,
 }
@@ -193,10 +204,12 @@ pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, R
         let spec = ThemeSpec {
             id,
             name,
+            mount_path: manifest.mount.clone(),
             source: js_src,
         };
 
         out.push(DiscoveredTheme {
+            mount_path: manifest.mount,
             dir: path,
             assets_dir,
             spec,
@@ -588,6 +601,7 @@ mod tests {
                 id = "t1"
                 name = "Theme One"
                 main = "missing.js"
+                mount = "/"
             "#,
         )
         .expect("write manifest");
@@ -615,7 +629,7 @@ mod tests {
         fs::create_dir_all(&theme_dir).expect("create theme dir");
 
         let manifest_path = theme_dir.join("theme.toml");
-        fs::write(&manifest_path, "").expect("write empty manifest");
+        fs::write(&manifest_path, r#"mount = "/""#).expect("write empty manifest");
 
         let js_path = theme_dir.join("theme.js");
         let js_source = "console.log('theme');";
@@ -649,6 +663,7 @@ mod tests {
             r#"
                 id = "theme-123"
                 name = "My Theme"
+                mount = "/"
             "#,
         )
         .expect("write manifest");
@@ -683,7 +698,7 @@ mod tests {
         // Theme A
         let dir_a = root.join("theme_a");
         fs::create_dir_all(&dir_a).expect("create theme_a");
-        fs::write(dir_a.join("theme.toml"), "").expect("write manifest A");
+        fs::write(dir_a.join("theme.toml"), r#"mount = "/""#).expect("write manifest A");
         fs::write(dir_a.join("theme.js"), "console.log('A');").expect("write js A");
 
         // Theme B
@@ -694,6 +709,7 @@ mod tests {
             r#"
                 id = "theme-b-id"
                 name = "Theme B"
+                mount = "/"
             "#,
         )
         .expect("write manifest B");

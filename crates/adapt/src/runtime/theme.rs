@@ -16,15 +16,24 @@ pub struct ThemeSpec {
     /// Friendly display name.
     pub name: String,
 
+    /// Mount path.
+    pub mount_path: String,
+
     /// JavaScript source code of the theme module.
     pub source: String,
 }
 
 impl ThemeSpec {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        mount_path: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
+            mount_path: mount_path.into(),
             source: source.into(),
         }
     }
@@ -212,7 +221,7 @@ mod tests {
 
     #[test]
     fn theme_spec_new_populates_fields() {
-        let spec = ThemeSpec::new("id-123", "My Theme", "/* js source */");
+        let spec = ThemeSpec::new("id-123", "My Theme", "/", "/* js source */");
 
         assert_eq!(spec.id, "id-123");
         assert_eq!(spec.name, "My Theme");
@@ -226,7 +235,7 @@ mod tests {
     #[test]
     fn theme_runtime_new_loads_module_successfully() {
         let engine = MockEngine::default();
-        let spec = ThemeSpec::new("themeA", "Theme A", "/* theme js */");
+        let spec = ThemeSpec::new("themeA", "Theme A", "/", "/* theme js */");
 
         let rt = ThemeRuntime::new(engine, spec);
 
@@ -237,7 +246,7 @@ mod tests {
     #[test]
     fn theme_runtime_new_propagates_load_module_error() {
         let engine = MockEngine::with_load_error(JsError::Eval("boom".into()));
-        let spec = ThemeSpec::new("themeErr", "Theme Err", "/* theme js */");
+        let spec = ThemeSpec::new("themeErr", "Theme Err", "/", "/* theme js */");
 
         let rt = ThemeRuntime::new(engine, spec);
 
@@ -250,7 +259,7 @@ mod tests {
     #[test]
     fn theme_runtime_new_calls_load_module_with_spec_id_and_source() {
         let mut engine = MockEngine::default();
-        let spec = ThemeSpec::new("themeX", "Theme X", "/* theme js */");
+        let spec = ThemeSpec::new("themeX", "Theme X", "/", "/* theme js */");
 
         // call load_module directly on the mock to verify behavior
         let res = engine.load_module(&spec.id, &spec.source);
@@ -268,7 +277,7 @@ mod tests {
     #[test]
     fn init_calls_init_function_when_defined() {
         let engine = MockEngine::default().with_call_result("theme1.init", Ok(JsValue::Null));
-        let spec = ThemeSpec::new("theme1", "Theme 1", "/* js */");
+        let spec = ThemeSpec::new("theme1", "Theme 1", "/", "/* js */");
 
         let mut rt = ThemeRuntime::new(engine, spec).expect("runtime should construct");
         let ctx = dummy_ctx();
@@ -292,7 +301,7 @@ mod tests {
             "theme2.init",
             Err(JsError::Call("theme2.init is not a function".into())),
         );
-        let spec = ThemeSpec::new("theme2", "Theme 2", "/* js */");
+        let spec = ThemeSpec::new("theme2", "Theme 2", "/", "/* js */");
 
         let mut rt = ThemeRuntime::new(engine, spec).expect("runtime should construct");
         let ctx = dummy_ctx();
@@ -314,7 +323,7 @@ mod tests {
     fn init_propagates_other_call_errors() {
         let engine = MockEngine::default()
             .with_call_result("theme3.init", Err(JsError::Call("some other error".into())));
-        let spec = ThemeSpec::new("theme3", "Theme 3", "/* js */");
+        let spec = ThemeSpec::new("theme3", "Theme 3", "/", "/* js */");
 
         let mut rt = ThemeRuntime::new(engine, spec).expect("runtime should construct");
         let ctx = dummy_ctx();
@@ -339,7 +348,7 @@ mod tests {
     fn handle_applies_updates_when_theme_returns_object() {
         let engine = MockEngine::default()
             .with_call_result("theme4.handle", Ok(JsValue::Object(HashMap::new())));
-        let spec = ThemeSpec::new("theme4", "Theme 4", "/* js */");
+        let spec = ThemeSpec::new("theme4", "Theme 4", "/", "/* js */");
 
         let mut rt = ThemeRuntime::new(engine, spec).expect("runtime should construct");
         let mut ctx = dummy_ctx();
@@ -361,7 +370,7 @@ mod tests {
     fn handle_allows_non_object_result_without_error() {
         let engine =
             MockEngine::default().with_call_result("theme5.handle", Ok(JsValue::Bool(true)));
-        let spec = ThemeSpec::new("theme5", "Theme 5", "/* js */");
+        let spec = ThemeSpec::new("theme5", "Theme 5", "/", "/* js */");
 
         let mut rt = ThemeRuntime::new(engine, spec).expect("runtime should construct");
         let mut ctx = dummy_ctx();
@@ -382,7 +391,7 @@ mod tests {
     fn handle_propagates_call_error() {
         let engine = MockEngine::default()
             .with_call_result("theme6.handle", Err(JsError::Call("boom".into())));
-        let spec = ThemeSpec::new("theme6", "Theme 6", "/* js */");
+        let spec = ThemeSpec::new("theme6", "Theme 6", "/", "/* js */");
 
         let mut rt = ThemeRuntime::new(engine, spec).expect("runtime should construct");
         let mut ctx = dummy_ctx();

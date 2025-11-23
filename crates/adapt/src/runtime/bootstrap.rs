@@ -33,6 +33,16 @@ impl From<&PluginConfig> for PluginSpec {
     }
 }
 
+impl From<&PluginSpec> for PluginConfig {
+    fn from(spec: &PluginSpec) -> Self {
+        PluginConfig {
+            id: spec.id.to_owned(),
+            name: spec.name.to_owned(),
+            source: spec.source.to_owned(),
+        }
+    }
+}
+
 /// Configuration for themes.
 ///
 /// Likewise, this is the host-side config that you build from manifests or
@@ -43,13 +53,26 @@ pub struct ThemeConfig {
     pub id: String,
     /// Human-readable display name.
     pub name: String,
+    /// Human-readable display name.
+    pub mount_path: String,
     /// JavaScript source of the theme (already loaded from disk).
     pub source: String,
 }
 
 impl From<&ThemeConfig> for ThemeSpec {
     fn from(cfg: &ThemeConfig) -> Self {
-        ThemeSpec::new(&cfg.id, &cfg.name, &cfg.source)
+        ThemeSpec::new(&cfg.id, &cfg.name, &cfg.mount_path, &cfg.source)
+    }
+}
+
+impl From<&ThemeSpec> for ThemeConfig {
+    fn from(spec: &ThemeSpec) -> Self {
+        ThemeConfig {
+            id: spec.id.to_owned(),
+            name: spec.name.to_owned(),
+            mount_path: spec.mount_path.to_owned(),
+            source: spec.source.to_owned(),
+        }
     }
 }
 
@@ -217,6 +240,7 @@ mod tests {
         let cfg = ThemeConfig {
             id: "t1".into(),
             name: "Theme One".into(),
+            mount_path: "/".into(),
             source: "globalThis.t1={handle(x){return x}}".into(),
         };
 
@@ -237,11 +261,13 @@ mod tests {
             ThemeConfig {
                 id: "a".into(),
                 name: "A".into(),
+                mount_path: "/".into(),
                 source: r#"globalThis["a"]={handle(ctx){return ctx}}"#.into(),
             },
             ThemeConfig {
                 id: "b".into(),
                 name: "B".into(),
+                mount_path: "/".into(),
                 source: r#"globalThis["b"]={handle(ctx){return ctx}}"#.into(),
             },
         ];
@@ -268,6 +294,7 @@ mod tests {
         let cfgs = vec![ThemeConfig {
             id: "bad".into(),
             name: "Broken Theme".into(),
+            mount_path: "/".into(),
             source: "this is not valid JS @@@".into(),
         }];
 
@@ -284,6 +311,7 @@ mod tests {
         let cfg = ThemeConfig {
             id: "th".into(),
             name: "Theme".into(),
+            mount_path: "/".into(),
             source: r#"
                 globalThis["th"] = {
                     init(x){ x.front_matter = { "ok": true }; return x; },
@@ -311,6 +339,7 @@ mod tests {
         let cfg = ThemeConfig {
             id: "th".into(),
             name: "Theme".into(),
+            mount_path: "/".into(),
             source: r#"
                 globalThis["th"] = {
                     handle(ctx){
@@ -345,6 +374,7 @@ mod tests {
         let cfg = ThemeConfig {
             id: "th".into(),
             name: "Theme".into(),
+            mount_path: "/".into(),
             source: r#"
                 globalThis["th"] = {
                     handle(ctx){ throw new Error("boom"); }
@@ -370,6 +400,7 @@ mod tests {
         let cfg = ThemeConfig {
             id: "th".into(),
             name: "Theme".into(),
+            mount_path: "/".into(),
             source: r#"
                 globalThis["th"] = {
                     handle(ctx){ throw new Error("boom"); }
@@ -406,6 +437,7 @@ mod tests {
         let theme_cfgs = vec![ThemeConfig {
             id: "t1".into(),
             name: "Theme 1".into(),
+            mount_path: "/".into(),
             source: r#"globalThis["t1"]={handle(x){return x}}"#.into(),
         }];
 

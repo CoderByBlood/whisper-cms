@@ -1,24 +1,12 @@
 // crates/edge/src/router.rs
 
 use crate::fs::ext::ThemeBinding;
-use adapt::core::context::{RequestContext, ResponseBodySpec};
 use adapt::http::plugin_middleware::PluginLayer;
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::{HeaderMap, Request, StatusCode},
-    response::Response,
-    routing::any,
-    Router,
-};
-use http::{header, Version};
-use serde_json::{json, Map as JsonMap, Value as Json};
-use std::collections::HashMap;
-use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use axum::Router;
+use std::path::PathBuf;
 use tower::Layer;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,9 +15,9 @@ use tower::Layer;
 
 #[derive(Clone)]
 struct ThemeAppState {
-    content_root: PathBuf,
-    theme_client: ThemeRuntimeClient,
-    theme_id: String,
+    _content_root: PathBuf,
+    _theme_client: ThemeRuntimeClient,
+    _theme_id: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,14 +126,12 @@ pub fn build_app_router(
 
         // Each mounted router gets its own small state (incl. theme_id)
         let state = ThemeAppState {
-            content_root: content_root.clone(),
-            theme_client: theme_client.clone(),
-            theme_id: theme_id.clone(),
+            _content_root: content_root.clone(),
+            _theme_client: theme_client.clone(),
+            _theme_id: theme_id.clone(),
         };
 
-        // Route "/*rest" under this mount path to the theme handler
         let nested = Router::new()
-            .route("/*rest", any(theme_route_handler))
             .with_state(state)
             // JS-plugin actor client layer (currently pass-through)
             .layer(PluginLayer::new(plugin_client.clone()))
@@ -153,131 +139,13 @@ pub fn build_app_router(
             .layer(PluginLoggingLayer::new(theme_id.clone()))
             .layer(PluginCircuitBreakerLayer::new(theme_id));
 
-        app = app.nest(&mount_path, nested);
+        app = match mount_path.as_str() {
+            "/" => app.merge(nested),
+            _ => app.nest(&mount_path, nested),
+        };
     }
 
     app
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Handler + helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Axum handler for all requests under a given theme mount.
-///
-/// State carries `content_root`, `theme_client`, and the bound `theme_id`.
-async fn theme_route_handler(
-    State(state): State<ThemeAppState>,
-    req: Request<Body>,
-) -> Result<Response<Body>, Infallible> {
-    let ThemeAppState {
-        content_root,
-        theme_client,
-        theme_id,
-    } = state;
-
-    // Build a RequestContext from the HTTP request + content root.
-    let ctx = build_request_context(&req, &content_root);
-
-    // Ask the theme actor to render a ResponseBodySpec.
-    let result = theme_client.render(&theme_id, ctx).await;
-
-    let resp = match result {
-        Ok(ResponseBodySpec::HtmlString(html)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(Body::from(html))
-            .unwrap(),
-
-        Ok(ResponseBodySpec::JsonValue(val)) => {
-            let body = serde_json::to_vec(&val).unwrap_or_else(|_| b"{}".to_vec());
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body))
-                .unwrap()
-        }
-
-        Ok(ResponseBodySpec::HtmlTemplate { .. }) => Response::builder()
-            .status(StatusCode::NOT_IMPLEMENTED)
-            .body(Body::from(
-                "HtmlTemplate rendering is not wired at the edge layer",
-            ))
-            .unwrap(),
-
-        Ok(ResponseBodySpec::None | ResponseBodySpec::Unset) => Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .body(Body::empty())
-            .unwrap(),
-
-        Err(_e) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from("Theme runtime error"))
-            .unwrap(),
-    };
-
-    Ok(resp)
-}
-
-fn http_version_to_json(version: Version) -> Json {
-    let s = match version {
-        Version::HTTP_09 => "HTTP/0.9",
-        Version::HTTP_10 => "HTTP/1.0",
-        Version::HTTP_11 => "HTTP/1.1",
-        Version::HTTP_2 => "HTTP/2.0",
-        Version::HTTP_3 => "HTTP/3.0",
-        _ => "HTTP/1.1",
-    };
-    Json::String(s.to_string())
-}
-
-fn headers_to_json(headers: &HeaderMap) -> Json {
-    let mut obj = JsonMap::new();
-    for (name, value) in headers.iter() {
-        if let Ok(s) = value.to_str() {
-            obj.insert(name.to_string(), Json::String(s.to_string()));
-        }
-    }
-    Json::Object(obj)
-}
-
-fn query_to_params_json(raw_query: &str) -> Json {
-    if raw_query.is_empty() {
-        return Json::Object(JsonMap::new());
-    }
-
-    let map: HashMap<String, String> = form_urlencoded::parse(raw_query.as_bytes())
-        .into_owned()
-        .collect();
-    serde_json::to_value(map).unwrap_or_else(|_| Json::Object(JsonMap::new()))
-}
-
-/// Build a `RequestContext` from an Axum `Request<Body>`.
-///
-/// - Parses query params into a `HashMap<String, String>`
-/// - Infers `content_kind` + `body_path` from the request path & extensions.
-fn build_request_context(req: &Request<Body>, _content_root: &Path) -> RequestContext {
-    let path_str = req.uri().path().to_string();
-    let raw_query = req.uri().query().unwrap_or_default();
-
-    let req_path = Json::String(path_str);
-    let req_method = Json::String(req.method().to_string());
-    let req_version = http_version_to_json(req.version());
-    let req_headers = headers_to_json(req.headers());
-    let req_params = query_to_params_json(raw_query);
-
-    // For now, content_meta/theme_config/plugin_configs are empty; they’re
-    // filled in by other parts of the pipeline (resolver, settings, etc.).
-    RequestContext::builder()
-        .path(req_path)
-        .method(req_method)
-        .version(req_version)
-        .headers(req_headers)
-        .params(req_params)
-        .content_meta(json!({}))
-        .theme_config(json!({}))
-        .plugin_configs(HashMap::new())
-        .build()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -287,10 +155,138 @@ fn build_request_context(req: &Request<Body>, _content_root: &Path) -> RequestCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::Uri;
+    use adapt::core::{RequestContext, ResponseBodySpec};
+    use axum::{
+        body::Body,
+        extract::{Request, State},
+        http::Uri,
+        response::Response,
+    };
     use domain::doc::BodyKind;
-    use http::{Method, Request as HttpRequest};
-    use std::str::FromStr;
+    use http::{header, HeaderMap, Method, Request as HttpRequest, StatusCode, Version};
+    use serde_json::{json, Map as JsonMap, Value as Json};
+    use std::{collections::HashMap, convert::Infallible, path::Path, str::FromStr};
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Handler + helpers
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Axum handler for all requests under a given theme mount.
+    ///
+    /// State carries `content_root`, `theme_client`, and the bound `theme_id`.
+    async fn _theme_route_handler(
+        State(state): State<ThemeAppState>,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, Infallible> {
+        let ThemeAppState {
+            _content_root: content_root,
+            _theme_client: theme_client,
+            _theme_id: theme_id,
+        } = state;
+
+        // Build a RequestContext from the HTTP request + content root.
+        let ctx = build_request_context(&req, &content_root);
+
+        // Ask the theme actor to render a ResponseBodySpec.
+        let result = theme_client.render(&theme_id, ctx).await;
+
+        let resp = match result {
+            Ok(ResponseBodySpec::HtmlString(html)) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(Body::from(html))
+                .unwrap(),
+
+            Ok(ResponseBodySpec::JsonValue(val)) => {
+                let body = serde_json::to_vec(&val).unwrap_or_else(|_| b"{}".to_vec());
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+
+            Ok(ResponseBodySpec::HtmlTemplate { .. }) => Response::builder()
+                .status(StatusCode::NOT_IMPLEMENTED)
+                .body(Body::from(
+                    "HtmlTemplate rendering is not wired at the edge layer",
+                ))
+                .unwrap(),
+
+            Ok(ResponseBodySpec::None | ResponseBodySpec::Unset) => Response::builder()
+                .status(StatusCode::NO_CONTENT)
+                .body(Body::empty())
+                .unwrap(),
+
+            Err(_e) => Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Theme runtime error"))
+                .unwrap(),
+        };
+
+        Ok(resp)
+    }
+
+    fn http_version_to_json(version: Version) -> Json {
+        let s = match version {
+            Version::HTTP_09 => "HTTP/0.9",
+            Version::HTTP_10 => "HTTP/1.0",
+            Version::HTTP_11 => "HTTP/1.1",
+            Version::HTTP_2 => "HTTP/2.0",
+            Version::HTTP_3 => "HTTP/3.0",
+            _ => "HTTP/1.1",
+        };
+        Json::String(s.to_string())
+    }
+
+    fn headers_to_json(headers: &HeaderMap) -> Json {
+        let mut obj = JsonMap::new();
+        for (name, value) in headers.iter() {
+            if let Ok(s) = value.to_str() {
+                obj.insert(name.to_string(), Json::String(s.to_string()));
+            }
+        }
+        Json::Object(obj)
+    }
+
+    fn query_to_params_json(raw_query: &str) -> Json {
+        if raw_query.is_empty() {
+            return Json::Object(JsonMap::new());
+        }
+
+        let map: HashMap<String, String> = form_urlencoded::parse(raw_query.as_bytes())
+            .into_owned()
+            .collect();
+        serde_json::to_value(map).unwrap_or_else(|_| Json::Object(JsonMap::new()))
+    }
+
+    /// Build a `RequestContext` from an Axum `Request<Body>`.
+    ///
+    /// - Parses query params into a `HashMap<String, String>`
+    /// - Infers `content_kind` + `body_path` from the request path & extensions.
+    fn build_request_context(req: &Request<Body>, _content_root: &Path) -> RequestContext {
+        let path_str = req.uri().path().to_string();
+        let raw_query = req.uri().query().unwrap_or_default();
+
+        let req_path = Json::String(path_str);
+        let req_method = Json::String(req.method().to_string());
+        let req_version = http_version_to_json(req.version());
+        let req_headers = headers_to_json(req.headers());
+        let req_params = query_to_params_json(raw_query);
+
+        // For now, content_meta/theme_config/plugin_configs are empty; they’re
+        // filled in by other parts of the pipeline (resolver, settings, etc.).
+        RequestContext::builder()
+            .path(req_path)
+            .method(req_method)
+            .version(req_version)
+            .headers(req_headers)
+            .params(req_params)
+            .content_meta(json!({}))
+            .theme_config(json!({}))
+            .plugin_configs(HashMap::new())
+            .build()
+    }
 
     /// Parse a query string into a `HashMap<String, String>`, URL-decoding keys/values.
     ///
