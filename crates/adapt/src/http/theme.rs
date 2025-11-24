@@ -1,7 +1,6 @@
 // crates/adapt/src/http/theme.rs
 
 use crate::http::app::AppState;
-use crate::http::resolver::{build_request_context, resolve};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -9,6 +8,7 @@ use axum::{
     response::Response,
 };
 use serve::context::{RequestContext, ResponseBodySpec};
+use serve::resolver::{build_request_context, resolve};
 use std::borrow::Cow;
 use std::collections::HashMap;
 

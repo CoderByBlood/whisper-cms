@@ -1,13 +1,14 @@
 // crates/edge/src/db/resolver.rs
 
-use adapt::http::resolver::{ContentResolver, ResolvedContent};
 use domain::content::ContentKind;
+use domain::content::ResolvedContent;
 use gray_matter::engine::YAML;
 use gray_matter::Matter;
 use http::{HeaderMap, Method};
 use serde_json::{json, Map as JsonMap, Value as Json};
 use serve::context::ContextError;
 use serve::context::RequestContext;
+use serve::resolver::ContentResolver;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,26 +1,14 @@
 // crates/adapt/src/http/resolver.rs
 
-use domain::content::ContentKind;
+use crate::context::ContextError;
+use crate::context::RequestContext;
+use domain::content::{ContentKind, ResolvedContent};
 use http::Method;
 use serde_json::{json, Map as JsonMap, Value as Json};
-use serve::context::ContextError;
-use serve::context::RequestContext;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tracing::warn;
-
-/// Information resolved from the request path.
-///
-/// This is produced by the edge-layer resolver and used to
-/// populate `RequestContext.content_meta` and any body path
-/// that might later be turned into a StreamHandle.
-#[derive(Debug, Clone)]
-pub struct ResolvedContent {
-    pub content_kind: ContentKind,
-    pub front_matter: Json,
-    pub body_path: PathBuf,
-}
 
 /// Trait for resolving HTTP requests to content metadata.
 ///

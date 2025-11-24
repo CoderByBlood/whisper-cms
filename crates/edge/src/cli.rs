@@ -320,7 +320,7 @@ impl StartProcess<ServerStarted> {
 async fn do_start(start: StartCmd) -> Result<()> {
     // TODO: Refector out into funtion that registers all injected dependencies
     use crate::db::resolver::{edge_build_request_context, edge_resolve};
-    use adapt::http::resolver::{set_build_request_context_fn, set_resolver_fn}; // your edge impls
+    use serve::resolver::{set_build_request_context_fn, set_resolver_fn}; // your edge impls
 
     set_resolver_fn(edge_resolve).map_err(|e| EdgeError::Other(e.to_string()))?;
     set_build_request_context_fn(edge_build_request_context)

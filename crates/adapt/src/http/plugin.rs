@@ -1,10 +1,10 @@
 // crates/adapt/src/http/plugin.rs
 
 use super::error::HttpError;
-use super::resolver::{self, build_request_context, ContentResolver};
 use axum::body::Body;
 use http::{Request, Uri};
 use serve::context::RequestContext;
+use serve::resolver::{self, build_request_context, ContentResolver};
 use std::collections::HashMap;
 use std::task::{Context, Poll};
 use tower::Service;
@@ -105,9 +105,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::resolver::ResolvedContent;
     use axum::response::Response as AxumResponse;
-    use domain::content::ContentKind;
+    use domain::content::{ContentKind, ResolvedContent};
     use futures::future::{ready, Ready};
     use futures::task::noop_waker;
     use http::Method;
