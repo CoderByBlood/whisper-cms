@@ -1,3 +1,5 @@
+// crates/adapt/src/mql/index.rs
+
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

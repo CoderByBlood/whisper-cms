@@ -1,26 +1,31 @@
 // crates/edge/src/router.rs
-
-use adapt::core::context::{RequestContext, ResponseBodySpec};
+//
+use adapt::core::context::ResponseBodySpec;
 use adapt::http::plugin_middleware::PluginLayer;
+use adapt::http::resolver::build_request_context;
+use adapt::http::resolver::{ContentResolver, ResolvedContent};
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, Request, StatusCode},
+    http::{Request, StatusCode},
     response::Response,
     routing::any,
     Router,
 };
-use http::{header, Version};
-use serde_json::{json, Map as JsonMap, Value as Json};
+use domain::content::ContentKind;
+use http::header;
+use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tower::Layer;
 use tracing::{debug, error};
 
+use crate::db::resolver::FsContentResolver;
 use crate::fs::ext::ThemeBinding;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,9 +34,9 @@ use crate::fs::ext::ThemeBinding;
 
 #[derive(Clone)]
 struct ThemeAppState {
-    content_root: PathBuf,
     theme_client: ThemeRuntimeClient,
     theme_id: String,
+    resolver: Arc<dyn ContentResolver>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,8 +94,7 @@ where
 
     #[tracing::instrument(skip_all)]
     fn call(&mut self, req: Req) -> Self::Future {
-        // You could log here with tracing, including request_id, etc.
-        // tracing::debug!(plugin = %self.plugin_id, "plugin middleware invoked");
+        // tracing::debug!(plugin = %self._plugin_id, "plugin middleware invoked");
         self.inner.call(req)
     }
 }
@@ -139,6 +143,9 @@ pub fn build_app_router(
     let plugin_client = handles.plugin_client.clone();
     let theme_client = handles.theme_client.clone();
 
+    // Single shared filesystem resolver for all themes.
+    let resolver: Arc<dyn ContentResolver> = Arc::new(FsContentResolver::new(content_root.clone()));
+
     let mut app = Router::new();
 
     for binding in bindings {
@@ -147,9 +154,9 @@ pub fn build_app_router(
 
         // Each mounted router gets its own small state (incl. theme_id)
         let state = ThemeAppState {
-            content_root: content_root.clone(),
             theme_client: theme_client.clone(),
             theme_id: theme_id.clone(),
+            resolver: resolver.clone(),
         };
 
         let nested = Router::new()
@@ -174,22 +181,49 @@ pub fn build_app_router(
 // Handler + helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Parse raw query string into HashMap<String, String>.
+fn parse_query_params(raw_query: &str) -> HashMap<String, String> {
+    if raw_query.is_empty() {
+        return HashMap::new();
+    }
+
+    form_urlencoded::parse(raw_query.as_bytes())
+        .into_owned()
+        .collect()
+}
+
 /// Axum handler for all requests under a given theme mount.
 ///
-/// State carries `content_root`, `theme_client`, and the bound `theme_id`.
+/// State carries `theme_client`, `theme_id`, and the content resolver.
 #[tracing::instrument(skip_all)]
 async fn theme_route_handler(
     State(state): State<ThemeAppState>,
     req: Request<Body>,
 ) -> Result<Response<Body>, Infallible> {
     let ThemeAppState {
-        content_root,
         theme_client,
         theme_id,
+        resolver,
     } = state;
 
-    // Build a RequestContext from the HTTP request + content root.
-    let ctx = build_request_context(&req, &content_root);
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+    let raw_query = req.uri().query().unwrap_or_default().to_string();
+    let query_params = parse_query_params(&raw_query);
+
+    // Ask the resolver for content info (kind + front matter + body path).
+    let resolved = match resolver.resolve(&path, &method) {
+        Ok(r) => r,
+        Err(_e) => ResolvedContent {
+            content_kind: ContentKind::Asset,
+            front_matter: json!({}),
+            body_path: PathBuf::new(),
+        },
+    };
+
+    // Build RequestContext using the adapt-side helper.
+    let ctx = build_request_context(path.clone(), method, headers, query_params, resolved);
 
     debug!("theme_id: {}", theme_id);
 
@@ -237,68 +271,6 @@ async fn theme_route_handler(
     Ok(resp)
 }
 
-fn http_version_to_json(version: Version) -> Json {
-    let s = match version {
-        Version::HTTP_09 => "HTTP/0.9",
-        Version::HTTP_10 => "HTTP/1.0",
-        Version::HTTP_11 => "HTTP/1.1",
-        Version::HTTP_2 => "HTTP/2.0",
-        Version::HTTP_3 => "HTTP/3.0",
-        _ => "HTTP/1.1",
-    };
-    Json::String(s.to_string())
-}
-
-fn headers_to_json(headers: &HeaderMap) -> Json {
-    let mut obj = JsonMap::new();
-    for (name, value) in headers.iter() {
-        if let Ok(s) = value.to_str() {
-            obj.insert(name.to_string(), Json::String(s.to_string()));
-        }
-    }
-    Json::Object(obj)
-}
-
-fn query_to_params_json(raw_query: &str) -> Json {
-    if raw_query.is_empty() {
-        return Json::Object(JsonMap::new());
-    }
-
-    let map: HashMap<String, String> = form_urlencoded::parse(raw_query.as_bytes())
-        .into_owned()
-        .collect();
-    serde_json::to_value(map).unwrap_or_else(|_| Json::Object(JsonMap::new()))
-}
-
-/// Build a `RequestContext` from an Axum `Request<Body>`.
-///
-/// - Parses query params into a `HashMap<String, String>`
-/// - Infers `content_kind` + `body_path` from the request path & extensions.
-#[tracing::instrument(skip_all)]
-fn build_request_context(req: &Request<Body>, _content_root: &Path) -> RequestContext {
-    let path_str = req.uri().path().to_string();
-    let raw_query = req.uri().query().unwrap_or_default();
-
-    let req_path = Json::String(path_str);
-    let req_method = Json::String(req.method().to_string());
-    let req_version = http_version_to_json(req.version());
-    let req_headers = headers_to_json(req.headers());
-    let req_params = query_to_params_json(raw_query);
-
-    // For now, content_meta/theme_config/plugin_configs are empty; they’re
-    // filled in by other parts of the pipeline (resolver, settings, etc.).
-    RequestContext::builder()
-        .path(req_path)
-        .method(req_method)
-        .version(req_version)
-        .headers(req_headers)
-        .params(req_params)
-        .content_meta(json!({}))
-        .theme_config(json!({}))
-        .plugin_configs(HashMap::new())
-        .build()
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,11 +278,8 @@ fn build_request_context(req: &Request<Body>, _content_root: &Path) -> RequestCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Uri};
     use domain::doc::BodyKind;
-    use http::{Method, Request as HttpRequest};
-    use serde_json::Value as Json;
-    use std::{collections::HashMap, path::Path, str::FromStr};
+    use std::{collections::HashMap, path::Path};
 
     /// Parse a query string into a `HashMap<String, String>`, URL-decoding keys/values.
     ///
@@ -433,112 +402,5 @@ mod tests {
 
         assert_eq!(kind, BodyKind::Html);
         assert_eq!(body_path, PathBuf::from("/content/docs/index.html"));
-    }
-
-    #[test]
-    fn build_request_context_populates_fields() {
-        let uri = Uri::from_str("/posts/hello.md?tag=rust&tag2=web").unwrap();
-
-        let req: HttpRequest<Body> = HttpRequest::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .header("x-test", "yes")
-            .body(Body::empty())
-            .unwrap();
-
-        let root = PathBuf::from("/content");
-        let ctx = build_request_context(&req, &root);
-
-        //
-        // req_path
-        //
-        assert_eq!(
-            ctx.req_path,
-            Json::String("/posts/hello.md".to_string()),
-            "req_path must be JSON string"
-        );
-
-        //
-        // req_method
-        //
-        assert_eq!(
-            ctx.req_method,
-            Json::String("GET".to_string()),
-            "req_method must be JSON string"
-        );
-
-        //
-        // req_headers
-        //
-        let hdrs = ctx
-            .req_headers
-            .as_object()
-            .expect("req_headers must be object");
-        assert_eq!(
-            hdrs.get("x-test").unwrap(),
-            "yes",
-            "header x-test should be captured"
-        );
-
-        //
-        // req_params
-        //
-        let params = ctx
-            .req_params
-            .as_object()
-            .expect("req_params must be object");
-        assert_eq!(params.get("tag").unwrap(), "rust");
-        assert_eq!(params.get("tag2").unwrap(), "web");
-
-        //
-        // content_meta
-        //
-        assert!(
-            ctx.content_meta.is_object(),
-            "content_meta starts as empty object"
-        );
-        assert!(
-            ctx.content_meta.as_object().unwrap().is_empty(),
-            "content_meta must be empty"
-        );
-
-        //
-        // theme_config
-        //
-        assert!(
-            ctx.theme_config.is_object(),
-            "theme_config starts as empty object"
-        );
-
-        //
-        // plugin_configs
-        //
-        assert!(ctx.plugin_configs.is_empty(), "plugin configs start empty");
-
-        //
-        // req_id must be auto-generated UUID string
-        //
-        if let Json::String(s) = &ctx.req_id {
-            assert!(
-                uuid::Uuid::parse_str(s).is_ok(),
-                "req_id must be a valid UUID string"
-            );
-        } else {
-            panic!("req_id must be JSON string");
-        }
-
-        //
-        // req_version must be JSON string
-        //
-        assert!(
-            ctx.req_version.is_string(),
-            "req_version must be a JSON string"
-        );
-
-        //
-        // Streams must start unset
-        //
-        assert!(ctx.req_body.is_none());
-        assert!(ctx.content_body.is_none());
     }
 }

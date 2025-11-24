@@ -1,3 +1,5 @@
+// crates/edge/src/db/tantivy.rs
+
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};

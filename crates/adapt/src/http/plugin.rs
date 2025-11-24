@@ -1,5 +1,7 @@
+// crates/adapt/src/http/plugin.rs
+
 use super::error::HttpError;
-use super::resolver::{build_request_context, ContentResolver};
+use super::resolver::{self, build_request_context, ContentResolver};
 use crate::core::context::RequestContext;
 use axum::body::Body;
 use http::{Request, Uri};
@@ -21,7 +23,8 @@ where
     R: ContentResolver,
 {
     inner: S,
-    resolver: R,
+    // Kept for compatibility / type-level wiring; not used at runtime
+    _resolver: R,
 }
 
 impl<S, R> PluginMiddleware<S, R>
@@ -30,7 +33,10 @@ where
     R: ContentResolver,
 {
     pub fn new(inner: S, resolver: R) -> Self {
-        Self { inner, resolver }
+        Self {
+            inner,
+            _resolver: resolver,
+        }
     }
 }
 
@@ -42,7 +48,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            resolver: self.resolver.clone(),
+            _resolver: self._resolver.clone(),
         }
     }
 }
@@ -59,10 +65,12 @@ where
     type Error = HttpError;
     type Future = S::Future;
 
+    #[tracing::instrument(skip_all)]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx).map_err(|e| e)
     }
 
+    #[tracing::instrument(skip_all)]
     fn call(&mut self, mut req: Request<Body>) -> Self::Future {
         // Extract path & query params for initial RequestContext.
         let uri: &Uri = req.uri();
@@ -73,15 +81,13 @@ where
             .map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect())
             .unwrap_or_else(HashMap::new);
 
-        // Resolve content.
-        let resolved = self
-            .resolver
-            .resolve(&path, req.method())
+        // Resolve content using the injected, type-erased resolver.
+        let resolved = resolver::resolve(&path, req.method())
             .map_err(HttpError::from)
             .expect("content resolver failed"); // In a real system, handle gracefully.
 
         // Build RequestContext and insert into extensions.
-        let ctx = build_request_context(
+        let ctx: RequestContext = build_request_context(
             path,
             req.method().clone(),
             req.headers().clone(),

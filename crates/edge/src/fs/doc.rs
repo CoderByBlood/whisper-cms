@@ -1,3 +1,5 @@
+// crates/edge/src/fs/doc.rs
+
 use crate::db::tantivy::{ContentIndex, ContentIndexError};
 use crate::fs::scan::{start_folder_scan, FolderScanConfig};
 use crate::proxy::EdgeError;
@@ -320,9 +322,10 @@ pub async fn upsert_front_matter_db(ctx: DocContext) -> Result<DocContext, DocCo
         body = Some(full.to_owned());
     }
 
-    // Persist FM if we have it.
+    // Persist FM if we have it — using the *served* path as the id.
     if let Some(fm_json) = fm_json {
-        let id = ctx.document.path.to_string_lossy().to_string();
+        let served_path = serving_path_for_source(&ctx.document.path);
+        let id = served_path.to_string_lossy().to_string();
         let record = IndexRecord::from_json_with_id(id, &fm_json);
 
         fs::create_dir_all(&ctx.fm_index_dir)?;
@@ -393,6 +396,52 @@ fn render_org_to_html(src: &str) -> Result<String, DocContextError> {
     Ok(html)
 }
 
+/// Infer BodyKind from a file extension.
+fn infer_body_kind_from_ext(path: &Path) -> BodyKind {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| match ext.to_ascii_lowercase().as_str() {
+            // Markdown (with mkd, mkdn)
+            "md" | "markdown" | "mkd" | "mkdn" => BodyKind::Markdown,
+            // AsciiDoc
+            "adoc" | "asciidoc" => BodyKind::AsciiDoc,
+            // HTML-like (with xhtml)
+            "html" | "htm" | "xhtml" => BodyKind::Html,
+            // ReStructuredText
+            "rst" => BodyKind::ReStructuredText,
+            // Org
+            "org" => BodyKind::OrgMode,
+            // Fallback
+            _ => BodyKind::Plain,
+        })
+        .unwrap_or(BodyKind::Plain)
+}
+
+/// Map a source filesystem path to the “served” path:
+///
+/// - If the body is a *translated* type (Markdown, AsciiDoc, RST, Org),
+///   we normalize to a `.html` extension.
+/// - For HTML and Plain text, we keep the original extension.
+///
+/// This path is used as:
+///   - the `id` for front-matter in IndexedJson
+///   - the key for Tantivy `ContentIndex`
+///   - the HTTP-visible “content path” in resolution.
+fn serving_path_for_source(path: &Path) -> PathBuf {
+    let kind = infer_body_kind_from_ext(path);
+    match kind {
+        BodyKind::Markdown
+        | BodyKind::AsciiDoc
+        | BodyKind::ReStructuredText
+        | BodyKind::OrgMode => {
+            let mut p = path.to_path_buf();
+            p.set_extension("html");
+            p
+        }
+        BodyKind::Html | BodyKind::Plain => path.to_path_buf(),
+    }
+}
+
 // ─────────────────────────────────────────────
 // Stage 2 — body → HTML → Tantivy
 // ─────────────────────────────────────────────
@@ -410,32 +459,11 @@ fn render_org_to_html(src: &str) -> Result<String, DocContextError> {
 pub async fn upsert_body_db(ctx: DocContext) -> Result<DocContext, DocContextError> {
     let mut ctx = read_document_utf8(ctx).await?;
 
-    // Detect body kind from extension if not already set.
-    let ext_kind = ctx
-        .document
-        .path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|ext| match ext.to_ascii_lowercase().as_str() {
-            // Markdown (with mkd, mkdn)
-            "md" | "markdown" | "mkd" | "mkdn" => BodyKind::Markdown,
-            // AsciiDoc
-            "adoc" | "asciidoc" => BodyKind::AsciiDoc,
-            // HTML-like (with xhtml)
-            "html" | "htm" | "xhtml" => BodyKind::Html,
-            // ReStructuredText
-            "rst" => BodyKind::ReStructuredText,
-            // Org
-            "org" => BodyKind::OrgMode,
-            // Fallback
-            _ => BodyKind::Plain,
-        });
-
+    // Detect body kind from explicit setting or extension.
     let body_kind = ctx
         .document
         .body_kind
-        .or(ext_kind)
-        .unwrap_or(BodyKind::Plain);
+        .unwrap_or_else(|| infer_body_kind_from_ext(&ctx.document.path));
 
     // Prefer cached_body (body only), fall back to full cache.
     let body_text = ctx
@@ -463,9 +491,10 @@ pub async fn upsert_body_db(ctx: DocContext) -> Result<DocContext, DocContextErr
         BodyKind::OrgMode => render_org_to_html(body_text)?,
     };
 
-    // Index the rendered HTML into Tantivy using the context's index.
+    // Index the rendered HTML into Tantivy using the *served* path as key.
+    let served_path = serving_path_for_source(&ctx.document.path);
     let mut cursor = Cursor::new(html.into_bytes());
-    ctx.content_index.add(&ctx.document.path, &mut cursor)?;
+    ctx.content_index.add(&served_path, &mut cursor)?;
 
     // Attach body kind via builder.
     ctx.document = ctx.document.with_body_kind(body_kind);

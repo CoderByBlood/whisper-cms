@@ -1,3 +1,5 @@
+// crates/edge/src/db/json.rs
+
 use adapt::mql::index::{BoolField, I64Field, IndexRecord, StringField};
 use adapt::mql::{IndexBackend, IndexConfig, JsonStore};
 use async_trait::async_trait;

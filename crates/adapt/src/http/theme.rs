@@ -2,7 +2,7 @@
 
 use crate::core::context::{RequestContext, ResponseBodySpec};
 use crate::http::app::AppState;
-use crate::http::resolver::{build_request_context, ContentResolver};
+use crate::http::resolver::{build_request_context, resolve};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -13,19 +13,12 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Axum handler that resolves content and then delegates to the theme runtime.
+#[tracing::instrument(skip_all)]
 pub async fn theme_entrypoint(
     State(state): State<AppState>,
     Path(path): Path<String>,
     req: Request<Body>,
 ) -> Result<Response, Response> {
-    // Resolve content by path + method.
-    let resolved = state.resolver.resolve(&path, req.method()).map_err(|e| {
-        Response::builder()
-            .status(e.to_status())
-            .body(Body::from(format!("Resolve error: {e}")))
-            .unwrap()
-    })?;
-
     // Very simple query string parsing into a HashMap<String, String>.
     let mut query_params = HashMap::new();
     if let Some(q) = req.uri().query() {
@@ -42,6 +35,14 @@ pub async fn theme_entrypoint(
             query_params.insert(k, v);
         }
     }
+
+    // Resolve content by path + method using the injected resolver.
+    let resolved = resolve(&path, req.method()).map_err(|e| {
+        Response::builder()
+            .status(e.to_status())
+            .body(Body::from(format!("Resolve error: {e}")))
+            .unwrap()
+    })?;
 
     // Build RequestContext from HTTP request + resolved content.
     let ctx: RequestContext = build_request_context(
@@ -68,6 +69,7 @@ pub async fn theme_entrypoint(
 }
 
 /// Helper: map ResponseBodySpec -> hyper::Response<Body>.
+#[tracing::instrument(skip_all)]
 fn response_from_body_spec(spec: ResponseBodySpec) -> Response {
     match spec {
         ResponseBodySpec::HtmlString(s) => Response::builder()
