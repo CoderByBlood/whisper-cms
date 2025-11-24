@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use std::io;
 use std::path::PathBuf;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,19 +27,25 @@ fn missing_open_utf8(_path: &PathBuf) -> BoxStream<'static, io::Result<String>> 
 }
 
 /// GLOBAL injection targets (set once at startup)
-pub static OPEN_BYTES_FN: LazyLock<std::sync::RwLock<OpenBytesFn>> =
-    LazyLock::new(|| std::sync::RwLock::new(missing_open_bytes));
+pub static OPEN_BYTES_FN: LazyLock<RwLock<Option<OpenBytesFn>>> =
+    LazyLock::new(|| RwLock::new(Some(missing_open_bytes)));
 
-pub static OPEN_UTF8_FN: LazyLock<std::sync::RwLock<OpenUtf8Fn>> =
-    LazyLock::new(|| std::sync::RwLock::new(missing_open_utf8));
+pub static OPEN_UTF8_FN: LazyLock<RwLock<Option<OpenUtf8Fn>>> =
+    LazyLock::new(|| RwLock::new(Some(missing_open_utf8)));
 
 /// API the edge crate calls *once* during initialization
 pub fn inject_open_bytes_fn(f: OpenBytesFn) {
-    *OPEN_BYTES_FN.write().unwrap() = f;
+    {
+        let mut open_bytes_fn = OPEN_BYTES_FN.write().unwrap();
+        *open_bytes_fn = Some(f);
+    }
 }
 
 pub fn inject_open_utf8_fn(f: OpenUtf8Fn) {
-    *OPEN_UTF8_FN.write().unwrap() = f;
+    {
+        let mut open_utf8_fn = OPEN_UTF8_FN.write().unwrap();
+        *open_utf8_fn = Some(f);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,12 +147,12 @@ impl Document {
 
     pub fn bytes_stream(&self) -> BoxStream<'static, io::Result<Bytes>> {
         let f = *OPEN_BYTES_FN.read().unwrap();
-        f(&self.path)
+        f.unwrap()(&self.path)
     }
 
     pub fn utf8_stream(&self) -> BoxStream<'static, io::Result<String>> {
         let f = *OPEN_UTF8_FN.read().unwrap();
-        f(&self.path)
+        f.unwrap()(&self.path)
     }
 }
 

@@ -2,10 +2,9 @@
 
 use crate::{
     fs::{
-        // ⬅️ removed: doc::scan_and_process_docs,
-        self,
         ext::{self, DiscoveredPlugin, DiscoveredTheme},
         filter::{self, DEFAULT_CONTENT_EXTS},
+        index::set_fm_index_dir,
     },
     proxy::{EdgeError, EdgeRuntime},
     router::build_app_router,
@@ -182,17 +181,17 @@ impl StartProcess<SettingsLoaded> {
         )?);
 
         // inject the dependcies
-        fs::doc::set_fm_index_dir(index_dir.clone());
+        set_fm_index_dir(index_dir.clone());
 
         // This now calls the serve-level pipeline
-        use crate::fs::doc::{edge_index_body, edge_index_front_matter, edge_start_scan};
+        use crate::fs::index::{index_body, index_front_matter, start_scan};
 
         let (docs, errs) = scan_and_process_docs(
             &root,
-            cfg,                     // capacity
-            edge_start_scan,         // scan starter
-            edge_index_front_matter, // FM → IndexedJSON
-            edge_index_body,         // Body → Tantivy
+            cfg,                // capacity
+            start_scan,         // scan starter
+            index_front_matter, // FM → IndexedJSON
+            index_body,         // Body → Tantivy
         )
         .await?;
 
