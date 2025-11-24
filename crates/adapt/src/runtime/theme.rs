@@ -5,7 +5,7 @@ use super::error::RuntimeError;
 use crate::js::{JsEngine, JsValue};
 use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
 use serde_json;
-use serve::context::RequestContext;
+use serve::ctx::http::RequestContext;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -150,7 +150,7 @@ mod tests {
     use super::*;
     use crate::js::{JsEngine, JsError, JsValue};
     use serde_json::json;
-    use serve::context::RequestContext;
+    use serve::ctx::http::RequestContext;
     use std::collections::HashMap;
 
     // ─────────────────────────────────────────────────────────────────────────

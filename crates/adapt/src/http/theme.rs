@@ -7,7 +7,7 @@ use axum::{
     http::Request,
     response::Response,
 };
-use serve::context::{RequestContext, ResponseBodySpec};
+use serve::ctx::http::{RequestContext, ResponseBodySpec};
 use serve::resolver::{build_request_context, resolve};
 use std::borrow::Cow;
 use std::collections::HashMap;

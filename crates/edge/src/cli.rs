@@ -1,9 +1,11 @@
+// crates/edge/src/cli.rs
+
 use crate::{
     fs::{
-        doc::scan_and_process_docs,
+        // ⬅️ removed: doc::scan_and_process_docs,
+        self,
         ext::{self, DiscoveredPlugin, DiscoveredTheme},
         filter::{self, DEFAULT_CONTENT_EXTS},
-        scan::FolderScanConfig,
     },
     proxy::{EdgeError, EdgeRuntime},
     router::build_app_router,
@@ -19,7 +21,9 @@ use domain::{
     doc::Document,
     setting::{ContentSettings, ExtensionSettings, Settings},
 };
-use serve::context::RequestContext;
+use serve::indexer::scan_and_process_docs;
+use serve::{ctx::http::RequestContext, indexer::FolderScanConfig};
+
 use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
 use tracing::{debug, error, info};
@@ -177,7 +181,21 @@ impl StartProcess<SettingsLoaded> {
             },
         )?);
 
-        let (docs, errs) = scan_and_process_docs(&root, cfg, index_dir).await?;
+        // inject the dependcies
+        fs::doc::set_fm_index_dir(index_dir.clone());
+
+        // This now calls the serve-level pipeline
+        use crate::fs::doc::{edge_index_body, edge_index_front_matter, edge_start_scan};
+
+        let (docs, errs) = scan_and_process_docs(
+            &root,
+            cfg,                     // capacity
+            edge_start_scan,         // scan starter
+            edge_index_front_matter, // FM → IndexedJSON
+            edge_index_body,         // Body → Tantivy
+        )
+        .await?;
+
         debug!(
             "Document and Error Counts: ({}, {})",
             docs.len(),
@@ -318,13 +336,14 @@ impl StartProcess<ServerStarted> {
 
 #[tracing::instrument(skip_all)]
 async fn do_start(start: StartCmd) -> Result<()> {
-    // TODO: Refector out into funtion that registers all injected dependencies
+    // TODO: Refactor out into function that registers all injected dependencies
     use crate::db::resolver::{edge_build_request_context, edge_resolve};
-    use serve::resolver::{set_build_request_context_fn, set_resolver_fn}; // your edge impls
+    use serve::resolver::{set_build_request_context_fn, set_resolver_fn};
 
     set_resolver_fn(edge_resolve).map_err(|e| EdgeError::Other(e.to_string()))?;
     set_build_request_context_fn(edge_build_request_context)
         .map_err(|e| EdgeError::Other(e.to_string()))?;
+
     // parse settings file -> does the settings file exist?  If yes, parse it
     let then = Utc::now();
     let process = StartProcess::<CommandIssued>::parse_settings_file(start)?;

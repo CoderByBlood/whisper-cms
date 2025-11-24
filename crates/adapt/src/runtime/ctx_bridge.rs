@@ -5,7 +5,7 @@ use crate::js::value::JsValue;
 use crate::runtime::error::RuntimeError;
 use http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde_json::{json, Map as JsonMap, Value as Json};
-use serve::context::{RequestContext, ResponseBodySpec, ResponseSpec};
+use serve::ctx::http::{RequestContext, ResponseBodySpec, ResponseSpec};
 use serve::render::recommendation::{
     BodyPatch, BodyPatchKind, DomOp, HeaderPatch, HeaderPatchKind, ModelPatch, Recommendations,
 };
@@ -568,7 +568,7 @@ fn merge_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), RuntimeE
 mod tests {
     use super::*;
     use serde_json::json;
-    use serve::context::RequestContext;
+    use serve::ctx::http::RequestContext;
     use std::collections::HashMap;
 
     fn make_base_ctx() -> RequestContext {

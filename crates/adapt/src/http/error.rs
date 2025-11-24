@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use serve::context::ContextError;
+use serve::ctx::http::ContextError;
 use serve::render::error::RenderError;
 
 #[derive(Debug, Error)]

@@ -6,7 +6,7 @@
 //! - Optional folder / file regex filters.
 //! - Supports absolute/relative emission, recursion depth, and path canonicalization.
 
-use regex::Regex;
+use serve::indexer::FolderScanConfig;
 use std::{
     collections::{HashSet, VecDeque},
     fs, io,
@@ -20,40 +20,6 @@ use tokio::{
     time,
 };
 use walkdir::WalkDir;
-
-/// Configuration for `start_folder_scan`.
-#[derive(Debug, Clone)]
-pub struct FolderScanConfig {
-    /// Emit absolute paths (true) or paths relative to `root` (false).
-    pub absolute: bool,
-    /// Recurse into subdirectories.
-    pub recursive: bool,
-    /// Debounce window in milliseconds for coalescing duplicate paths.
-    pub debounce_ms: u64,
-    /// Canonicalize paths before emission.
-    pub canonicalize_paths: bool,
-    /// Capacity of the bounded output channel (no longer used here, but kept for config symmetry).
-    pub channel_capacity: usize,
-    /// Optional regex to **allow** folders. If set, a directory is traversed
-    /// if it or **any ancestor under `root`** matches.
-    pub folder_re: Option<Regex>,
-    /// Optional regex to **allow** files by name (basename).
-    pub file_re: Option<Regex>,
-}
-
-impl Default for FolderScanConfig {
-    fn default() -> Self {
-        Self {
-            absolute: true,
-            recursive: true,
-            debounce_ms: 64,
-            canonicalize_paths: true,
-            channel_capacity: 1024,
-            folder_re: None,
-            file_re: None,
-        }
-    }
-}
 
 /// Start scanning `root` according to `cfg`, producing a debounced stream of paths
 /// that are sent into the provided `out_tx`.
@@ -239,6 +205,7 @@ pub fn start_folder_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
     use std::collections::HashSet;
     use std::fs::File as StdFile;
     use std::io::Write;

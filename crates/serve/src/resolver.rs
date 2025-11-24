@@ -1,7 +1,6 @@
-// crates/adapt/src/http/resolver.rs
+// crates/serve/src/resolver.rs
 
-use crate::context::ContextError;
-use crate::context::RequestContext;
+use crate::ctx::http::{ContextError, RequestContext};
 use domain::content::{ContentKind, ResolvedContent};
 use http::Method;
 use serde_json::{json, Map as JsonMap, Value as Json};

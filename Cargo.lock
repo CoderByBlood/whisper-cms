@@ -4860,7 +4860,9 @@ dependencies = [
 name = "serve"
 version = "0.1.0"
 dependencies = [
+ "asciidocr",
  "bytes",
+ "comrak",
  "domain",
  "futures",
  "gray_matter",
@@ -4868,7 +4870,10 @@ dependencies = [
  "http",
  "json-patch",
  "lol_html",
+ "orgize",
  "regex",
+ "rst_parser",
+ "rst_renderer",
  "serde",
  "serde_json",
  "serde_yml",

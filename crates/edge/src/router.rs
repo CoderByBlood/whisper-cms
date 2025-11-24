@@ -5,7 +5,7 @@ use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 use domain::content::ResolvedContent;
 use serve::resolver::ContentResolver;
-use serve::{context::ResponseBodySpec, resolver::build_request_context};
+use serve::{ctx::http::ResponseBodySpec, resolver::build_request_context};
 
 use axum::{
     body::Body,

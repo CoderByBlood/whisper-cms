@@ -3,7 +3,7 @@
 use crate::js::engine::BoaEngine;
 use crate::runtime::error::RuntimeError;
 use crate::runtime::plugin::PluginRuntime;
-use serve::context::RequestContext;
+use serve::ctx::http::RequestContext;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands handled by the plugin actor.
@@ -164,7 +164,7 @@ async fn plugin_actor_loop(
 mod tests {
     use super::*;
     use serde_json::json;
-    use serve::context::RequestContext;
+    use serve::ctx::http::RequestContext;
     use std::collections::HashMap;
     use tokio::runtime::Builder as RtBuilder;
     use tokio::task::LocalSet;

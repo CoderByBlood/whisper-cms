@@ -7,7 +7,7 @@ use crate::runtime::plugin::{PluginRuntime, PluginSpec};
 use crate::runtime::plugin_actor::PluginRuntimeClient;
 use crate::runtime::theme::{ThemeRuntime, ThemeSpec};
 use crate::runtime::theme_actor::ThemeRuntimeClient;
-use serve::context::{RequestContext, ResponseBodySpec};
+use serve::ctx::http::{RequestContext, ResponseBodySpec};
 
 /// Configuration for plugins.
 ///
@@ -189,7 +189,7 @@ fn load_themes(theme_cfgs: &[ThemeConfig]) -> Result<Vec<BoundTheme<BoaEngine>>,
 mod tests {
     use super::*;
     use serde_json::json;
-    use serve::context::RequestContext;
+    use serve::ctx::http::RequestContext;
     use std::collections::HashMap;
     use tokio::runtime::Builder as RtBuilder;
     use tokio::task::LocalSet;

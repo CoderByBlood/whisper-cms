@@ -3,7 +3,7 @@
 use crate::js::engine::BoaEngine;
 use crate::runtime::bootstrap::BoundTheme;
 use crate::runtime::error::RuntimeError;
-use serve::context::{RequestContext, ResponseBodySpec};
+use serve::ctx::http::{RequestContext, ResponseBodySpec};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
@@ -152,7 +152,7 @@ async fn theme_actor_loop(
 mod tests {
     use super::*;
     use serde_json::json;
-    use serve::context::RequestContext;
+    use serve::ctx::http::RequestContext;
     use std::collections::HashMap;
     use tokio::task::LocalSet;
 

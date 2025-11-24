@@ -3,7 +3,7 @@
 use super::error::HttpError;
 use axum::body::Body;
 use http::{Request, Uri};
-use serve::context::RequestContext;
+use serve::ctx::http::RequestContext;
 use serve::resolver::{self, build_request_context, ContentResolver};
 use std::collections::HashMap;
 use std::task::{Context, Poll};
@@ -111,7 +111,7 @@ mod tests {
     use futures::task::noop_waker;
     use http::Method;
     use serde_json::json;
-    use serve::context::ContextError;
+    use serve::ctx::http::ContextError;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 

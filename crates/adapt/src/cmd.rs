@@ -1,7 +1,7 @@
 use clap::{builder::ValueHint, Parser, Subcommand};
 use std::path::PathBuf;
 
-use serve::context::ContextError;
+use serve::ctx::http::ContextError;
 
 type _Result<T> = std::result::Result<T, ContextError>;
 

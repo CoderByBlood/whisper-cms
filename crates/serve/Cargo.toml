@@ -21,6 +21,11 @@ lol_html = { workspace = true }
 http = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+comrak = { workspace = true }
+asciidocr = { workspace = true }
+rst_parser = { workspace = true }
+rst_renderer = { workspace = true }
+orgize = { workspace = true }
 
 domain = { path = "../domain" }
 
