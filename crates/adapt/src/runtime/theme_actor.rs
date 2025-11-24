@@ -1,9 +1,9 @@
 // crates/adapt/src/runtime/theme_actor.rs
 
-use crate::core::{context::ResponseBodySpec, RequestContext};
 use crate::js::engine::BoaEngine;
 use crate::runtime::bootstrap::BoundTheme;
 use crate::runtime::error::RuntimeError;
+use serve::context::{RequestContext, ResponseBodySpec};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
@@ -151,8 +151,8 @@ async fn theme_actor_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RequestContext;
     use serde_json::json;
+    use serve::context::RequestContext;
     use std::collections::HashMap;
     use tokio::task::LocalSet;
 

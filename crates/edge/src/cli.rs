@@ -10,7 +10,6 @@ use crate::{
 };
 use adapt::{
     cmd::{Commands, StartCmd},
-    core::RequestContext,
     runtime::bootstrap::bootstrap_all,
 };
 use axum::Router;
@@ -20,6 +19,7 @@ use domain::{
     doc::Document,
     setting::{ContentSettings, ExtensionSettings, Settings},
 };
+use serve::context::RequestContext;
 use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
 use tracing::{debug, error, info};

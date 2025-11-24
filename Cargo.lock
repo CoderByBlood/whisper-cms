@@ -4876,6 +4876,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

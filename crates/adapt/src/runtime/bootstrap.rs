@@ -1,6 +1,5 @@
 // crates/adapt/src/runtime/bootstrap.rs
 
-use crate::core::context::{RequestContext, ResponseBodySpec};
 use crate::js::engine::BoaEngine;
 use crate::js::JsEngine;
 use crate::runtime::error::RuntimeError;
@@ -8,6 +7,7 @@ use crate::runtime::plugin::{PluginRuntime, PluginSpec};
 use crate::runtime::plugin_actor::PluginRuntimeClient;
 use crate::runtime::theme::{ThemeRuntime, ThemeSpec};
 use crate::runtime::theme_actor::ThemeRuntimeClient;
+use serve::context::{RequestContext, ResponseBodySpec};
 
 /// Configuration for plugins.
 ///
@@ -188,8 +188,8 @@ fn load_themes(theme_cfgs: &[ThemeConfig]) -> Result<Vec<BoundTheme<BoaEngine>>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RequestContext;
     use serde_json::json;
+    use serve::context::RequestContext;
     use std::collections::HashMap;
     use tokio::runtime::Builder as RtBuilder;
     use tokio::task::LocalSet;

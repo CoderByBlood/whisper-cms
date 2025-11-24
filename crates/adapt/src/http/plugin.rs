@@ -2,9 +2,9 @@
 
 use super::error::HttpError;
 use super::resolver::{self, build_request_context, ContentResolver};
-use crate::core::context::RequestContext;
 use axum::body::Body;
 use http::{Request, Uri};
+use serve::context::RequestContext;
 use std::collections::HashMap;
 use std::task::{Context, Poll};
 use tower::Service;
@@ -105,7 +105,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::error::CoreError;
     use crate::http::resolver::ResolvedContent;
     use axum::response::Response as AxumResponse;
     use domain::content::ContentKind;
@@ -113,6 +112,7 @@ mod tests {
     use futures::task::noop_waker;
     use http::Method;
     use serde_json::json;
+    use serve::context::ContextError;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
@@ -178,7 +178,7 @@ mod tests {
     }
 
     impl ContentResolver for FakeResolver {
-        fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, CoreError> {
+        fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, ContextError> {
             *self.last_path.lock().unwrap() = Some(path.to_string());
             *self.last_method.lock().unwrap() = Some(method.clone());
             Ok(dummy_resolved())
@@ -191,8 +191,8 @@ mod tests {
     struct FailingResolver;
 
     impl ContentResolver for FailingResolver {
-        fn resolve(&self, _path: &str, _method: &Method) -> Result<ResolvedContent, CoreError> {
-            Err(CoreError::InvalidHeaderValue("resolver failure".into()))
+        fn resolve(&self, _path: &str, _method: &Method) -> Result<ResolvedContent, ContextError> {
+            Err(ContextError::InvalidHeaderValue("resolver failure".into()))
         }
     }
 

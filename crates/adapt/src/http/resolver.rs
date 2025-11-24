@@ -1,10 +1,10 @@
 // crates/adapt/src/http/resolver.rs
 
-use crate::core::context::RequestContext;
-use crate::core::error::CoreError;
 use domain::content::ContentKind;
 use http::Method;
 use serde_json::{json, Map as JsonMap, Value as Json};
+use serve::context::ContextError;
+use serve::context::RequestContext;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -27,7 +27,7 @@ pub struct ResolvedContent {
 /// Implementations can live in the edge crate (e.g. filesystem / index
 /// backed resolvers). The adapt crate only defines the contract.
 pub trait ContentResolver: Send + Sync {
-    fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, CoreError>;
+    fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, ContextError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ pub trait ContentResolver: Send + Sync {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Type of the injected resolver function.
-pub type ResolveFn = fn(path: &str, method: &Method) -> Result<ResolvedContent, CoreError>;
+pub type ResolveFn = fn(path: &str, method: &Method) -> Result<ResolvedContent, ContextError>;
 
 /// Type of the injected RequestContext builder.
 pub type BuildRequestContextFn = fn(
@@ -72,7 +72,7 @@ pub fn set_build_request_context_fn(f: BuildRequestContextFn) -> Result<(), &'st
 /// implementation that treats the path as an asset and returns empty
 /// front matter.
 #[tracing::instrument(skip_all)]
-pub fn resolve(path: &str, method: &Method) -> Result<ResolvedContent, CoreError> {
+pub fn resolve(path: &str, method: &Method) -> Result<ResolvedContent, ContextError> {
     if let Some(f) = RESOLVE_FN.get() {
         return f(path, method);
     }

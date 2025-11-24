@@ -1,11 +1,11 @@
 // crates/edge/src/router.rs
 //
-use adapt::core::context::ResponseBodySpec;
 use adapt::http::plugin_middleware::PluginLayer;
 use adapt::http::resolver::build_request_context;
 use adapt::http::resolver::{ContentResolver, ResolvedContent};
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
+use serve::context::ResponseBodySpec;
 
 use axum::{
     body::Body,

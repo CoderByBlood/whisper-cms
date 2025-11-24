@@ -1,13 +1,35 @@
 // crates/adapt/src/core/context.rs
 
-use super::error::CoreError;
+use crate::render::recommendation::Recommendations;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
-use serve::render::recommendation::Recommendations;
 use std::collections::HashMap;
+use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
+
+#[derive(Debug, Error)]
+pub enum ContextError {
+    #[error("invalid header value: {0}")]
+    InvalidHeaderValue(String),
+
+    #[error("json patch error: {0}")]
+    JsonPatch(#[from] json_patch::PatchError),
+
+    #[error("other core error: {0}")]
+    Other(String),
+}
+
+impl ContextError {
+    pub fn to_status(&self) -> StatusCode {
+        match self {
+            ContextError::InvalidHeaderValue(_) => StatusCode::BAD_REQUEST,
+            ContextError::JsonPatch(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ContextError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // StreamHandle API (opaque, fn-pointer based)
@@ -188,29 +210,29 @@ impl ResponseSpec {
         self.status = status;
     }
 
-    pub fn set_header(&mut self, name: &str, value: &str) -> Result<(), CoreError> {
+    pub fn set_header(&mut self, name: &str, value: &str) -> Result<(), ContextError> {
         use http::header::HeaderName;
 
         let header_name: HeaderName = name
             .parse()
-            .map_err(|_| CoreError::InvalidHeaderValue(name.to_string()))?;
+            .map_err(|_| ContextError::InvalidHeaderValue(name.to_string()))?;
         let hv = value
             .parse()
-            .map_err(|_| CoreError::InvalidHeaderValue(value.to_string()))?;
+            .map_err(|_| ContextError::InvalidHeaderValue(value.to_string()))?;
 
         self.headers.insert(header_name, hv);
         Ok(())
     }
 
-    pub fn append_header(&mut self, name: &str, value: &str) -> Result<(), CoreError> {
+    pub fn append_header(&mut self, name: &str, value: &str) -> Result<(), ContextError> {
         use http::header::HeaderName;
 
         let header_name: HeaderName = name
             .parse()
-            .map_err(|_| CoreError::InvalidHeaderValue(name.to_string()))?;
+            .map_err(|_| ContextError::InvalidHeaderValue(name.to_string()))?;
         let hv = value
             .parse()
-            .map_err(|_| CoreError::InvalidHeaderValue(value.to_string()))?;
+            .map_err(|_| ContextError::InvalidHeaderValue(value.to_string()))?;
 
         self.headers.append(header_name, hv);
         Ok(())

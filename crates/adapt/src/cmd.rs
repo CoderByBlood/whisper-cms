@@ -1,9 +1,9 @@
 use clap::{builder::ValueHint, Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::core::CoreError;
+use serve::context::ContextError;
 
-type _Result<T> = std::result::Result<T, CoreError>;
+type _Result<T> = std::result::Result<T, ContextError>;
 
 /// Unified request passed into Tower pipeline
 pub struct CliReq {

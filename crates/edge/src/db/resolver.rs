@@ -1,13 +1,13 @@
 // crates/edge/src/db/resolver.rs
 
-use adapt::core::context::RequestContext;
-use adapt::core::error::CoreError;
 use adapt::http::resolver::{ContentResolver, ResolvedContent};
 use domain::content::ContentKind;
 use gray_matter::engine::YAML;
 use gray_matter::Matter;
 use http::{HeaderMap, Method};
 use serde_json::{json, Map as JsonMap, Value as Json};
+use serve::context::ContextError;
+use serve::context::RequestContext;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -171,7 +171,11 @@ impl FsContentResolver {
     }
 
     /// Internal helper used by both the trait impl and any direct calls.
-    pub fn resolve_fs(&self, path: &str, _method: &Method) -> Result<ResolvedContent, CoreError> {
+    pub fn resolve_fs(
+        &self,
+        path: &str,
+        _method: &Method,
+    ) -> Result<ResolvedContent, ContextError> {
         // Step 2–4: resolve to a concrete file, if possible.
         if let Some((body_path, content_kind)) = self.normalize_path(path) {
             let front_matter = self
@@ -200,7 +204,7 @@ impl FsContentResolver {
 
 impl ContentResolver for FsContentResolver {
     #[tracing::instrument(skip_all)]
-    fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, CoreError> {
+    fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, ContextError> {
         self.resolve_fs(path, method)
     }
 }
@@ -218,7 +222,7 @@ pub fn init_global_fs_resolver(resolver: FsContentResolver) {
     *GLOBAL_RESOLVER.lock().unwrap() = Some(resolver);
 }
 
-pub fn edge_resolve(path: &str, method: &Method) -> Result<ResolvedContent, CoreError> {
+pub fn edge_resolve(path: &str, method: &Method) -> Result<ResolvedContent, ContextError> {
     let guard = GLOBAL_RESOLVER.lock().unwrap();
     let resolver = guard
         .as_ref()

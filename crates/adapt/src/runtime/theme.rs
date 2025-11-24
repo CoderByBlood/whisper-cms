@@ -2,10 +2,10 @@
 
 use super::ctx_bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js};
 use super::error::RuntimeError;
-use crate::core::RequestContext;
 use crate::js::{JsEngine, JsValue};
 use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
 use serde_json;
+use serve::context::RequestContext;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -148,9 +148,9 @@ impl<E: JsEngine> ThemeRuntime<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RequestContext;
     use crate::js::{JsEngine, JsError, JsValue};
     use serde_json::json;
+    use serve::context::RequestContext;
     use std::collections::HashMap;
 
     // ─────────────────────────────────────────────────────────────────────────

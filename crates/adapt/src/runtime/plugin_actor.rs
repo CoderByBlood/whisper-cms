@@ -1,8 +1,9 @@
 // crates/adapt/src/runtime/plugin_actor.rs
 
+use crate::js::engine::BoaEngine;
 use crate::runtime::error::RuntimeError;
 use crate::runtime::plugin::PluginRuntime;
-use crate::{core::RequestContext, js::engine::BoaEngine};
+use serve::context::RequestContext;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands handled by the plugin actor.
@@ -162,8 +163,8 @@ async fn plugin_actor_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::RequestContext;
     use serde_json::json;
+    use serve::context::RequestContext;
     use std::collections::HashMap;
     use tokio::runtime::Builder as RtBuilder;
     use tokio::task::LocalSet;
