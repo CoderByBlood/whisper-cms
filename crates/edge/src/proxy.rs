@@ -121,6 +121,7 @@ impl WebServerHandle {
     /// gracefully drain/shutdown the old side.
     ///
     /// `make_router` is a closure that builds the Axum router (so you can change routes/config).
+    #[tracing::instrument(skip_all)]
     pub async fn hot_reload<F>(&self, make_router: F) -> Result<(), EdgeError>
     where
         F: Fn() -> Router + Send + 'static,
@@ -161,6 +162,7 @@ impl WebServerHandle {
     }
 
     /// Gracefully stop the current WebServer.
+    #[tracing::instrument(skip_all)]
     pub async fn shutdown(&self) {
         if let Some(tx) = self.shutdown_tx.write().take() {
             let _ = tx.send(());
@@ -218,6 +220,7 @@ impl RedirectApp {
 
 #[async_trait::async_trait]
 impl ServeHttp for RedirectApp {
+    #[tracing::instrument(skip_all)]
     async fn response(&self, http_session: &mut HttpSession) -> Response<Vec<u8>> {
         let req = http_session.req_header();
 
@@ -271,12 +274,11 @@ impl EdgeRuntime {
     /// * If **no TLS certificates are found**, we:
     ///   - **Do not bind any EdgeController listeners**
     ///   - **Still start the WebServer** (on loopback) so you can configure/fix certs.
+    #[tracing::instrument(skip_all)]
     pub async fn start<F>(settings: Settings, make_router: F) -> Result<Self, EdgeError>
     where
         F: FnOnce() -> Router + Send + Sync + 'static,
     {
-        tracing_subscriber::fmt().with_env_filter("info").init();
-
         // Derive runtime values from Settings
         let cert_dir = settings.cert.dir;
         let edge_ip = settings.edge.ip;
@@ -360,6 +362,7 @@ impl EdgeRuntime {
 }
 
 /// Implementation detail: start Pingora EdgeController.
+#[tracing::instrument(skip_all)]
 fn run_pingora_edge(
     backend_state: Arc<BackendState>,
     has_cert: bool,

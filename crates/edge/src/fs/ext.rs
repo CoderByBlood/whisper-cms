@@ -11,14 +11,14 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct ThemeBinding {
     pub mount_path: String,
-    pub theme_name: String,
+    pub theme_id: String,
 }
 
 impl ThemeBinding {
     pub fn new(mount: impl Into<String>, theme: impl Into<String>) -> Self {
         Self {
             mount_path: mount.into(),
-            theme_name: theme.into(),
+            theme_id: theme.into(),
         }
     }
 }
@@ -27,7 +27,7 @@ impl From<&ThemeSpec> for ThemeBinding {
     fn from(spec: &ThemeSpec) -> Self {
         ThemeBinding {
             mount_path: spec.mount_path.to_owned(),
-            theme_name: spec.name.to_owned(),
+            theme_id: spec.id.to_owned(),
         }
     }
 }
@@ -243,7 +243,7 @@ mod tests {
         let binding = ThemeBinding::new("/blog", "my-theme");
 
         assert_eq!(binding.mount_path, "/blog");
-        assert_eq!(binding.theme_name, "my-theme");
+        assert_eq!(binding.theme_id, "my-theme");
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
         let binding = ThemeBinding::new(mount.clone(), theme.clone());
 
         assert_eq!(binding.mount_path, mount);
-        assert_eq!(binding.theme_name, theme);
+        assert_eq!(binding.theme_id, theme);
     }
 
     // ─────────────────────────────────────────────────────────────────────

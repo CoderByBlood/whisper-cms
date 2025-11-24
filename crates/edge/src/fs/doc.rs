@@ -173,11 +173,7 @@ pub async fn scan_and_process_docs(
     let (tx, mut rx) = mpsc::channel::<PathBuf>(cfg.channel_capacity);
 
     // Start the folder scan; it will send paths into `tx`.
-    dbg!(&root);
-    dbg!(&root.as_os_str());
     let stop = start_folder_scan(&root, cfg, tx)?;
-    dbg!(&fm_index_dir);
-    dbg!(&fm_index_dir.as_os_str());
 
     let mut docs = Vec::new();
     let mut errors = Vec::new();

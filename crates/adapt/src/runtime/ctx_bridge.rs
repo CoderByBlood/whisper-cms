@@ -73,6 +73,7 @@ pub const CTX_SHIM_SRC: &str = r#"
 /// `plugin_id` is used to pick the correct per-plugin config from
 /// `ReqCtx.plugin_configs`. The selected config is exposed to JS
 /// as `ctx.config`.
+#[tracing::instrument(skip_all)]
 pub fn ctx_to_js_for_plugins(ctx: &RequestContext, plugin_id: &str) -> JsValue {
     let cfg = ctx.plugin_configs.get(plugin_id);
     ctx_to_js(ctx, cfg)
@@ -83,12 +84,14 @@ pub fn ctx_to_js_for_plugins(ctx: &RequestContext, plugin_id: &str) -> JsValue {
 /// `theme_id` is not currently used to look up config (we only have a
 /// single `theme_config` in `ReqCtx`), but is accepted for
 /// symmetry with plugins. The theme config is exposed as `ctx.config`.
+#[tracing::instrument(skip_all)]
 pub fn ctx_to_js_for_theme(ctx: &RequestContext, _theme_id: &str) -> JsValue {
     let cfg = Some(&ctx.theme_config);
     ctx_to_js(ctx, cfg)
 }
 
 /// Merge JS result back into Rust context for plugins.
+#[tracing::instrument(skip_all)]
 pub fn merge_recommendations_from_js(
     ret: &JsValue,
     ctx: &mut RequestContext,
@@ -97,6 +100,7 @@ pub fn merge_recommendations_from_js(
 }
 
 /// Merge JS result back into Rust context for themes.
+#[tracing::instrument(skip_all)]
 pub fn merge_theme_ctx_from_js(
     ret: &JsValue,
     ctx: &mut RequestContext,
@@ -108,6 +112,7 @@ pub fn merge_theme_ctx_from_js(
 // Rust -> JS
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[tracing::instrument(skip_all)]
 fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValue {
     let mut root = JsonMap::new();
 
@@ -172,6 +177,7 @@ fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValu
     JsValue::from_json(&Json::Object(root))
 }
 
+#[tracing::instrument(skip_all)]
 fn response_spec_to_js(spec: &ResponseSpec) -> Json {
     let mut obj = JsonMap::new();
 
@@ -213,6 +219,7 @@ fn response_spec_to_js(spec: &ResponseSpec) -> Json {
     Json::Object(obj)
 }
 
+#[tracing::instrument(skip_all)]
 fn header_patch_to_js(hp: &HeaderPatch) -> Json {
     let (kind_str, has_value) = match hp.kind {
         HeaderPatchKind::Set => ("set", true),
@@ -238,6 +245,7 @@ fn header_patch_to_js(hp: &HeaderPatch) -> Json {
     Json::Object(obj)
 }
 
+#[tracing::instrument(skip_all)]
 fn model_patch_to_js(mp: &ModelPatch) -> Json {
     let mut obj = JsonMap::new();
     obj.insert("patch".to_string(), mp.patch.clone());
@@ -248,6 +256,7 @@ fn model_patch_to_js(mp: &ModelPatch) -> Json {
     Json::Object(obj)
 }
 
+#[tracing::instrument(skip_all)]
 fn dom_op_to_js(op: &DomOp) -> Json {
     match op {
         DomOp::SetInnerHtml(html) => json!({
@@ -266,6 +275,7 @@ fn dom_op_to_js(op: &DomOp) -> Json {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn body_patch_to_js(bp: &BodyPatch) -> Json {
     let mut obj = JsonMap::new();
 
@@ -304,6 +314,7 @@ fn body_patch_to_js(bp: &BodyPatch) -> Json {
 // JS -> Rust
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[tracing::instrument(skip_all)]
 fn parse_header_patch(v: &Json) -> Option<HeaderPatch> {
     let obj = v.as_object()?;
     let kind = obj.get("kind")?.as_str()?;
@@ -336,6 +347,7 @@ fn parse_header_patch(v: &Json) -> Option<HeaderPatch> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn parse_model_patch(v: &Json) -> Option<ModelPatch> {
     let obj = v.as_object()?;
     let patch = obj.get("patch")?.clone();
@@ -354,6 +366,7 @@ fn parse_model_patch(v: &Json) -> Option<ModelPatch> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn parse_dom_op(v: &Json) -> Option<DomOp> {
     let obj = v.as_object()?;
     let kind = obj.get("kind")?.as_str()?;
@@ -367,6 +380,7 @@ fn parse_dom_op(v: &Json) -> Option<DomOp> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn parse_body_patch(v: &Json) -> Option<BodyPatch> {
     let obj = v.as_object()?;
     let kind = obj.get("kind")?.as_str()?;
@@ -407,6 +421,7 @@ fn parse_body_patch(v: &Json) -> Option<BodyPatch> {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn parse_response_spec(v: &Json) -> Option<ResponseSpec> {
     let obj = v.as_object()?;
 
@@ -477,6 +492,7 @@ fn parse_response_spec(v: &Json) -> Option<ResponseSpec> {
 // Merge from JS into Rust
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[tracing::instrument(skip_all)]
 fn merge_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
     let json = ret.to_json();
     let obj = match json.as_object() {

@@ -21,6 +21,7 @@ use domain::{
 };
 use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
+use tracing::{debug, info};
 
 pub type Result<T> = std::result::Result<T, EdgeError>;
 
@@ -33,6 +34,7 @@ pub struct Cli {
 }
 
 #[tokio::main(flavor = "multi_thread")]
+#[tracing::instrument(skip_all)]
 pub async fn start() -> ExitCode {
     let local = LocalSet::new();
 
@@ -45,8 +47,6 @@ pub async fn start() -> ExitCode {
             let result = match cli.command {
                 Commands::Start(start) => do_start(start).await,
             };
-
-            dbg!(&result);
 
             result
                 .map(|_| ExitCode::SUCCESS)
@@ -77,6 +77,7 @@ impl StartProcess<CommandIssued> {
     /// Load settings from `<dir>/settings.toml`.
     ///
     /// `dir` is the directory that contains `settings.toml`.
+    #[tracing::instrument(skip_all)]
     fn parse_settings_file(command: StartCmd) -> Result<StartProcess<SettingsLoaded>> {
         let dir = command.dir.clone();
         // Ensure directory exists
@@ -130,6 +131,8 @@ impl StartProcess<SettingsLoaded> {
             _state: PhantomData,
         }
     }
+
+    #[tracing::instrument(skip_all)]
     async fn scan_content_directory(self) -> Result<StartProcess<ContentLoaded>> {
         let dir = self.command.dir.clone();
         let content_settings = match self.settings.content.clone() {
@@ -167,12 +170,15 @@ impl StartProcess<SettingsLoaded> {
         )?);
 
         let (docs, errs) = scan_and_process_docs(&root, cfg, index_dir).await?;
-        dbg!(docs.len());
-        dbg!(errs.len());
-        dbg!(errs.first());
+        debug!(
+            "Document and Error Counts: ({}, {})",
+            docs.len(),
+            errs.len()
+        );
         Ok(self.done(content_settings, docs))
     }
 
+    #[tracing::instrument(skip_all)]
     fn done(self, cnt_sets: ContentSettings, docs: Vec<Document>) -> StartProcess<ContentLoaded> {
         StartProcess {
             command: self.command,
@@ -188,6 +194,7 @@ impl StartProcess<SettingsLoaded> {
 }
 
 impl StartProcess<ContentLoaded> {
+    #[tracing::instrument(skip_all)]
     fn scan_extensions_directory(self) -> Result<StartProcess<ExtensionsLoaded>> {
         let dir = self.command.dir.clone();
         let ext_settings = match &self.settings.ext {
@@ -205,6 +212,7 @@ impl StartProcess<ContentLoaded> {
         Ok(self.done(plugins, themes))
     }
 
+    #[tracing::instrument(skip_all)]
     fn done(
         self,
         plugins: Vec<DiscoveredPlugin>,
@@ -224,6 +232,7 @@ impl StartProcess<ContentLoaded> {
 }
 
 impl StartProcess<ExtensionsLoaded> {
+    #[tracing::instrument(skip_all)]
     fn register_routes_and_middleware(self) -> Result<StartProcess<RouterCreated>> {
         let (plugins, themes) = self.extensions.as_ref().unwrap();
         let plugin_cfgs = plugins.iter().map(|p| (&p.spec).into()).collect();
@@ -238,6 +247,7 @@ impl StartProcess<ExtensionsLoaded> {
         Ok(self.done(router))
     }
 
+    #[tracing::instrument(skip_all)]
     fn done(self, router: Router) -> StartProcess<RouterCreated> {
         StartProcess {
             command: self.command,
@@ -253,6 +263,7 @@ impl StartProcess<ExtensionsLoaded> {
 }
 
 impl StartProcess<RouterCreated> {
+    #[tracing::instrument(skip_all)]
     async fn start_servers(mut self) -> Result<StartProcess<ServerStarted>> {
         let router = self.router.take().unwrap();
         let settings = self.settings.clone();
@@ -261,6 +272,7 @@ impl StartProcess<RouterCreated> {
         Ok(self.done(EdgeRuntime::start(settings, make_router).await?))
     }
 
+    #[tracing::instrument(skip_all)]
     fn done(self, rt: EdgeRuntime) -> StartProcess<ServerStarted> {
         StartProcess {
             command: self.command,
@@ -276,44 +288,56 @@ impl StartProcess<RouterCreated> {
 }
 
 impl StartProcess<ServerStarted> {
+    #[tracing::instrument(skip_all)]
     async fn is_running(&self) -> Result<()> {
         Ok(futures::future::pending::<()>().await)
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn do_start(start: StartCmd) -> Result<()> {
     // parse settings file -> does the settings file exist?  If yes, parse it
     let then = Utc::now();
     let process = StartProcess::<CommandIssued>::parse_settings_file(start)?;
-    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
-    dbg!("Settings parsed");
+    info!(
+        "Settings parsed in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
 
     // scan for content -> does the content directory exist?  If yes, scan it
     let then = Utc::now();
     let process = process.scan_content_directory().await?;
-    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
-    dbg!("Content scanned");
+    info!(
+        "Content scanned in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
 
     // scan for extensions -> does the extensions directory exist?  If yes, scan it
     let then = Utc::now();
     let process = process.scan_extensions_directory()?;
-    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
-    dbg!("Extensions scanned");
+    info!(
+        "Extensions scanned in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
 
     // register routes and middleware in Axum
     let then = Utc::now();
     let process = process.register_routes_and_middleware()?;
-    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
-    dbg!("Routes registered");
+    info!(
+        "Routes registered in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
 
     // start servers (Axum web server/Pingora edge controller)
     let then = Utc::now();
     let process = process.start_servers().await?;
-    dbg!(Utc::now().timestamp_millis() - then.timestamp_millis());
-    dbg!("Servers started");
+    info!(
+        "Servers started in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
 
     while let Ok(()) = process.is_running().await {
-        dbg!("Restarting the server");
+        info!("Restarting the server");
     }
 
     Ok(())

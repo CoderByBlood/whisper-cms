@@ -70,6 +70,7 @@ impl<E: JsEngine> ThemeRuntime<E> {
     /// Load a single theme module into the JS engine.
     ///
     /// The JS file must attach its lifecycle object under `spec.id`.
+    #[tracing::instrument(skip_all)]
     pub fn new(mut engine: E, spec: ThemeSpec) -> Result<Self, RuntimeError> {
         // Load/evaluate the JavaScript theme module
         engine.load_module(&spec.id, &spec.source)?;
@@ -88,6 +89,7 @@ impl<E: JsEngine> ThemeRuntime<E> {
     /// Optionally call `themeId.init(ctx)` once.
     ///
     /// If the theme does not export `.init`, we silently ignore it.
+    #[tracing::instrument(skip_all)]
     pub fn init(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
         // Per-theme context: ctx.config contains theme.toml, etc.
         let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
@@ -116,6 +118,7 @@ impl<E: JsEngine> ThemeRuntime<E> {
     ///   - response spec
     ///   - recommendations
     ///   - config-dependent logic
+    #[tracing::instrument(skip_all)]
     pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
         let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
 

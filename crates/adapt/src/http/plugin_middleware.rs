@@ -21,6 +21,7 @@ pub struct PluginLayer {
 }
 
 impl PluginLayer {
+    #[tracing::instrument(skip_all)]
     pub fn new(plugin_rt: PluginRuntimeClient) -> Self {
         Self { plugin_rt }
     }
@@ -29,6 +30,7 @@ impl PluginLayer {
 impl<S> Layer<S> for PluginLayer {
     type Service = PluginMiddleware<S>;
 
+    #[tracing::instrument(skip_all)]
     fn layer(&self, inner: S) -> Self::Service {
         PluginMiddleware {
             inner,
@@ -55,10 +57,12 @@ where
     type Error = S::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
+    #[tracing::instrument(skip_all)]
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
+    #[tracing::instrument(skip_all)]
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
 

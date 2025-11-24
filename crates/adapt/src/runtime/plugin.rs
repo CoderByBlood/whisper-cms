@@ -68,6 +68,7 @@ pub struct PluginRuntime<E: JsEngine> {
 
 impl<E: JsEngine> PluginRuntime<E> {
     /// Create a new runtime with a given `JsEngine`.
+    #[tracing::instrument(skip_all)]
     pub fn new(mut engine: E) -> Result<Self, RuntimeError> {
         // Load the ctx shim into this engine.
         // You can handle error propagation more gracefully if your JsEngine
@@ -85,6 +86,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     /// - `engine.load_module(plugin.id, plugin.source)`
     /// - the plugin JS is expected to wire its lifecycle functions
     ///   under that (internally generated) id.
+    #[tracing::instrument(skip_all)]
     pub fn load_plugins(&mut self, specs: &[PluginSpec]) -> Result<(), RuntimeError> {
         for spec in specs {
             // In a more hardened version, you could generate an opaque internal id
@@ -113,6 +115,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     /// Important: we *clone* the metadata before iterating to avoid
     /// borrowing `self.plugins` immutably while also mutably borrowing
     /// `self` inside `call_init`.
+    #[tracing::instrument(skip_all)]
     pub fn init_all(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
         let metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
         for meta in &metas {
@@ -125,6 +128,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     ///
     /// Recommendations from plugins are **appended** to `ctx.recommendations`.
     /// We clone the metas up front to avoid borrow conflicts.
+    #[tracing::instrument(skip_all)]
     pub fn before_all(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
         let metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
         for meta in &metas {
@@ -136,6 +140,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     /// Call `<internalId>.after(ctx)` on all plugins in **reverse** load order.
     ///
     /// Recommendations from plugins are **appended** to `ctx.recommendations`.
+    #[tracing::instrument(skip_all)]
     pub fn after_all(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
         let mut metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
         metas.reverse();
@@ -148,6 +153,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     /// Internal: call `<internalId>.init(ctx)` if present.
     ///
     /// Missing function is treated as no-op.
+    #[tracing::instrument(skip_all)]
     fn call_init(&mut self, meta: &PluginMeta, ctx: &RequestContext) -> Result<(), RuntimeError> {
         // Build per-plugin ctx (e.g. with per-plugin config if you wire that in).
         let js_ctx = ctx_to_js_for_plugins(ctx, &meta.id);
