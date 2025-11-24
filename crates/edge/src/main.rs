@@ -14,14 +14,7 @@ fn main() -> ExitCode {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer())
-        /*.with(
-            fmt::layer()
-                .with_target(false)
-                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL) // 👈 REQUIRED
-                .with_file(true)
-                .with_line_number(true),
-        )*/
+        .with(fmt::layer().with_file(true).with_line_number(true))
         .init();
 
     info!("logging setup");

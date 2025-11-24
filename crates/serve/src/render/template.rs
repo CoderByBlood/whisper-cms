@@ -1,3 +1,5 @@
+// crates/adapt/src/render/template.rs
+
 use super::error::RenderError;
 use handlebars::Handlebars;
 use serde::Serialize;

@@ -5,21 +5,40 @@ use super::error::RuntimeError;
 use crate::core::RequestContext;
 use crate::js::{JsEngine, JsValue};
 use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
+use serde_json;
+use tracing::debug;
+use uuid::Uuid;
+
+fn build_theme_prelude(internal_id: &str, configured_id: &str) -> String {
+    let internal_id_json = serde_json::to_string(internal_id).unwrap();
+    let configured_id_json = serde_json::to_string(configured_id).unwrap();
+
+    format!(
+        r#"(function (global) {{
+    const INTERNAL_ID = {internal_id};
+    const CONFIG_ID = {configured_id};
+
+    // Host-provided registration hook for themes.
+    global.registerTheme = function(hooks) {{
+        if (!hooks || typeof hooks.render !== "function") {{
+            throw new Error("registerTheme: hooks.render(ctx) is required");
+        }}
+
+        // Stash the hooks under an *opaque* internal id
+        global[INTERNAL_ID] = hooks;
+    }};
+}})(typeof globalThis !== "undefined" ? globalThis : this);"#,
+        internal_id = internal_id_json,
+        configured_id = configured_id_json,
+    )
+}
 
 /// Theme specification for loading a JS theme.
 #[derive(Debug, Clone)]
 pub struct ThemeSpec {
-    /// Host-facing identifier – usually derived from disk folder, config, etc.
-    /// This is *not* required to be visible in JS.
-    pub id: String,
-
-    /// Friendly display name.
+    pub id: String, // configured id, e.g. "demo-theme"
     pub name: String,
-
-    /// Mount path.
     pub mount_path: String,
-
-    /// JavaScript source code of the theme module.
     pub source: String,
 }
 
@@ -40,69 +59,57 @@ impl ThemeSpec {
 }
 
 /// ThemeRuntime manages a single theme.
-///
-/// JS side is expected to export lifecycle functions under the theme's
-/// *internal* ID assigned by the host:
-///
-/// ```js
-/// globalThis["theme_abc123"] = {
-///     init(ctx)   { /* optional */ },
-///     handle(ctx) { /* required */ return ctx; }
-/// };
-/// ```
-///
-/// The host calls:
-///     `<internalId>.init(ctx)`
-///     `<internalId>.handle(ctx)`
 pub struct ThemeRuntime<E: JsEngine> {
     engine: E,
 
-    /// Internal theme identifier used for JS lookup.
-    ///
-    /// *Not* necessarily the same as the folder name, TOML name, etc.
-    id: String,
+    /// Opaque internal id used in JS to look up hooks.
+    internal_id: String,
+
+    /// Configured theme id (from TOML / discovery).
+    configured_id: String,
 
     /// Display name (not used internally).
     _name: String,
 }
 
 impl<E: JsEngine> ThemeRuntime<E> {
-    /// Load a single theme module into the JS engine.
-    ///
-    /// The JS file must attach its lifecycle object under `spec.id`.
     #[tracing::instrument(skip_all)]
     pub fn new(mut engine: E, spec: ThemeSpec) -> Result<Self, RuntimeError> {
-        // Load/evaluate the JavaScript theme module
-        engine.load_module(&spec.id, &spec.source)?;
-        // Load the ctx shim into this engine.
-        // You can handle error propagation more gracefully if your JsEngine
-        // exposes a concrete error type; keeping it simple here.
+        let configured_id = spec.id;
+        let internal_id = format!("theme_{}", Uuid::new_v4().simple());
+
+        // 1) host prelude: defines registerTheme(...)
+        let prelude = build_theme_prelude(&internal_id, &configured_id);
+        engine.load_module("__theme_prelude__", &prelude)?;
+
+        // 2) theme module (your demo-theme.js)
+        engine.load_module(&configured_id, &spec.source)?;
+
+        // 3) ctx shim
         engine.load_module("__ctx_shim__", CTX_SHIM_SRC)?;
 
         Ok(Self {
             engine,
-            id: spec.id,
+            internal_id,
+            configured_id,
             _name: spec.name,
         })
     }
 
-    /// Optionally call `themeId.init(ctx)` once.
-    ///
-    /// If the theme does not export `.init`, we silently ignore it.
+    /// Optionally call `init(ctx)` once.
     #[tracing::instrument(skip_all)]
     pub fn init(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
-        // Per-theme context: ctx.config contains theme.toml, etc.
-        let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
+        let js_ctx = ctx_to_js_for_theme(ctx, &self.configured_id);
 
-        // Apply the JS-side shim to get the nice header API
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
+        // global init(ctx) in the theme module
         self.engine
-            .call_function(&format!("{}.init", self.id), &[js_ctx])
+            .call_function("init", &[js_ctx])
             .or_else(|err| {
-                // Missing method = no-op
                 if let crate::js::JsError::Call(msg) = &err {
                     if msg.contains("is not a function") {
+                        // theme has no init → fine
                         return Ok(JsValue::Null);
                     }
                 }
@@ -112,29 +119,28 @@ impl<E: JsEngine> ThemeRuntime<E> {
         Ok(())
     }
 
-    /// Call `<internalId>.handle(ctx)` on the theme.
-    ///
-    /// This is the *required* lifecycle method for rendering and modifying:
-    ///   - response spec
-    ///   - recommendations
-    ///   - config-dependent logic
-    #[tracing::instrument(skip_all)]
+    /// Call `<internal_id>.render(ctx)` on the registered hooks.
+    #[tracing::instrument(skip_all, fields(req_id = %ctx.req_id))]
     pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
-        let js_ctx = ctx_to_js_for_theme(ctx, &self.id);
+        debug!(
+            "Before Handling theme {} with context {:?}",
+            self.internal_id, ctx
+        );
+        let js_ctx = ctx_to_js_for_theme(ctx, &self.configured_id);
 
-        // Apply the JS-side shim to get the nice header API
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
-        let result = self
-            .engine
-            .call_function(&format!("{}.handle", self.id), &[js_ctx])?;
+        let func_name = format!("{}.render", self.internal_id);
+        let result = self.engine.call_function(&func_name, &[js_ctx])?;
 
-        // Theme should return a ctx object, but if it's not an object
-        // we simply apply no updates.
         if let JsValue::Object(_) = result {
             merge_theme_ctx_from_js(&result, ctx)?;
         }
 
+        debug!(
+            "After Handling theme {} with context {:?}",
+            self.internal_id, ctx
+        );
         Ok(())
     }
 }

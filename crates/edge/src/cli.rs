@@ -10,6 +10,7 @@ use crate::{
 };
 use adapt::{
     cmd::{Commands, StartCmd},
+    core::RequestContext,
     runtime::bootstrap::bootstrap_all,
 };
 use axum::Router;
@@ -21,7 +22,7 @@ use domain::{
 };
 use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 pub type Result<T> = std::result::Result<T, EdgeError>;
 
@@ -48,9 +49,16 @@ pub async fn start() -> ExitCode {
                 Commands::Start(start) => do_start(start).await,
             };
 
-            result
-                .map(|_| ExitCode::SUCCESS)
-                .unwrap_or(ExitCode::FAILURE)
+            result.map_or_else(
+                |e| {
+                    error!("Failed to start WhisperCMS Edge: {}", e);
+                    ExitCode::FAILURE
+                },
+                |_| {
+                    info!("WhisperCMS Edge started successfully");
+                    ExitCode::SUCCESS
+                },
+            )
         })
         .await
 }
@@ -233,12 +241,26 @@ impl StartProcess<ContentLoaded> {
 
 impl StartProcess<ExtensionsLoaded> {
     #[tracing::instrument(skip_all)]
-    fn register_routes_and_middleware(self) -> Result<StartProcess<RouterCreated>> {
+    async fn register_routes_and_middleware(self) -> Result<StartProcess<RouterCreated>> {
         let (plugins, themes) = self.extensions.as_ref().unwrap();
         let plugin_cfgs = plugins.iter().map(|p| (&p.spec).into()).collect();
         let theme_cfgs = themes.iter().map(|t| (&t.spec).into()).collect();
         let theme_bnds = themes.iter().map(|t| (&t.spec).into()).collect();
         let handles = bootstrap_all(plugin_cfgs, theme_cfgs)?;
+
+        info!("Initializing themes...");
+        handles
+            .theme_client
+            .init_all(RequestContext::builder().build())
+            .await?;
+        info!("Initializing plugins...");
+        handles
+            .plugin_client
+            .init_all(RequestContext::builder().build())
+            .await?;
+
+        info!("Plugins and themes initialized successfully");
+
         let router = build_app_router(
             self.content_settings.as_ref().unwrap().dir.clone(),
             handles,
@@ -322,7 +344,7 @@ async fn do_start(start: StartCmd) -> Result<()> {
 
     // register routes and middleware in Axum
     let then = Utc::now();
-    let process = process.register_routes_and_middleware()?;
+    let process = process.register_routes_and_middleware().await?;
     info!(
         "Routes registered in {} milliseconds",
         Utc::now().timestamp_millis() - then.timestamp_millis()

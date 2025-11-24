@@ -195,6 +195,7 @@ async fn theme_route_handler(
 
     // Ask the theme actor to render a ResponseBodySpec.
     let result = theme_client.render(&theme_id, ctx).await;
+    debug!("!!!! HERE WE GO !!!! The ResponseBodySpec: {:?}", result);
 
     let resp = match result {
         Ok(ResponseBodySpec::HtmlString(html)) => Response::builder()

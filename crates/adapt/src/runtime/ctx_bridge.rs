@@ -10,6 +10,7 @@ use serde_json::{json, Map as JsonMap, Value as Json};
 use serve::render::recommendation::{
     BodyPatch, BodyPatchKind, DomOp, HeaderPatch, HeaderPatchKind, ModelPatch, Recommendations,
 };
+use tracing::debug;
 
 pub const CTX_SHIM_SRC: &str = r#"
 (function (global) {
@@ -85,7 +86,8 @@ pub fn ctx_to_js_for_plugins(ctx: &RequestContext, plugin_id: &str) -> JsValue {
 /// single `theme_config` in `ReqCtx`), but is accepted for
 /// symmetry with plugins. The theme config is exposed as `ctx.config`.
 #[tracing::instrument(skip_all)]
-pub fn ctx_to_js_for_theme(ctx: &RequestContext, _theme_id: &str) -> JsValue {
+pub fn ctx_to_js_for_theme(ctx: &RequestContext, theme_id: &str) -> JsValue {
+    debug!("RequestContext for theme {}: {:?}", theme_id, ctx);
     let cfg = Some(&ctx.theme_config);
     ctx_to_js(ctx, cfg)
 }
@@ -114,6 +116,7 @@ pub fn merge_theme_ctx_from_js(
 
 #[tracing::instrument(skip_all)]
 fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValue {
+    debug!("Config: {:?}", config);
     let mut root = JsonMap::new();
 
     // ---------------------------------------------------------------------
@@ -179,6 +182,7 @@ fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValu
 
 #[tracing::instrument(skip_all)]
 fn response_spec_to_js(spec: &ResponseSpec) -> Json {
+    debug!("Response spec: {:?}", spec);
     let mut obj = JsonMap::new();
 
     obj.insert(
@@ -431,12 +435,10 @@ fn parse_response_spec(v: &Json) -> Option<ResponseSpec> {
         .and_then(|n| StatusCode::from_u16(n as u16).ok())
         .unwrap_or(StatusCode::OK);
 
-    // headers: string -> string
     let mut headers = HeaderMap::new();
     if let Some(hdrs) = obj.get("headers").and_then(|h| h.as_object()) {
         for (name, val) in hdrs.iter() {
             if let Ok(header_name) = header::HeaderName::from_bytes(name.as_bytes()) {
-                // accept either a string or an array of strings
                 match val {
                     Json::String(s) => {
                         if let Ok(hv) = HeaderValue::from_str(s) {
@@ -458,23 +460,35 @@ fn parse_response_spec(v: &Json) -> Option<ResponseSpec> {
         }
     }
 
-    // body
     let body = if let Some(body_obj) = obj.get("body").and_then(|b| b.as_object()) {
         match body_obj.get("kind").and_then(|s| s.as_str()) {
             Some("none") | None => ResponseBodySpec::None,
+
             Some("json") => {
-                let value = body_obj.get("value").cloned().unwrap_or_else(|| Json::Null);
+                let value = body_obj.get("value").cloned().unwrap_or(Json::Null);
                 ResponseBodySpec::JsonValue(value)
             }
+
             Some("htmlTemplate") => {
                 let template = body_obj
                     .get("template")
                     .and_then(|t| t.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let model = body_obj.get("model").cloned().unwrap_or_else(|| Json::Null);
+                let model = body_obj.get("model").cloned().unwrap_or(Json::Null);
                 ResponseBodySpec::HtmlTemplate { template, model }
             }
+
+            // 🔧 NEW: handle htmlString from JS
+            Some("htmlString") => {
+                let html = body_obj
+                    .get("html")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                ResponseBodySpec::HtmlString(html)
+            }
+
             _ => ResponseBodySpec::None,
         }
     } else {

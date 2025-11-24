@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use serve::render::recommendation::Recommendations;
 use std::collections::HashMap;
+use tracing::debug;
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -297,6 +298,8 @@ impl RequestContext {
     /// Consume the context and extract just the `ResponseBodySpec`.
     /// Used by the theme actor / HTTP layer once JS processing is finished.
     pub fn into_response_body_spec(self) -> ResponseBodySpec {
+        debug!("ResponseSpec: {:?}", self.response_spec);
+        debug!("ResponseBodySpec: {:?}", self.response_spec.body);
         self.response_spec.body
     }
 

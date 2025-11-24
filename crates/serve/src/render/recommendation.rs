@@ -1,3 +1,5 @@
+// crates/adapt/src/render/recommendation.rs
+
 use http::header::HeaderName;
 use http::HeaderMap;
 use json_patch::{patch as apply_json_patch_doc, Patch, PatchError};

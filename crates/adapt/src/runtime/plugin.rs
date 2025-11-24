@@ -2,77 +2,69 @@
 
 use std::collections::HashMap;
 
-use crate::core::context::RequestContext;
-use crate::js::JsError;
-use crate::js::{JsEngine, JsValue};
-use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
-
 use super::ctx_bridge::{ctx_to_js_for_plugins, merge_recommendations_from_js};
 use super::error::RuntimeError;
+use crate::core::context::RequestContext;
+use crate::js::{JsEngine, JsError, JsValue};
+use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
 
-/// Specification for a plugin, suitable for loading at startup.
-///
-/// Each plugin is expected to export an object on some internal key
-/// (derived and managed by the host), with optional `init(ctx)`,
-/// `before(ctx)`, and `after(ctx)` functions.
+use serde_json;
+use uuid::Uuid;
+
+/// Host-facing plugin spec. Configured ID never leaves Rust.
 #[derive(Debug, Clone)]
 pub struct PluginSpec {
-    /// Host-facing plugin identifier (e.g. from config / disk layout).
-    /// This is *not* necessarily the same as any JS-visible identifier.
     pub id: String,
     pub name: String,
     pub source: String,
 }
 
-/// Metadata about a loaded plugin.
-///
-/// This is purely host-side: JS never sees these IDs unless you choose to
-/// expose them via config or ctx.
+/// Metadata for runtime bookkeeping
 #[derive(Clone, Debug)]
 pub struct PluginMeta {
-    /// Internal plugin id used to resolve lifecycle functions in JS.
-    pub id: String,
+    pub internal_id: String,   // opaque runtime ID, used to call hooks
+    pub configured_id: String, // used ONLY for ctx.config lookup
     pub name: String,
 }
 
-/// Runtime responsible for loading and invoking plugins.
-///
-/// - Uses a single `JsEngine` instance.
-/// - Each plugin script is loaded via `engine.load_module(id, source)`.
-/// - JS side is expected to attach lifecycle functions in a way that
-///   the engine can resolve under the plugin's internal id:
-///
-///   ```js
-///   // Example for an internal id like "plugin_abc123"
-///   globalThis["plugin_abc123"] = {
-///     init(ctx)   { /* optional */ },
-///     before(ctx) { /* optional */ return ctx; },
-///     after(ctx)  { /* optional */ return ctx; },
-///   };
-///   ```
-///
-/// - All JS hook functions are called with a single argument: `ctx`.
-/// - If a hook is missing (`is not a function`), it is treated as a no-op.
-/// - If a hook returns an object, we call `merge_recommendations_from_js`
-///   so that plugins can emit header / model / body recommendations.
+/// PluginRuntime: manages a single Boa engine and multiple plugins inside it
 #[derive(Debug)]
 pub struct PluginRuntime<E: JsEngine> {
     engine: E,
-    /// Map from internal plugin id → plugin metadata.
-    ///
-    /// The keys here are internal IDs chosen by the host (you can reuse
-    /// `PluginSpec.id` or generate opaque ones); they are what we pass to
-    /// `ctx_to_js_for_plugins` and use in `<internalId>.before` lookups.
-    plugins: HashMap<String, PluginMeta>,
+    plugins: HashMap<String, PluginMeta>, // keyed by internal_id
+}
+
+fn build_plugin_prelude(internal_id: &str) -> String {
+    let internal_id_json = serde_json::to_string(internal_id).unwrap();
+
+    // No configured ID. No user ID. Only opaque internal ID known by host.
+    format!(
+        r#"(function (global) {{
+    const INTERNAL_ID = {internal_id};
+
+    // Host-provided registration. Plugins call this INSIDE init().
+    global.registerPlugin = function(hooks) {{
+        if (!hooks || typeof hooks !== "object") {{
+            throw new Error("registerPlugin: hooks object is required");
+        }}
+        // We DO NOT register init. Only before/after.
+        global[INTERNAL_ID] = {{
+            before: typeof hooks.before === "function"
+                ? hooks.before
+                : undefined,
+            after: typeof hooks.after === "function"
+                ? hooks.after
+                : undefined
+        }};
+    }};
+}})(typeof globalThis !== "undefined" ? globalThis : this);"#,
+        internal_id = internal_id_json,
+    )
 }
 
 impl<E: JsEngine> PluginRuntime<E> {
-    /// Create a new runtime with a given `JsEngine`.
     #[tracing::instrument(skip_all)]
     pub fn new(mut engine: E) -> Result<Self, RuntimeError> {
-        // Load the ctx shim into this engine.
-        // You can handle error propagation more gracefully if your JsEngine
-        // exposes a concrete error type; keeping it simple here.
         engine.load_module("__ctx_shim__", CTX_SHIM_SRC)?;
         Ok(Self {
             engine,
@@ -80,41 +72,34 @@ impl<E: JsEngine> PluginRuntime<E> {
         })
     }
 
-    /// Load all plugins from their specs.
-    ///
-    /// For each plugin:
-    /// - `engine.load_module(plugin.id, plugin.source)`
-    /// - the plugin JS is expected to wire its lifecycle functions
-    ///   under that (internally generated) id.
     #[tracing::instrument(skip_all)]
     pub fn load_plugins(&mut self, specs: &[PluginSpec]) -> Result<(), RuntimeError> {
         for spec in specs {
-            // In a more hardened version, you could generate an opaque internal id
-            // here (e.g. "plugin_<uuid>") instead of reusing spec.id.
-            let internal_id = spec.id.clone();
+            let configured_id = spec.id.clone();
+            let internal_id = format!("plugin_{}", Uuid::new_v4().simple());
 
-            self.engine.load_module(&internal_id, &spec.source)?;
+            // Prelude: defines registerPlugin()
+            let prelude = build_plugin_prelude(&internal_id);
+            let prelude_name = format!("__plugin_prelude_{}", internal_id);
+            self.engine.load_module(&prelude_name, &prelude)?;
 
+            // Load plugin JS → its top-level defines init(ctx)
+            self.engine.load_module(&configured_id, &spec.source)?;
+
+            // Record metadata
             self.plugins.insert(
                 internal_id.clone(),
                 PluginMeta {
-                    id: internal_id,
+                    internal_id,
+                    configured_id,
                     name: spec.name.clone(),
                 },
             );
         }
+
         Ok(())
     }
 
-    /// Call `<internalId>.init(ctx)` on all plugins at startup-like time.
-    ///
-    /// This is optional; you can call it with a special "init context"
-    /// or per-request if you want. For now, it uses a `RequestContext`
-    /// and ignores recommendations.
-    ///
-    /// Important: we *clone* the metadata before iterating to avoid
-    /// borrowing `self.plugins` immutably while also mutably borrowing
-    /// `self` inside `call_init`.
     #[tracing::instrument(skip_all)]
     pub fn init_all(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
         let metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
@@ -124,10 +109,29 @@ impl<E: JsEngine> PluginRuntime<E> {
         Ok(())
     }
 
-    /// Call `<internalId>.before(ctx)` on all plugins in load order.
-    ///
-    /// Recommendations from plugins are **appended** to `ctx.recommendations`.
-    /// We clone the metas up front to avoid borrow conflicts.
+    fn call_init(&mut self, meta: &PluginMeta, ctx: &RequestContext) -> Result<(), RuntimeError> {
+        let js_ctx = ctx_to_js_for_plugins(ctx, &meta.configured_id);
+        let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
+
+        // Call global init(ctx) defined in plugin module.
+        // Plugin decides whether to call registerPlugin inside.
+        let result = self
+            .engine
+            .call_function("init", &[js_ctx])
+            .or_else(|err| {
+                if let JsError::Call(msg) = &err {
+                    if msg.contains("is not a function") {
+                        return Ok(JsValue::Null); // plugin has no init → ok
+                    }
+                }
+                Err(err)
+            })?;
+
+        // Init is *not* merged — plugin returns ctx only for convenience.
+        let _ = result;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all)]
     pub fn before_all(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
         let metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
@@ -137,70 +141,35 @@ impl<E: JsEngine> PluginRuntime<E> {
         Ok(())
     }
 
-    /// Call `<internalId>.after(ctx)` on all plugins in **reverse** load order.
-    ///
-    /// Recommendations from plugins are **appended** to `ctx.recommendations`.
     #[tracing::instrument(skip_all)]
     pub fn after_all(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
-        let mut metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
+        // Reverse order for after()
+        let mut metas: Vec<_> = self.plugins.values().cloned().collect();
         metas.reverse();
+
         for meta in &metas {
             self.call_after(meta, ctx)?;
         }
         Ok(())
     }
 
-    /// Internal: call `<internalId>.init(ctx)` if present.
-    ///
-    /// Missing function is treated as no-op.
-    #[tracing::instrument(skip_all)]
-    fn call_init(&mut self, meta: &PluginMeta, ctx: &RequestContext) -> Result<(), RuntimeError> {
-        // Build per-plugin ctx (e.g. with per-plugin config if you wire that in).
-        let js_ctx = ctx_to_js_for_plugins(ctx, &meta.id);
-
-        // Apply the JS-side shim to get the nice header API
-        let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
-
-        // We ignore the return value from init; it is not required to return ctx.
-        let _ = self
-            .engine
-            .call_function(&format!("{}.init", meta.id), &[js_ctx])
-            .or_else(|err| {
-                // If function is missing, we treat it as "no init".
-                if let JsError::Call(msg) = &err {
-                    if msg.contains("is not a function") {
-                        return Ok(JsValue::Null);
-                    }
-                }
-                Err(err)
-            })?;
-
-        Ok(())
-    }
-
-    /// Internal: call `<internalId>.before(ctx)` if present.
-    ///
-    /// If the function returns an object, we try to merge recommendations.
     fn call_before(
         &mut self,
         meta: &PluginMeta,
         ctx: &mut RequestContext,
     ) -> Result<(), RuntimeError> {
-        let js_ctx = ctx_to_js_for_plugins(ctx, &meta.id);
-
-        // Apply the JS-side shim to get the nice header API
+        let js_ctx = ctx_to_js_for_plugins(ctx, &meta.configured_id);
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
-        // Plugins are expected to *return* the ctx object (possibly mutated),
-        // so Rust can see the updated recommendations.
+        let func_name = format!("{}.before", meta.internal_id);
+
         let result = self
             .engine
-            .call_function(&format!("{}.before", meta.id), &[js_ctx])
+            .call_function(&func_name, &[js_ctx])
             .or_else(|err| {
-                // If function is missing, treat as no-op.
                 if let JsError::Call(msg) = &err {
                     if msg.contains("is not a function") {
-                        return Ok(JsValue::Null);
+                        return Ok(JsValue::Null); // no before()
                     }
                 }
                 Err(err)
@@ -213,27 +182,23 @@ impl<E: JsEngine> PluginRuntime<E> {
         Ok(())
     }
 
-    /// Internal: call `<internalId>.after(ctx)` if present.
-    ///
-    /// If the function returns an object, we try to merge recommendations.
     fn call_after(
         &mut self,
         meta: &PluginMeta,
         ctx: &mut RequestContext,
     ) -> Result<(), RuntimeError> {
-        let js_ctx = ctx_to_js_for_plugins(ctx, &meta.id);
-
-        // Apply the JS-side shim to get the nice header API
+        let js_ctx = ctx_to_js_for_plugins(ctx, &meta.configured_id);
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
+
+        let func_name = format!("{}.after", meta.internal_id);
 
         let result = self
             .engine
-            .call_function(&format!("{}.after", meta.id), &[js_ctx])
+            .call_function(&func_name, &[js_ctx])
             .or_else(|err| {
-                // If function is missing, treat as no-op.
                 if let JsError::Call(msg) = &err {
                     if msg.contains("is not a function") {
-                        return Ok(JsValue::Null);
+                        return Ok(JsValue::Null); // no after()
                     }
                 }
                 Err(err)
@@ -344,12 +309,13 @@ mod tests {
     #[test]
     fn plugin_meta_clone_round_trips() {
         let meta = PluginMeta {
-            id: "p".into(),
+            internal_id: Uuid::new_v4().to_string(),
+            configured_id: "p".into(),
             name: "Plugin".into(),
         };
 
         let clone = meta.clone();
-        assert_eq!(clone.id, "p");
+        assert_eq!(clone.configured_id, "p");
         assert_eq!(clone.name, "Plugin");
     }
 

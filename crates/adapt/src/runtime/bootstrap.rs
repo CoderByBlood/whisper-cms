@@ -112,9 +112,9 @@ impl BoundTheme<BoaEngine> {
     /// 2. Call `<themeId>.handle(ctx)` in JS.
     /// 3. Merge the JS-returned ctx back into the Rust `RequestContext`.
     /// 4. Extract a `ResponseBodySpec` from the final ctx.
-    pub fn render(&mut self, ctx: RequestContext) -> Result<ResponseBodySpec, RuntimeError> {
+    pub fn render(&mut self, mut ctx: RequestContext) -> Result<ResponseBodySpec, RuntimeError> {
         // Delegate the heavy lifting to the ThemeRuntime.
-        self.runtime.handle(&mut ctx.clone())?;
+        self.runtime.handle(&mut ctx)?;
         Ok(ctx.into_response_body_spec())
     }
 }
