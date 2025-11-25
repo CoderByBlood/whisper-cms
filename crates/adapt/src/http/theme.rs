@@ -7,10 +7,79 @@ use axum::{
     http::Request,
     response::Response,
 };
-use serve::ctx::http::{RequestContext, ResponseBodySpec};
-use serve::resolver::{build_request_context, resolve};
+use domain::content::ResolvedContent;
+use http::StatusCode;
+use serde_json::{json, Map as JsonMap, Value as Json};
+use serve::resolver::resolve;
+use serve::{
+    ctx::http::{RequestContext, ResponseBodySpec},
+    resolver::ResolverError,
+};
 use std::borrow::Cow;
 use std::collections::HashMap;
+
+/// Canonicalize header names to `Accept-Language` style.
+///
+/// Duplicated here (and in plugin.rs) to avoid depending on a specific helper
+/// in `serve::resolver` while keeping behavior consistent.
+fn canonicalize_header_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut upper_next = true;
+
+    for ch in raw.chars() {
+        if ch == '-' {
+            out.push('-');
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+    }
+
+    out
+}
+
+/// Local RequestContext builder, mirroring the default logic from serve.
+///
+/// This keeps adapt decoupled from any particular helper function in
+/// `serve::resolver` while still projecting the HTTP request + ResolvedContent
+/// into the shape themes expect.
+fn build_request_context_from_http(
+    path: String,
+    method: http::Method,
+    headers: http::HeaderMap,
+    query_params: HashMap<String, String>,
+    resolved: ResolvedContent,
+) -> RequestContext {
+    // headers -> JSON object
+    let mut hdr_obj = JsonMap::new();
+    for (name, value) in headers.iter() {
+        let canonical = canonicalize_header_name(name.as_str());
+        hdr_obj.insert(canonical, json!(value.to_str().unwrap_or("")));
+    }
+
+    // query_params -> JSON object
+    let mut qp_obj = JsonMap::new();
+    for (k, v) in query_params.iter() {
+        qp_obj.insert(k.clone(), Json::String(v.clone()));
+    }
+
+    RequestContext::builder()
+        // req_* fields
+        .path(Json::String(path))
+        .method(Json::String(method.to_string()))
+        // let version default from the builder; resolver doesn't know the real version
+        .headers(Json::Object(hdr_obj))
+        .params(Json::Object(qp_obj))
+        // front_matter becomes the initial content_meta shape
+        .content_meta(resolved.front_matter)
+        // start empty; can be filled later by higher layers
+        .theme_config(Json::Object(JsonMap::new()))
+        .plugin_configs(HashMap::new())
+        .build()
+}
 
 /// Axum handler that resolves content and then delegates to the theme runtime.
 #[tracing::instrument(skip_all)]
@@ -38,14 +107,19 @@ pub async fn theme_entrypoint(
 
     // Resolve content by path + method using the injected resolver.
     let resolved = resolve(&path, req.method()).map_err(|e| {
+        let status = match e {
+            ResolverError::Backend(_) => 500,
+            ResolverError::Io(_) => 500,
+        };
+
         Response::builder()
-            .status(e.to_status())
+            .status(StatusCode::from_u16(status).unwrap())
             .body(Body::from(format!("Resolve error: {e}")))
             .unwrap()
     })?;
 
     // Build RequestContext from HTTP request + resolved content.
-    let ctx: RequestContext = build_request_context(
+    let ctx: RequestContext = build_request_context_from_http(
         path.clone(),
         req.method().clone(),
         req.headers().clone(),
@@ -53,7 +127,7 @@ pub async fn theme_entrypoint(
         resolved,
     );
 
-    // Decide which theme to use. For Phase 3, we always use "default".
+    // Decide which theme to use. For this phase, we always use "default".
     // This can be extended later to inspect front matter / config.
     let theme_id = Cow::Borrowed("default").into_owned();
 

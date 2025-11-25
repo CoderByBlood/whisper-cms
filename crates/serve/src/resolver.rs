@@ -1,111 +1,220 @@
 // crates/serve/src/resolver.rs
 
-use crate::ctx::http::{ContextError, RequestContext};
+//! Storage-agnostic content resolution.
+//!
+//! The *business logic* for request → content mapping lives here, but all actual storage
+//! access (filesystem, indexed_json, Tantivy/CAS) is injected from the edge crate at
+//! startup via `set_resolver_deps()`.
+//!
+//! This crate knows only about:
+//!   - request path
+//!   - normalized slug/path logic
+//!   - ResolvedContent { content_kind, front_matter, body }
+//!
+//! All the data retrieval — FM lookup, content lookup, slug lookup, CAS stream creation —
+//! is performed via injected closures.
+
 use domain::content::{ContentKind, ResolvedContent};
-use http::Method;
+use domain::stream::StreamHandle;
+use http::{HeaderMap, Method};
 use serde_json::{json, Map as JsonMap, Value as Json};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use tracing::warn;
+use std::sync::{LazyLock, RwLock};
+use thiserror::Error;
 
-/// Trait for resolving HTTP requests to content metadata.
-///
-/// Implementations can live in the edge crate (e.g. filesystem / index
-/// backed resolvers). The adapt crate only defines the contract.
-pub trait ContentResolver: Send + Sync {
-    fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, ContextError>;
+use crate::ctx::http::RequestContext;
+
+// -----------------------------------------------------------------------------
+// Error Type
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum ResolverError {
+    #[error("Io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Backend error: {0}")]
+    Backend(String),
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Type-erased resolver + context builder (injected from edge)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Injection Types
+// -----------------------------------------------------------------------------
 
-/// Type of the injected resolver function.
-pub type ResolveFn = fn(path: &str, method: &Method) -> Result<ResolvedContent, ContextError>;
+/// Lookup front matter via slug (primary key)
+pub type LookupFmBySlugFn = fn(slug: &str) -> Result<Option<Json>, ResolverError>;
 
-/// Type of the injected RequestContext builder.
-pub type BuildRequestContextFn = fn(
-    path: String,
-    method: http::Method,
-    headers: http::HeaderMap,
-    query_params: HashMap<String, String>,
-    resolved: ResolvedContent,
-) -> RequestContext;
+/// Lookup served-path → FM
+pub type LookupFmByServedPathFn = fn(served: &str) -> Result<Option<Json>, ResolverError>;
 
-/// Global slots for injected functions (set from edge).
-static RESOLVE_FN: OnceLock<ResolveFn> = OnceLock::new();
-static BUILD_CTX_FN: OnceLock<BuildRequestContextFn> = OnceLock::new();
+/// Lookup served-path → CAS stream handle
+pub type LookupBodyHandleFn = fn(served: &str) -> Result<Option<StreamHandle>, ResolverError>;
 
-/// Inject the resolver function (edge calls this once at startup).
-#[tracing::instrument(skip_all)]
-pub fn set_resolver_fn(f: ResolveFn) -> Result<(), &'static str> {
-    RESOLVE_FN
-        .set(f)
-        .map_err(|_| "resolver function already set")
+// -----------------------------------------------------------------------------
+// GLOBAL injected dependencies
+// -----------------------------------------------------------------------------
+
+static LOOKUP_FM_BY_SLUG: LazyLock<RwLock<Option<LookupFmBySlugFn>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+static LOOKUP_FM_BY_SERVED: LazyLock<RwLock<Option<LookupFmByServedPathFn>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+static LOOKUP_BODY_HANDLE: LazyLock<RwLock<Option<LookupBodyHandleFn>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+// Called by edge at startup.
+pub fn set_resolver_deps(
+    slug_fn: LookupFmBySlugFn,
+    served_fn: LookupFmByServedPathFn,
+    body_fn: LookupBodyHandleFn,
+) {
+    *LOOKUP_FM_BY_SLUG.write().unwrap() = Some(slug_fn);
+    *LOOKUP_FM_BY_SERVED.write().unwrap() = Some(served_fn);
+    *LOOKUP_BODY_HANDLE.write().unwrap() = Some(body_fn);
 }
 
-/// Inject the RequestContext builder function (edge calls this once).
-#[tracing::instrument(skip_all)]
-pub fn set_build_request_context_fn(f: BuildRequestContextFn) -> Result<(), &'static str> {
-    BUILD_CTX_FN
-        .set(f)
-        .map_err(|_| "build_request_context function already set")
+// -----------------------------------------------------------------------------
+// Utility
+// -----------------------------------------------------------------------------
+
+fn normalize(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{}", path)
+    }
 }
 
-/// Public, type-erased resolver entrypoint used everywhere in adapt.
-///
-/// If no resolver has been injected yet, falls back to a trivial
-/// implementation that treats the path as an asset and returns empty
-/// front matter.
-#[tracing::instrument(skip_all)]
-pub fn resolve(path: &str, method: &Method) -> Result<ResolvedContent, ContextError> {
-    if let Some(f) = RESOLVE_FN.get() {
-        return f(path, method);
+/// For extension inference on normalized paths.
+fn infer_kind_from_ext(path: &str) -> ContentKind {
+    match path.rsplit('.').next() {
+        Some("html") => ContentKind::Html,
+        Some("json") => ContentKind::Json,
+        _ => ContentKind::Asset,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 0–5 RESOLUTION LOGIC
+// -----------------------------------------------------------------------------
+
+pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, ResolverError> {
+    let path = normalize(path);
+
+    // Load injected functions.
+    let lookup_slug = LOOKUP_FM_BY_SLUG
+        .read()
+        .unwrap()
+        .expect("missing slug lookup injection");
+    let lookup_served = LOOKUP_FM_BY_SERVED
+        .read()
+        .unwrap()
+        .expect("missing served lookup injection");
+    let lookup_body = LOOKUP_BODY_HANDLE
+        .read()
+        .unwrap()
+        .expect("missing body lookup injection");
+
+    // -------------------------------------------
+    // Step 1: Does the path match a slug exactly?
+    // -------------------------------------------
+    if let Some(fm) = lookup_slug(&path)? {
+        if let Some(h) = lookup_body(&path)? {
+            return Ok(ResolvedContent {
+                content_kind: infer_kind_from_ext(&path),
+                front_matter: fm,
+                body: Some(h),
+            });
+        }
     }
 
-    warn!("resolve is defaulting because edge did not inject dependency");
+    // ------------------------------------------------------------
+    // Step 2: Does the path match served-path exactly?
+    // ------------------------------------------------------------
+    if let Some(fm) = lookup_served(&path)? {
+        if let Some(h) = lookup_body(&path)? {
+            return Ok(ResolvedContent {
+                content_kind: infer_kind_from_ext(&path),
+                front_matter: fm,
+                body: Some(h),
+            });
+        }
+    }
 
-    // Fallback: extremely simple, no indexing.
-    let trimmed = path.trim_start_matches('/');
-    Ok(ResolvedContent {
-        content_kind: if trimmed.ends_with(".html") {
-            ContentKind::Html
-        } else if trimmed.ends_with(".json") {
-            ContentKind::Json
-        } else {
-            ContentKind::Asset
-        },
-        front_matter: json!({}),
-        body_path: PathBuf::from(trimmed),
-    })
+    // ------------------------------------------------------------
+    // Step 3: Try adding `.html`
+    // ------------------------------------------------------------
+    if !path.ends_with(".html") {
+        let html = format!("{}.html", path.trim_end_matches('/'));
+        if let Some(fm) = lookup_served(&html)? {
+            if let Some(h) = lookup_body(&html)? {
+                return Ok(ResolvedContent {
+                    content_kind: ContentKind::Html,
+                    front_matter: fm,
+                    body: Some(h),
+                });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Step 4: If trailing slash, try `<path>/index.html`
+    // ------------------------------------------------------------
+    if path.ends_with('/') {
+        let index = format!("{}index.html", path);
+        if let Some(fm) = lookup_served(&index)? {
+            if let Some(h) = lookup_body(&index)? {
+                return Ok(ResolvedContent {
+                    content_kind: ContentKind::Html,
+                    front_matter: fm,
+                    body: Some(h),
+                });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Step 5: No matches — return empty
+    // ------------------------------------------------------------
+    Ok(ResolvedContent::empty())
 }
 
-/// Public, type-erased RequestContext builder used by theme + plugin paths.
+/// Default implementation used by both adapt and edge.
 ///
-/// If no builder has been injected yet, uses a default implementation
-/// that normalizes header names and plugs in `resolved.front_matter` as
-/// `content_meta`.
-#[tracing::instrument(skip_all)]
+/// - Normalizes header names to `Accept-Language` style.
+/// - Converts query params map into a JSON object.
+/// - Uses `resolved.front_matter` as `content_meta`.
 pub fn build_request_context(
     path: String,
-    method: http::Method,
-    headers: http::HeaderMap,
+    method: Method,
+    headers: HeaderMap,
     query_params: HashMap<String, String>,
     resolved: ResolvedContent,
 ) -> RequestContext {
-    if let Some(f) = BUILD_CTX_FN.get() {
-        return f(path, method, headers, query_params, resolved);
+    // headers -> JSON object
+    let mut hdr_obj = JsonMap::new();
+    for (name, value) in headers.iter() {
+        let canonical = canonicalize_header_name(name.as_str());
+        hdr_obj.insert(canonical, json!(value.to_str().unwrap_or("")));
     }
 
-    warn!("build_request_context() is default because edge did not inject dependency");
-    // Fallback to the default implementation.
-    build_request_context_default(path, method, headers, query_params, resolved)
-}
+    // query_params -> JSON object
+    let mut qp_obj = JsonMap::new();
+    for (k, v) in query_params.iter() {
+        qp_obj.insert(k.clone(), Json::String(v.clone()));
+    }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Default (non-injected) RequestContext builder
-// ─────────────────────────────────────────────────────────────────────────────
+    RequestContext::builder()
+        .path(Json::String(path))
+        .method(Json::String(method.to_string()))
+        .headers(Json::Object(hdr_obj))
+        .params(Json::Object(qp_obj))
+        .content_meta(resolved.front_matter)
+        .theme_config(Json::Object(JsonMap::new()))
+        .plugin_configs(HashMap::new())
+        .build()
+}
 
 fn canonicalize_header_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -124,44 +233,4 @@ fn canonicalize_header_name(raw: &str) -> String {
     }
 
     out
-}
-
-/// Default implementation used when edge has not injected a builder.
-///
-/// - Normalizes header names to `Accept-Language` style.
-/// - Converts query params map into a JSON object.
-/// - Uses `resolved.front_matter` as `content_meta`.
-fn build_request_context_default(
-    path: String,
-    method: http::Method,
-    headers: http::HeaderMap,
-    query_params: HashMap<String, String>,
-    resolved: ResolvedContent,
-) -> RequestContext {
-    // headers -> JSON object
-    let mut hdr_obj = JsonMap::new();
-    for (name, value) in headers.iter() {
-        let canonical = canonicalize_header_name(name.as_str());
-        hdr_obj.insert(canonical, json!(value.to_str().unwrap_or("")));
-    }
-
-    // query_params -> JSON object
-    let mut qp_obj = JsonMap::new();
-    for (k, v) in query_params.iter() {
-        qp_obj.insert(k.clone(), Json::String(v.clone()));
-    }
-
-    RequestContext::builder()
-        // req_* fields
-        .path(Json::String(path))
-        .method(Json::String(method.to_string()))
-        // let version default from the builder; resolver doesn't know the real version
-        .headers(Json::Object(hdr_obj))
-        .params(Json::Object(qp_obj))
-        // front_matter becomes the initial content_meta shape
-        .content_meta(resolved.front_matter)
-        // start empty; can be filled later by higher layers
-        .theme_config(Json::Object(JsonMap::new()))
-        .plugin_configs(HashMap::new())
-        .build()
 }

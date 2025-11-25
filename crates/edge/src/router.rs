@@ -4,8 +4,10 @@ use adapt::http::plugin_middleware::PluginLayer;
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 use domain::content::ResolvedContent;
-use serve::resolver::ContentResolver;
-use serve::{ctx::http::ResponseBodySpec, resolver::build_request_context};
+use serve::{
+    ctx::http::ResponseBodySpec,
+    resolver::{build_request_context, resolve},
+};
 
 use axum::{
     body::Body,
@@ -15,17 +17,12 @@ use axum::{
     routing::any,
     Router,
 };
-use domain::content::ContentKind;
 use http::header;
-use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
-use std::sync::Arc;
 use tower::Layer;
 use tracing::{debug, error};
 
-use crate::db::resolver::IndexedContentResolver;
 use crate::fs::ext::ThemeBinding;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +33,6 @@ use crate::fs::ext::ThemeBinding;
 struct ThemeAppState {
     theme_client: ThemeRuntimeClient,
     theme_id: String,
-    resolver: Arc<dyn ContentResolver>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,17 +131,9 @@ impl<S> Layer<S> for PluginCircuitBreakerLayer {
 /// - runtime handles (theme + plugin actors)
 /// - a list of theme bindings (mount path → theme id)
 #[tracing::instrument(skip_all)]
-pub fn build_app_router(
-    content_root: PathBuf,
-    handles: RuntimeHandles,
-    bindings: Vec<ThemeBinding>,
-) -> Router {
+pub fn build_app_router(handles: RuntimeHandles, bindings: Vec<ThemeBinding>) -> Router {
     let plugin_client = handles.plugin_client.clone();
     let theme_client = handles.theme_client.clone();
-
-    // Single shared filesystem resolver for all themes.
-    let resolver: Arc<dyn ContentResolver> =
-        Arc::new(IndexedContentResolver::new(content_root.clone()));
 
     let mut app = Router::new();
 
@@ -157,7 +145,6 @@ pub fn build_app_router(
         let state = ThemeAppState {
             theme_client: theme_client.clone(),
             theme_id: theme_id.clone(),
-            resolver: resolver.clone(),
         };
 
         let nested = Router::new()
@@ -204,7 +191,6 @@ async fn theme_route_handler(
     let ThemeAppState {
         theme_client,
         theme_id,
-        resolver,
     } = state;
 
     let path = req.uri().path().to_string();
@@ -213,24 +199,20 @@ async fn theme_route_handler(
     let raw_query = req.uri().query().unwrap_or_default().to_string();
     let query_params = parse_query_params(&raw_query);
 
-    // Ask the resolver for content info (kind + front matter + body path).
-    let resolved = match resolver.resolve(&path, &method) {
+    // Ask the global resolver for content info (kind + front matter + body stream handle).
+    let resolved = match resolve(&path, &method) {
         Ok(r) => r,
-        Err(_e) => ResolvedContent {
-            content_kind: ContentKind::Asset,
-            front_matter: json!({}),
-            body_path: PathBuf::new(),
-        },
+        Err(_e) => ResolvedContent::empty(),
     };
 
-    // Build RequestContext using the adapt-side helper.
+    // Build RequestContext using the injected / default helper in serve::resolver.
     let ctx = build_request_context(path.clone(), method, headers, query_params, resolved);
 
     debug!("theme_id: {}", theme_id);
 
     // Ask the theme actor to render a ResponseBodySpec.
     let result = theme_client.render(&theme_id, ctx).await;
-    debug!("!!!! HERE WE GO !!!! The ResponseBodySpec: {:?}", result);
+    debug!("The ResponseBodySpec: {:?}", result);
 
     let resp = match result {
         Ok(ResponseBodySpec::HtmlString(html)) => Response::builder()
@@ -278,9 +260,11 @@ async fn theme_route_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use domain::doc::BodyKind;
-    use std::{collections::HashMap, path::Path};
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
 
     /// Parse a query string into a `HashMap<String, String>`, URL-decoding keys/values.
     ///

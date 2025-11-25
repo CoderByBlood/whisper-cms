@@ -1,3 +1,4 @@
+use serve::resolver::ResolverError;
 use thiserror::Error;
 
 use serve::ctx::http::ContextError;
@@ -10,6 +11,9 @@ pub enum HttpError {
 
     #[error("render error: {0}")]
     Render(#[from] RenderError),
+
+    #[error("resolver error: {0}")]
+    Resolver(#[from] ResolverError),
 
     #[error("missing RequestContext in request extensions")]
     MissingContext,

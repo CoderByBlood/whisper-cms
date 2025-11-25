@@ -4,7 +4,7 @@ use crate::{
     fs::{
         ext::{self, DiscoveredPlugin, DiscoveredTheme},
         filter::{self, DEFAULT_CONTENT_EXTS},
-        index::set_fm_index_dir,
+        index::{set_content_root, set_fm_index_dir},
     },
     proxy::{EdgeError, EdgeRuntime},
     router::build_app_router,
@@ -166,9 +166,11 @@ impl StartProcess<SettingsLoaded> {
                 .replace_all(Utc::now().to_rfc3339().as_str(), "_")
                 .to_string(),
         );
-
         let root = dir.join(&content_settings.dir);
         let mut cfg = FolderScanConfig::default();
+
+        // NEW: tell the index layer what the content root is
+        set_content_root(root.clone());
 
         cfg.file_re = Some(filter::build_filename_regex(
             match content_settings.extensions.len() {
@@ -278,11 +280,7 @@ impl StartProcess<ExtensionsLoaded> {
 
         info!("Plugins and themes initialized successfully");
 
-        let router = build_app_router(
-            self.content_settings.as_ref().unwrap().dir.clone(),
-            handles,
-            theme_bnds,
-        );
+        let router = build_app_router(handles, theme_bnds);
         Ok(self.done(router))
     }
 
@@ -336,12 +334,14 @@ impl StartProcess<ServerStarted> {
 #[tracing::instrument(skip_all)]
 async fn do_start(start: StartCmd) -> Result<()> {
     // TODO: Refactor out into function that registers all injected dependencies
-    use crate::db::resolver::{edge_build_request_context, edge_resolve};
-    use serve::resolver::{set_build_request_context_fn, set_resolver_fn};
+    // Wire up the core resolver's storage backends (front matter + body).
+    {
+        use crate::db::resolver::{lookup_body_handle, lookup_fm_by_served, lookup_fm_by_slug};
+        use serve::resolver::set_resolver_deps;
 
-    set_resolver_fn(edge_resolve).map_err(|e| EdgeError::Other(e.to_string()))?;
-    set_build_request_context_fn(edge_build_request_context)
-        .map_err(|e| EdgeError::Other(e.to_string()))?;
+        // This is a simple global setter; it returns ().
+        set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
+    }
 
     // parse settings file -> does the settings file exist?  If yes, parse it
     let then = Utc::now();

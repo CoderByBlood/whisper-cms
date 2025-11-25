@@ -1,17 +1,17 @@
 // crates/serve/src/indexer.rs
 
-// This version is crate-agnostic: no `crate::db`, no `crate::fs`, no `adapt::`.
-//
-// It assumes:
-//   - `domain::doc::Document` already has its I/O strategy injected globally
-//     (via the LazyLock-based open_bytes/open_utf8 you added earlier).
-//   - The caller (in `edge`) provides:
-//       * a folder-scan starter (filesystem + debouncing, etc.)
-//       * a front-matter indexer (IndexedJson / whatever)
-//       * a content indexer (Tantivy / whatever)
-//
-// All those concrete implementations live in `edge` and are *injected* here
-// via function pointers / closures.
+//! High-level content ingestion pipeline.
+//!
+//! This crate is **completely storage-agnostic**. It does not know about the filesystem,
+//! Tantivy, indexed_json, or anything else.
+//!
+//! The edge layer injects three functions:
+//!   1. `start_scan` — begin folder scan → emits PathBufs
+//!   2. `index_front_matter` — persist indexed_json FM using served path
+//!   3. `index_body` — persist HTML (or passthrough) into CAS/Tantivy using served path
+//!
+//! After indexing, the runtime resolvers (in edge + serve/resolver.rs) will search these
+//! stores using additional functions injected separately.
 
 use domain::doc::{BodyKind, Document, FmKind};
 use futures::StreamExt;
@@ -23,24 +23,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
-/// Configuration for `start_folder_scan`.
+// ---------------------------------------------------------------------------
+// Folder Scan Configuration
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 pub struct FolderScanConfig {
-    /// Emit absolute paths (true) or paths relative to `root` (false).
     pub absolute: bool,
-    /// Recurse into subdirectories.
     pub recursive: bool,
-    /// Debounce window in milliseconds for coalescing duplicate paths.
     pub debounce_ms: u64,
-    /// Canonicalize paths before emission.
     pub canonicalize_paths: bool,
-    /// Capacity of the bounded output channel (kept here so the
-    /// `edge`-side scan starter can decide how to size its channel).
     pub channel_capacity: usize,
-    /// Optional regex to **allow** folders. If set, a directory is traversed
-    /// if it or **any ancestor under `root`** matches.
     pub folder_re: Option<Regex>,
-    /// Optional regex to **allow** files by name (basename).
     pub file_re: Option<Regex>,
 }
 
@@ -58,10 +52,9 @@ impl Default for FolderScanConfig {
     }
 }
 
-// ─────────────────────────────────────────────
-// Per-document processing context.
-// (Now completely decoupled from edge/adapt.)
-// ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Context Wrapper
+// ---------------------------------------------------------------------------
 
 pub struct DocContext {
     pub document: Document,
@@ -75,9 +68,9 @@ impl std::fmt::Debug for DocContext {
     }
 }
 
-// ─────────────────────────────────────────────
-// Error type (crate-agnostic)
-// ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Error Types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Error)]
 pub enum DocContextError {
@@ -106,64 +99,68 @@ pub enum DocContextError {
     Org(String),
 }
 
-// ─────────────────────────────────────────────
-// Dependency-injected function shapes
-// (implemented in `edge`, injected here)
-// ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Injection Function Types (provided by edge layer)
+// ---------------------------------------------------------------------------
 
-/// Stop callback returned by the folder-scan starter.
-///
-/// It only needs to be Send so we can move it across threads if necessary.
-/// It does *not* need to be Sync.
 pub type ScanStopFn = Box<dyn FnOnce() + Send + 'static>;
 
-/// Function type for starting a folder scan, implemented in `edge`.
-///
-/// - `root`: root directory to scan
-/// - `cfg`: configuration for how to scan (debounce, recursion, filters...)
-/// - returns: `(receiver, stop_callback)`
 pub type StartFolderScanFn<ScanErr> = fn(
     root: &Path,
     cfg: &FolderScanConfig,
 ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), ScanErr>;
 
-/// Function type for indexing front matter, implemented in `edge`.
-///
-/// `served_path` is the "normalized" path (e.g. `/posts/hello.html`).
 pub type IndexFrontMatterFn<FmErr> = fn(served_path: &Path, fm: &Json) -> Result<(), FmErr>;
 
-/// Function type for indexing rendered HTML content, implemented in `edge`.
-///
-/// `kind` is the detected `BodyKind` (Markdown, Html, etc.) in case the
-/// indexer wants to treat different kinds differently.
 pub type IndexBodyFn<BodyErr> =
     fn(served_path: &Path, html: &str, kind: BodyKind) -> Result<(), BodyErr>;
 
-// ─────────────────────────────────────────────
-// Comrak markdown options (GFM-ish defaults)
-// ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Markdown + Body conversion helpers
+// ---------------------------------------------------------------------------
 
 fn default_markdown_options() -> comrak::Options<'static> {
-    let mut options = comrak::Options::default();
-
-    // GitHub-ish extensions
-    options.extension.strikethrough = true;
-    options.extension.table = true;
-    options.extension.autolink = true;
-    options.extension.tasklist = true;
-    options.extension.footnotes = true;
-
-    options
+    let mut opt = comrak::Options::default();
+    opt.extension.strikethrough = true;
+    opt.extension.table = true;
+    opt.extension.autolink = true;
+    opt.extension.tasklist = true;
+    opt.extension.footnotes = true;
+    opt
 }
 
-// ─────────────────────────────────────────────
-// Helper: read & cache full UTF-8 contents
-// ─────────────────────────────────────────────
+fn infer_body_kind(ext: Option<&str>) -> BodyKind {
+    match ext.map(|s| s.to_ascii_lowercase()) {
+        Some(ref e) if e == "md" || e == "markdown" || e == "mkd" || e == "mkdn" => {
+            BodyKind::Markdown
+        }
+        Some(ref e) if e == "adoc" || e == "asciidoc" => BodyKind::AsciiDoc,
+        Some(ref e) if e == "html" || e == "htm" || e == "xhtml" => BodyKind::Html,
+        Some(ref e) if e == "rst" => BodyKind::ReStructuredText,
+        Some(ref e) if e == "org" => BodyKind::OrgMode,
+        _ => BodyKind::Plain,
+    }
+}
 
-/// Ensure `ctx.document.cache` is populated with the full UTF-8 contents.
-///
-/// - If `cache` is already Some, returns unchanged.
-/// - Otherwise, reads from `utf8_stream` and sets `cache` via `with_cache`.
+fn served_path_for_source(path: &Path) -> PathBuf {
+    let kind = infer_body_kind(path.extension().and_then(|s| s.to_str()));
+    match kind {
+        BodyKind::Markdown
+        | BodyKind::AsciiDoc
+        | BodyKind::ReStructuredText
+        | BodyKind::OrgMode => {
+            let mut p = path.to_owned();
+            p.set_extension("html");
+            p
+        }
+        BodyKind::Html | BodyKind::Plain => path.to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 — Front Matter Upsert
+// ---------------------------------------------------------------------------
+
 async fn read_document_utf8(mut ctx: DocContext) -> Result<DocContext, DocContextError> {
     if ctx.document.cache.is_some() {
         return Ok(ctx);
@@ -180,115 +177,6 @@ async fn read_document_utf8(mut ctx: DocContext) -> Result<DocContext, DocContex
     Ok(ctx)
 }
 
-// ─────────────────────────────────────────────
-// Helpers: AsciiDoc, RST, Org renderers
-// ─────────────────────────────────────────────
-
-fn render_asciidoc_with_asciidocr(src: &str, origin: &Path) -> Result<String, DocContextError> {
-    use asciidocr::backends::htmls::render_htmlbook;
-    use asciidocr::parser::Parser;
-    use asciidocr::scanner::Scanner;
-
-    let scanner = Scanner::new(src);
-    let mut parser = Parser::new(origin.to_path_buf());
-
-    let graph = parser
-        .parse(scanner)
-        .map_err(|e| DocContextError::AsciiDoc(e.to_string()))?;
-
-    let html = render_htmlbook(&graph).map_err(|e| DocContextError::AsciiDoc(e.to_string()))?;
-
-    Ok(html)
-}
-
-fn render_restructuredtext(src: &str) -> Result<String, DocContextError> {
-    use rst_parser::parse_only as parse_rst;
-    use rst_renderer::render_html as render_rst_html;
-
-    let doc = parse_rst(src).map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
-
-    let mut buf: Vec<u8> = Vec::new();
-
-    render_rst_html(&doc, &mut buf, true)
-        .map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
-
-    let html =
-        String::from_utf8(buf).map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
-
-    Ok(html)
-}
-
-fn render_org_to_html(src: &str) -> Result<String, DocContextError> {
-    use orgize::Org;
-
-    let org = Org::parse(src);
-    let mut buf: Vec<u8> = Vec::new();
-
-    org.write_html(&mut buf)
-        .map_err(|e| DocContextError::Org(e.to_string()))?;
-
-    let html = String::from_utf8(buf).map_err(|e| DocContextError::Org(e.to_string()))?;
-
-    Ok(html)
-}
-
-/// Infer BodyKind from a file extension.
-fn infer_body_kind_from_ext(path: &Path) -> BodyKind {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .map(|ext| match ext.to_ascii_lowercase().as_str() {
-            // Markdown (with mkd, mkdn)
-            "md" | "markdown" | "mkd" | "mkdn" => BodyKind::Markdown,
-            // AsciiDoc
-            "adoc" | "asciidoc" => BodyKind::AsciiDoc,
-            // HTML-like (with xhtml)
-            "html" | "htm" | "xhtml" => BodyKind::Html,
-            // ReStructuredText
-            "rst" => BodyKind::ReStructuredText,
-            // Org
-            "org" => BodyKind::OrgMode,
-            // Fallback
-            _ => BodyKind::Plain,
-        })
-        .unwrap_or(BodyKind::Plain)
-}
-
-/// Map a source filesystem path to the “served” path:
-///
-/// - If the body is a *translated* type (Markdown, AsciiDoc, RST, Org),
-///   we normalize to a `.html` extension.
-/// - For HTML and Plain text, we keep the original extension.
-///
-/// This path is intended to be used as:
-///   - the `id` for front-matter in your key-value index
-///   - the key for content index (Tantivy or otherwise)
-///   - the HTTP-visible “content path” in resolution.
-fn serving_path_for_source(path: &Path) -> PathBuf {
-    let kind = infer_body_kind_from_ext(path);
-    match kind {
-        BodyKind::Markdown
-        | BodyKind::AsciiDoc
-        | BodyKind::ReStructuredText
-        | BodyKind::OrgMode => {
-            let mut p = path.to_path_buf();
-            p.set_extension("html");
-            p
-        }
-        BodyKind::Html | BodyKind::Plain => path.to_path_buf(),
-    }
-}
-
-// ─────────────────────────────────────────────
-// Stage 1 — front matter → index callback
-// ─────────────────────────────────────────────
-
-/// Detect front matter (YAML → TOML → JSON), parse it, and invoke the
-/// injected front-matter indexer.
-///
-/// Also:
-/// - sets `FmKind`
-/// - sets `cached_body` to the content *after* front matter
-///   (or the full file if no front matter is found).
 pub async fn upsert_front_matter_db<FmErr, FmIndexFn>(
     ctx: DocContext,
     index_front_matter: FmIndexFn,
@@ -301,7 +189,6 @@ where
     use gray_matter::Matter;
 
     let mut ctx = read_document_utf8(ctx).await?;
-
     let full = ctx
         .document
         .cache
@@ -309,12 +196,12 @@ where
         .map(String::as_str)
         .unwrap_or("");
 
-    let mut fm_json: Option<Json> = None;
-    let mut fm_kind: Option<FmKind> = None;
-    let mut body: Option<String> = None;
+    let mut fm_json = None;
+    let mut fm_kind = None;
+    let mut body = None;
 
-    // 1. YAML
-    {
+    // YAML FM
+    if fm_json.is_none() {
         let matter: Matter<YAML> = Matter::new();
         if let Ok(parsed) = matter.parse::<Json>(full) {
             if let Some(data) = parsed.data {
@@ -325,28 +212,20 @@ where
         }
     }
 
-    // 2. TOML (only if YAML found nothing) — uses `toml::from_str` instead of
-    // gray_matter's TOML engine because that was too strict in your setup.
+    // TOML FM
     if fm_json.is_none() {
         let trimmed = full.trim_start_matches('\u{feff}');
-
         if trimmed.starts_with("+++") {
-            // remove leading delimiter
-            let after = &trimmed[3..];
-            let after = after
-                .strip_prefix('\n')
-                .or_else(|| after.strip_prefix("\r\n"))
-                .unwrap_or(after);
-
-            // find closing delimiter
+            let after = trimmed.trim_start_matches('+').trim_start_matches("\n");
             if let Some(end_idx) = after.find("\n+++") {
                 let fm_src = &after[..end_idx];
                 match toml::from_str::<toml::Value>(fm_src) {
                     Ok(toml_val) => {
-                        let json = serde_json::to_value(toml_val)
-                            .map_err(|e| DocContextError::FrontMatter(e.to_string()))?;
+                        fm_json = Some(
+                            serde_json::to_value(toml_val)
+                                .map_err(|e| DocContextError::FrontMatter(e.to_string()))?,
+                        );
                         fm_kind = Some(FmKind::Toml);
-                        fm_json = Some(json);
                         body = Some(after[end_idx + 4..].trim_start().to_owned());
                     }
                     Err(e) => return Err(DocContextError::FrontMatter(e.to_string())),
@@ -355,15 +234,14 @@ where
         }
     }
 
-    // 3. JSON front matter (only if YAML/TOML found nothing)
+    // JSON FM
     if fm_json.is_none() {
-        let trimmed = full.trim_start_matches('\u{feff}').trim_start();
+        let trimmed = full.trim();
         if trimmed.starts_with('{') {
             match serde_json::from_str::<Json>(trimmed) {
-                Ok(value) => {
-                    fm_json = Some(value);
+                Ok(v) => {
+                    fm_json = Some(v);
                     fm_kind = Some(FmKind::Json);
-                    // For "pure JSON front matter", treat body as empty for now.
                     body = Some(String::new());
                 }
                 Err(e) => return Err(DocContextError::FrontMatter(e.to_string())),
@@ -371,46 +249,67 @@ where
         }
     }
 
-    // If no FM was detected, we still want body = full file.
+    // If body not extracted, set full file as body
     if body.is_none() {
         body = Some(full.to_owned());
     }
 
-    // Persist FM if we have it — using the *served* path as the id.
-    if let Some(fm_json) = fm_json {
-        let served_path = serving_path_for_source(&ctx.document.path);
-
-        index_front_matter(&served_path, &fm_json)
+    if let Some(data) = fm_json {
+        let served = served_path_for_source(&ctx.document.path);
+        index_front_matter(&served, &data)
             .map_err(|e| DocContextError::FrontMatterIndex(e.to_string()))?;
     }
 
-    // Update FmKind if we detected one.
     if let Some(kind) = fm_kind {
         ctx.document = ctx.document.with_fm_kind(kind);
     }
 
-    // Cache body-only text.
-    if let Some(body_text) = body {
-        ctx.document = ctx.document.with_body(body_text);
+    if let Some(b) = body {
+        ctx.document = ctx.document.with_body(b);
     }
 
     Ok(ctx)
 }
 
-// ─────────────────────────────────────────────
-// Stage 2 — body → HTML → content index callback
-// ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Stage 2 — Body Rendering + Content Indexing
+// ---------------------------------------------------------------------------
 
-/// Detect body kind, render to HTML, and invoke the injected content-indexer.
-///
-/// Uses:
-/// - Markdown: `comrak` with a GFM-ish `Options`
-/// - AsciiDoc: `asciidocr`
-/// - ReStructuredText: `rst_parser` + `rst_renderer`
-/// - OrgMode: `orgize`
-/// - Html / Plain: passthrough
-///
-/// Uses `cached_body` if present, otherwise `cache`.
+fn render_asciidoc(src: &str, origin: &Path) -> Result<String, DocContextError> {
+    use asciidocr::backends::htmls::render_htmlbook;
+    use asciidocr::parser::Parser;
+    use asciidocr::scanner::Scanner;
+
+    let scanner = Scanner::new(src);
+    let mut parser = Parser::new(origin.to_path_buf());
+    let graph = parser
+        .parse(scanner)
+        .map_err(|e| DocContextError::AsciiDoc(e.to_string()))?;
+    Ok(render_htmlbook(&graph).map_err(|e| DocContextError::AsciiDoc(e.to_string()))?)
+}
+
+fn render_rst(src: &str) -> Result<String, DocContextError> {
+    use rst_parser::parse_only;
+    use rst_renderer::render_html;
+
+    let doc = parse_only(src).map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
+    let mut buf = Vec::new();
+    render_html(&doc, &mut buf, true)
+        .map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
+    let html =
+        String::from_utf8(buf).map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
+    Ok(html)
+}
+
+fn render_org(src: &str) -> Result<String, DocContextError> {
+    use orgize::Org;
+    let org = Org::parse(src);
+    let mut buf = Vec::new();
+    org.write_html(&mut buf)
+        .map_err(|e| DocContextError::Org(e.to_string()))?;
+    Ok(String::from_utf8(buf).map_err(|e| DocContextError::Org(e.to_string()))?)
+}
+
 pub async fn upsert_body_db<BodyErr, BodyIndexFn>(
     ctx: DocContext,
     index_body: BodyIndexFn,
@@ -421,13 +320,9 @@ where
 {
     let mut ctx = read_document_utf8(ctx).await?;
 
-    // Detect body kind from explicit setting or extension.
-    let body_kind = ctx
-        .document
-        .body_kind
-        .unwrap_or_else(|| infer_body_kind_from_ext(&ctx.document.path));
+    let ext = ctx.document.path.extension().and_then(|s| s.to_str());
+    let kind = infer_body_kind(ext);
 
-    // Prefer cached_body (body only), fall back to full cache.
     let body_text = ctx
         .document
         .cached_body
@@ -435,52 +330,29 @@ where
         .or_else(|| ctx.document.cache.as_deref())
         .unwrap_or("");
 
-    let html = match body_kind {
+    let html = match kind {
         BodyKind::Html | BodyKind::Plain => body_text.to_owned(),
-
-        BodyKind::Markdown => {
-            let options = default_markdown_options();
-            comrak::markdown_to_html(body_text, &options)
-        }
-
+        BodyKind::Markdown => comrak::markdown_to_html(body_text, &default_markdown_options()),
         BodyKind::AsciiDoc => {
             let origin = ctx.document.path.parent().unwrap_or_else(|| Path::new("."));
-            render_asciidoc_with_asciidocr(body_text, origin)?
+            render_asciidoc(body_text, origin)?
         }
-
-        BodyKind::ReStructuredText => render_restructuredtext(body_text)?,
-
-        BodyKind::OrgMode => render_org_to_html(body_text)?,
+        BodyKind::ReStructuredText => render_rst(body_text)?,
+        BodyKind::OrgMode => render_org(body_text)?,
     };
 
-    // Index the rendered HTML using the *served* path as key.
-    let served_path = serving_path_for_source(&ctx.document.path);
+    let served = served_path_for_source(&ctx.document.path);
 
-    index_body(&served_path, &html, body_kind)
-        .map_err(|e| DocContextError::ContentIndex(e.to_string()))?;
+    index_body(&served, &html, kind).map_err(|e| DocContextError::ContentIndex(e.to_string()))?;
 
-    // Attach body kind via builder.
-    ctx.document = ctx.document.with_body_kind(body_kind);
-
+    ctx.document = ctx.document.with_body_kind(kind);
     Ok(ctx)
 }
 
-// ─────────────────────────────────────────────
-// High-level pipeline: scan + process
-// ─────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// High-Level Pipeline
+// ---------------------------------------------------------------------------
 
-/// High-level pipeline:
-/// - starts a folder scan via injected `start_scan`
-/// - receives debounced `PathBuf`s from a bounded channel
-/// - turns each into a `Document`
-/// - runs `upsert_front_matter_db` and `upsert_body_db`
-/// - collects all `Document`s and per-file `DocContextError`s
-///
-/// A single error does *not* stop the pipeline; it is recorded and
-/// processing continues with the next path.
-///
-/// The only "hard" error is failing to *start* the scan, which is
-/// reported as `Err(scan_err)`.
 pub async fn scan_and_process_docs<ScanErr, FmErr, BodyErr>(
     root: &Path,
     scan_cfg: FolderScanConfig,
@@ -502,25 +374,19 @@ where
         let document = Document::new(path.clone());
         let ctx = DocContext { document };
 
-        let result = async {
+        let processed = async {
             let ctx = upsert_front_matter_db::<FmErr, _>(ctx, index_front_matter).await?;
             let ctx = upsert_body_db::<BodyErr, _>(ctx, index_body).await?;
             Ok::<_, DocContextError>(ctx)
         }
         .await;
 
-        match result {
-            Ok(ctx_done) => {
-                docs.push(ctx_done.document);
-            }
-            Err(e) => {
-                errors.push((path, e));
-            }
+        match processed {
+            Ok(done) => docs.push(done.document),
+            Err(err) => errors.push((path, err)),
         }
     }
 
-    // Ensure scan tasks are stopped (idempotent if they already finished).
     stop();
-
     Ok((docs, errors))
 }

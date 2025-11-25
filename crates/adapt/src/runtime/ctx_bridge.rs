@@ -150,6 +150,7 @@ fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValu
     // For now we still expose an empty "model" placeholder here. When you
     // decide how to project `content_meta` into JS, wire it in.
     content_obj.insert("model".to_string(), Json::Object(JsonMap::new()));
+    content_obj.insert("meta".to_string(), ctx.content_meta.clone());
 
     let recs = &ctx.recommendations;
     let mut recs_obj = JsonMap::new();

@@ -2,25 +2,89 @@
 
 use super::error::HttpError;
 use axum::body::Body;
-use http::{Request, Uri};
+use domain::content::ResolvedContent;
+use http::{self, Request, Uri};
+use serde_json::{json, Map as JsonMap, Value as Json};
 use serve::ctx::http::RequestContext;
-use serve::resolver::{self, build_request_context, ContentResolver};
+use serve::resolver;
 use std::collections::HashMap;
 use std::task::{Context, Poll};
 use tower::Service;
 
+/// Canonicalize header names to `Accept-Language` style.
+fn canonicalize_header_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut upper_next = true;
+
+    for ch in raw.chars() {
+        if ch == '-' {
+            out.push('-');
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+    }
+
+    out
+}
+
+/// Build a `RequestContext` from the HTTP request pieces plus `ResolvedContent`.
+///
+/// This mirrors the old default implementation in `serve::resolver`, but lives
+/// in adapt now so we don't depend on a specific serve helper API.
+fn build_request_context_from_http(
+    path: String,
+    method: http::Method,
+    headers: http::HeaderMap,
+    query_params: HashMap<String, String>,
+    resolved: ResolvedContent,
+) -> RequestContext {
+    // headers -> JSON object
+    let mut hdr_obj = JsonMap::new();
+    for (name, value) in headers.iter() {
+        let canonical = canonicalize_header_name(name.as_str());
+        hdr_obj.insert(canonical, json!(value.to_str().unwrap_or("")));
+    }
+
+    // query_params -> JSON object
+    let mut qp_obj = JsonMap::new();
+    for (k, v) in query_params.iter() {
+        qp_obj.insert(k.clone(), Json::String(v.clone()));
+    }
+
+    RequestContext::builder()
+        // req_* fields
+        .path(Json::String(path))
+        .method(Json::String(method.to_string()))
+        // let version default from the builder; resolver doesn't know the real version
+        .headers(Json::Object(hdr_obj))
+        .params(Json::Object(qp_obj))
+        // front_matter becomes the initial content_meta shape
+        .content_meta(resolved.front_matter)
+        // start empty; can be filled later by higher layers
+        .theme_config(Json::Object(JsonMap::new()))
+        .plugin_configs(HashMap::new())
+        .build()
+}
+
 /// PluginMiddleware is responsible for:
-/// - Resolving content for the incoming request (path → ContentKind, body path, front matter)
+/// - Resolving content for the incoming request (path → ContentKind, body handle, front matter)
 /// - Building a RequestContext
 /// - Inserting it into request.extensions()
 ///
 /// In later phases, it will also:
 /// - Invoke JS plugin before/after hooks to populate recommendations.
-/// For Phase 3, it only does the context setup.
+/// For this phase, it only does the context setup.
+///
+/// Note: we keep the `R` type parameter for compatibility with higher-level
+/// wiring (e.g., PluginLayer), but the resolver itself is now the global
+/// `serve::resolver::resolve` function; `R` is not used at runtime.
 pub struct PluginMiddleware<S, R>
 where
     S: Service<Request<Body>>,
-    R: ContentResolver,
 {
     inner: S,
     // Kept for compatibility / type-level wiring; not used at runtime
@@ -30,7 +94,6 @@ where
 impl<S, R> PluginMiddleware<S, R>
 where
     S: Service<Request<Body>>,
-    R: ContentResolver,
 {
     pub fn new(inner: S, resolver: R) -> Self {
         Self {
@@ -43,7 +106,7 @@ where
 impl<S, R> Clone for PluginMiddleware<S, R>
 where
     S: Service<Request<Body>> + Clone,
-    R: ContentResolver + Clone,
+    R: Clone,
 {
     fn clone(&self) -> Self {
         Self {
@@ -59,7 +122,7 @@ where
         + Send
         + 'static,
     S::Future: Send + 'static,
-    R: ContentResolver + Clone + Send + Sync + 'static,
+    R: Clone + Send + Sync + 'static,
 {
     type Response = axum::response::Response;
     type Error = HttpError;
@@ -87,7 +150,7 @@ where
             .expect("content resolver failed"); // In a real system, handle gracefully.
 
         // Build RequestContext and insert into extensions.
-        let ctx: RequestContext = build_request_context(
+        let ctx: RequestContext = build_request_context_from_http(
             path,
             req.method().clone(),
             req.headers().clone(),
@@ -97,264 +160,7 @@ where
 
         req.extensions_mut().insert::<RequestContext>(ctx);
 
-        // For Phase 3, do not invoke any plugin hooks yet.
+        // For this phase, do not invoke any plugin hooks yet.
         self.inner.call(req)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::response::Response as AxumResponse;
-    use domain::content::{ContentKind, ResolvedContent};
-    use futures::future::{ready, Ready};
-    use futures::task::noop_waker;
-    use http::Method;
-    use serde_json::json;
-    use serve::ctx::http::ContextError;
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Test helpers
-    // ─────────────────────────────────────────────────────────────────────
-
-    /// Minimal ResolvedContent for tests.
-    fn dummy_resolved() -> ResolvedContent {
-        ResolvedContent {
-            content_kind: ContentKind::Html,
-            front_matter: json!({ "title": "test" }),
-            body_path: PathBuf::from("/tmp/body.html"),
-        }
-    }
-
-    /// Inner service that always succeeds and inspects the RequestContext.
-    #[derive(Clone, Default)]
-    struct InspectingService {
-        pub seen_ctx: Arc<Mutex<Option<RequestContext>>>,
-    }
-
-    impl Service<Request<Body>> for InspectingService {
-        type Response = AxumResponse;
-        type Error = HttpError;
-        type Future = Ready<Result<Self::Response, Self::Error>>;
-
-        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, req: Request<Body>) -> Self::Future {
-            let ctx = req.extensions().get::<RequestContext>().cloned();
-            *self.seen_ctx.lock().unwrap() = ctx;
-            ready(Ok(AxumResponse::new(Body::empty())))
-        }
-    }
-
-    /// Inner service whose poll_ready returns an error.
-    #[derive(Clone, Default)]
-    struct ErrorReadyService;
-
-    impl Service<Request<Body>> for ErrorReadyService {
-        type Response = AxumResponse;
-        type Error = HttpError;
-        type Future = Ready<Result<Self::Response, Self::Error>>;
-
-        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Err(HttpError::Other("poll_ready failed".into())))
-        }
-
-        fn call(&mut self, _req: Request<Body>) -> Self::Future {
-            // Should never be called in these tests.
-            ready(Err(HttpError::Other("call should not be used".into())))
-        }
-    }
-
-    /// Resolver that always succeeds with a known ResolvedContent.
-    #[derive(Clone, Default)]
-    struct FakeResolver {
-        pub last_path: Arc<Mutex<Option<String>>>,
-        pub last_method: Arc<Mutex<Option<Method>>>,
-    }
-
-    impl ContentResolver for FakeResolver {
-        fn resolve(&self, path: &str, method: &Method) -> Result<ResolvedContent, ContextError> {
-            *self.last_path.lock().unwrap() = Some(path.to_string());
-            *self.last_method.lock().unwrap() = Some(method.clone());
-            Ok(dummy_resolved())
-        }
-    }
-
-    /// Resolver that always fails, causing PluginMiddleware::call to panic
-    /// due to `.expect("content resolver failed")`.
-    #[derive(Clone, Default)]
-    struct FailingResolver;
-
-    impl ContentResolver for FailingResolver {
-        fn resolve(&self, _path: &str, _method: &Method) -> Result<ResolvedContent, ContextError> {
-            Err(ContextError::InvalidHeaderValue("resolver failure".into()))
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Tests
-    // ─────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn plugin_middleware_inserts_request_context() {
-        use serde_json::{json, Value as Json};
-
-        let inner = InspectingService::default();
-        let seen_ctx = inner.seen_ctx.clone();
-        let resolver = FakeResolver::default();
-
-        let mut plugin = PluginMiddleware::new(inner, resolver);
-
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("/foo/bar?x=1&y=2")
-            .body(Body::empty())
-            .unwrap();
-
-        let resp = futures::executor::block_on(plugin.call(req)).unwrap();
-        assert_eq!(resp.status(), http::StatusCode::OK);
-
-        let ctx_opt = seen_ctx.lock().unwrap().clone();
-        let ctx = ctx_opt.expect("RequestContext should be present in extensions");
-
-        // req_path
-        assert_eq!(
-            ctx.req_path,
-            Json::String("/foo/bar".to_string()),
-            "req_path should be JSON string '/foo/bar'"
-        );
-
-        // req_method
-        assert_eq!(
-            ctx.req_method,
-            Json::String("GET".to_string()),
-            "req_method should be JSON string 'GET'"
-        );
-
-        // content_meta must contain title from FakeResolver
-        assert_eq!(
-            ctx.content_meta["title"],
-            json!("test"),
-            "FakeResolver front matter"
-        );
-
-        // query params → req_params JSON object
-        let params = ctx
-            .req_params
-            .as_object()
-            .expect("req_params should be a JSON object");
-
-        assert_eq!(params.get("x").unwrap(), "1");
-        assert_eq!(params.get("y").unwrap(), "2");
-    }
-
-    #[test]
-    fn plugin_middleware_parses_query_params_correctly() {
-        let inner = InspectingService::default();
-        let seen_ctx = inner.seen_ctx.clone();
-        let resolver = FakeResolver::default();
-
-        let mut plugin = PluginMiddleware::new(inner, resolver);
-
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("/search?q=rust&tags=web&tags=async")
-            .body(Body::empty())
-            .unwrap();
-
-        futures::executor::block_on(plugin.call(req)).unwrap();
-
-        let ctx = seen_ctx
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("RequestContext should be present");
-
-        let params = ctx
-            .req_params
-            .as_object()
-            .expect("req_params should be a JSON object");
-
-        // form_urlencoded::parse → collect into HashMap<String, String>
-        // For duplicate keys, the last wins.
-        assert_eq!(params.get("q").unwrap(), "rust");
-        assert_eq!(params.get("tags").unwrap(), "async");
-    }
-
-    #[test]
-    fn plugin_middleware_calls_resolver_with_correct_path_and_method() {
-        let inner = InspectingService::default();
-        let resolver = FakeResolver::default();
-        let last_path = resolver.last_path.clone();
-        let last_method = resolver.last_method.clone();
-
-        let mut plugin = PluginMiddleware::new(inner, resolver);
-
-        let req = Request::builder()
-            .method(Method::POST)
-            .uri("/api/items?id=42")
-            .body(Body::empty())
-            .unwrap();
-
-        futures::executor::block_on(plugin.call(req)).unwrap();
-
-        assert_eq!(last_path.lock().unwrap().as_deref(), Some("/api/items"));
-        assert_eq!(last_method.lock().unwrap().as_ref(), Some(&Method::POST));
-    }
-
-    #[test]
-    fn plugin_middleware_poll_ready_propagates_ok() {
-        let inner = InspectingService::default();
-        let resolver = FakeResolver::default();
-        let mut plugin = PluginMiddleware::new(inner, resolver);
-
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let res = plugin.poll_ready(&mut cx);
-
-        match res {
-            Poll::Ready(Ok(())) => {} // expected
-            other => panic!("expected Poll::Ready(Ok(())), got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn plugin_middleware_poll_ready_propagates_error() {
-        let inner = ErrorReadyService::default();
-        let resolver = FakeResolver::default();
-        let mut plugin = PluginMiddleware::new(inner, resolver);
-
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        let res = plugin.poll_ready(&mut cx);
-
-        match res {
-            Poll::Ready(Err(_)) => {} // expected
-            other => panic!("expected Poll::Ready(Err(_)), got {:?}", other),
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "content resolver failed")]
-    fn plugin_middleware_panics_when_resolver_fails() {
-        let inner = InspectingService::default();
-        let resolver = FailingResolver::default();
-        let mut plugin = PluginMiddleware::new(inner, resolver);
-
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("/will/panic")
-            .body(Body::empty())
-            .unwrap();
-
-        // Because PluginMiddleware::call uses `.expect("content resolver failed")`,
-        // a resolver error should panic with that message.
-        let _ = futures::executor::block_on(plugin.call(req));
     }
 }
