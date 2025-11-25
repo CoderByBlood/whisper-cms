@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tower::Layer;
 use tracing::{debug, error};
 
-use crate::db::resolver::FsContentResolver;
+use crate::db::resolver::IndexedContentResolver;
 use crate::fs::ext::ThemeBinding;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,7 +144,8 @@ pub fn build_app_router(
     let theme_client = handles.theme_client.clone();
 
     // Single shared filesystem resolver for all themes.
-    let resolver: Arc<dyn ContentResolver> = Arc::new(FsContentResolver::new(content_root.clone()));
+    let resolver: Arc<dyn ContentResolver> =
+        Arc::new(IndexedContentResolver::new(content_root.clone()));
 
     let mut app = Router::new();
 

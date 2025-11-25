@@ -1,3 +1,5 @@
+// crates/domain/src/content.rs
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::path::PathBuf;

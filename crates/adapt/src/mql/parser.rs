@@ -1,3 +1,5 @@
+// crates/adapt/src/mql/parser.rs
+
 use super::ast::{CmpOp, FieldExpr, Filter, FindOptions};
 use super::error::QueryError;
 use serde_json::Value as Json;

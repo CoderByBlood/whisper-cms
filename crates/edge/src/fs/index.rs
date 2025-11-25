@@ -1,5 +1,5 @@
 // crates/edge/src/fs/doc.rs
-//
+
 // Fully aligned with serve::indexer signatures.
 // No async in injected functions. No nested runtimes.
 // Uses a dedicated worker thread + channel for async operations.
@@ -38,6 +38,12 @@ static CONTENT_INDEX_DIR: LazyLock<RwLock<Option<PathBuf>>> = LazyLock::new(|| R
 
 static CONTENT_INDEX: LazyLock<RwLock<Option<Arc<ContentIndex>>>> =
     LazyLock::new(|| RwLock::new(None));
+
+/// Expose the FM index directory so other edge modules (e.g. resolver)
+/// can open the IndexedJson archive.
+pub fn fm_index_dir() -> Option<PathBuf> {
+    FM_INDEX_DIR.read().ok().and_then(|guard| guard.clone())
+}
 
 // ======================================================================
 // WORKER THREAD FOR INDEXING (avoid nested Tokio runtimes)

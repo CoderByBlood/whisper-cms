@@ -1,3 +1,5 @@
+// crates/adapt/src/mql/query.rs
+
 use super::ast::{CmpOp, FieldExpr, Filter, FindOptions};
 use super::error::QueryError;
 use super::eval::{eval_filter, get_field_value};
