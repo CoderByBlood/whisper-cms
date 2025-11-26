@@ -155,6 +155,9 @@ enum IndexJob {
 /// The worker owns a single current-thread Tokio runtime and processes
 /// jobs sequentially. This avoids nested runtimes and keeps the
 /// indexer APIs synchronous at the edge layer.
+///
+/// NEW: The IndexedJson DB is opened once at worker startup and
+/// reused for all jobs.
 fn ensure_index_worker() {
     let mut guard = INDEX_WORKER_SENDER
         .write()
@@ -173,6 +176,23 @@ fn ensure_index_worker() {
             .build()
             .expect("failed to build IndexedJson worker runtime");
 
+        // Open the front-matter DB once and reuse it.
+        let index_dir = FM_INDEX_DIR
+            .read()
+            .expect("FM_INDEX_DIR RwLock poisoned")
+            .clone()
+            .expect("FM index dir not set");
+
+        fs::create_dir_all(&index_dir).expect("failed to create front-matter index directory");
+
+        let mut db = rt
+            .block_on(async {
+                IndexedJson::<IndexRecord>::open(&index_dir)
+                    .await
+                    .map_err(FrontMatterIndexError::IndexedJson)
+            })
+            .expect("failed to open IndexedJson front-matter DB");
+
         while let Ok(job) = rx.recv() {
             match job {
                 IndexJob::FrontMatter {
@@ -180,15 +200,15 @@ fn ensure_index_worker() {
                     fm,
                     resp,
                 } => {
-                    let result = handle_fm_index(&rt, served_path, fm);
+                    let result = rt.block_on(handle_fm_index(&mut db, served_path, fm));
                     let _ = resp.send(result);
                 }
                 IndexJob::GetFrontMatterByPath { served_path, resp } => {
-                    let result = handle_get_front_matter_by_path(&rt, served_path);
+                    let result = rt.block_on(handle_get_front_matter_by_path(&mut db, served_path));
                     let _ = resp.send(result);
                 }
                 IndexJob::GetFrontMatterBySlug { slug, resp } => {
-                    let result = handle_get_front_matter_by_slug(&rt, slug);
+                    let result = rt.block_on(handle_get_front_matter_by_slug(&mut db, slug));
                     let _ = resp.send(result);
                 }
             }
@@ -225,28 +245,19 @@ fn canonical_id_from_source(path: &Path) -> String {
 }
 
 // ======================================================================
-// IndexedJson handlers
+// IndexedJson handlers (reuse a single DB instance)
 // ======================================================================
 
-fn handle_fm_index(
-    rt: &tokio::runtime::Runtime,
+async fn handle_fm_index(
+    db: &mut IndexedJson<IndexRecord>,
     served_path: PathBuf,
     fm: Json,
 ) -> Result<(), FrontMatterIndexError> {
-    let index_dir = FM_INDEX_DIR
-        .read()
-        .expect("FM_INDEX_DIR RwLock poisoned")
-        .clone()
-        .expect("FM index dir not set");
-
-    fs::create_dir_all(&index_dir)?;
-
     // IMPORTANT: use canonical *served* ID, not absolute FS path.
     let id = canonical_id_from_source(&served_path);
     let mut record = IndexRecord::from_json_with_id(id, &fm);
 
-    // If your IndexRecord has a slug field and the FM has `slug`,
-    // you can optionally hydrate it here (keeps lookup_by_slug fast).
+    // Optionally hydrate slug from FM if not already set.
     if record.slug.is_none() {
         if let Some(slug_val) = fm
             .get("slug")
@@ -257,99 +268,69 @@ fn handle_fm_index(
         }
     }
 
-    rt.block_on(async {
-        let mut db = IndexedJson::<IndexRecord>::open(&index_dir)
-            .await
-            .map_err(FrontMatterIndexError::IndexedJson)?;
+    db.append(&record)
+        .await
+        .map_err(FrontMatterIndexError::IndexedJson)?;
 
-        db.append(&record)
-            .await
-            .map_err(FrontMatterIndexError::IndexedJson)?;
-
-        db.flush().await.map_err(FrontMatterIndexError::IndexedJson)
-    })
+    db.flush().await.map_err(FrontMatterIndexError::IndexedJson)
 }
 
 /// Linear scan by `record.id == served_path` (served-path form).
 ///
 /// We serialize the IndexRecord back to JSON to use as front_matter.
 /// This is the *projection* shape, not necessarily the original FM.
-fn handle_get_front_matter_by_path(
-    rt: &tokio::runtime::Runtime,
+async fn handle_get_front_matter_by_path(
+    db: &mut IndexedJson<IndexRecord>,
     served_path: PathBuf,
 ) -> Result<Option<Json>, FrontMatterIndexError> {
-    let index_dir = FM_INDEX_DIR
-        .read()
-        .expect("FM_INDEX_DIR RwLock poisoned")
-        .clone()
-        .expect("FM index dir not set");
+    let mut current = match db.first() {
+        None => return Ok(None),
+        Some(entry) => entry,
+    };
 
-    rt.block_on(async {
-        let mut db = IndexedJson::<IndexRecord>::open(&index_dir)
-            .await
-            .map_err(FrontMatterIndexError::IndexedJson)?;
+    loop {
+        match db.get(current).await {
+            Ok(Some((next, rec))) => {
+                // NOTE: If IndexRecord.id is a String, you may need to
+                // compare to served_path.to_string_lossy().
+                if rec.id == served_path {
+                    let json = serde_json::to_value(rec)
+                        .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
+                    return Ok(Some(json));
+                }
+                current = next;
+            }
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
+        }
+    }
+}
 
-        let mut current = match db.first() {
-            None => return Ok(None),
-            Some(entry) => entry,
-        };
+async fn handle_get_front_matter_by_slug(
+    db: &mut IndexedJson<IndexRecord>,
+    slug: String,
+) -> Result<Option<Json>, FrontMatterIndexError> {
+    let mut current = match db.first() {
+        None => return Ok(None),
+        Some(entry) => entry,
+    };
 
-        loop {
-            match db.get(current).await {
-                Ok(Some((next, rec))) => {
-                    if rec.id == served_path {
+    loop {
+        match db.get(current).await {
+            Ok(Some((next, rec))) => {
+                if let Some(s) = &rec.slug {
+                    if s == &slug {
                         let json = serde_json::to_value(rec)
                             .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
                         return Ok(Some(json));
                     }
-                    current = next;
                 }
-                Ok(None) => return Ok(None),
-                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
+                current = next;
             }
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
         }
-    })
-}
-
-fn handle_get_front_matter_by_slug(
-    rt: &tokio::runtime::Runtime,
-    slug: String,
-) -> Result<Option<Json>, FrontMatterIndexError> {
-    let index_dir = FM_INDEX_DIR
-        .read()
-        .expect("FM_INDEX_DIR RwLock poisoned")
-        .clone()
-        .expect("FM index dir not set");
-
-    rt.block_on(async {
-        let mut db = IndexedJson::<IndexRecord>::open(&index_dir)
-            .await
-            .map_err(FrontMatterIndexError::IndexedJson)?;
-
-        let mut current = match db.first() {
-            None => return Ok(None),
-            Some(entry) => entry,
-        };
-
-        loop {
-            match db.get(current).await {
-                Ok(Some((next, rec))) => {
-                    // rec.slug must exist and equal the requested slug
-                    match &rec.slug {
-                        Some(s) if s == &slug => {
-                            let json = serde_json::to_value(rec)
-                                .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
-                            return Ok(Some(json));
-                        }
-                        _ => {}
-                    }
-                    current = next;
-                }
-                Ok(None) => return Ok(None),
-                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
-            }
-        }
-    })
+    }
 }
 
 // ======================================================================
