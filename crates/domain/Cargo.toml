@@ -4,11 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-leptos_reactive = { workspace = true }
-thiserror = { workspace = true }
-regex = { workspace = true }
 serde = { workspace = true }
-tokio = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 serde_json = { workspace = true }

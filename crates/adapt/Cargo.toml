@@ -6,13 +6,11 @@ edition = "2021"
 [dependencies]
 tokio = { workspace = true }
 thiserror = { workspace = true }
-sea-query = { workspace = true }
 async-trait = { workspace = true }
 gray_matter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-serde_yml = { workspace = true }
 regex = { workspace = true }
 tower = { workspace = true }
 clap = { workspace = true }
@@ -25,7 +23,6 @@ boa_engine = { workspace = true }
 axum = { workspace = true }
 http = { workspace = true }
 form_urlencoded = { workspace = true }
-html-escape = { workspace = true }
 indexed_json = { workspace = true }
 chrono = { workspace = true }
 smallvec = { workspace = true }
@@ -37,5 +34,3 @@ domain = { path = "../domain" }
 serve = { path = "../serve" }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-mockall = { workspace = true }

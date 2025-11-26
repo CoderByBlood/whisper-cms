@@ -6,17 +6,13 @@ edition = "2021"
 [dependencies]
 notify = { workspace = true }
 tokio = { workspace = true }
-leptos_reactive = { workspace = true }
 rayon = { workspace = true }
 walkdir = { workspace = true }
 same-file = { workspace = true }
 thiserror = { workspace = true }
-ractor = { workspace = true }
-sqlx = { workspace = true }
 async-trait = { workspace = true }
 regex = { workspace = true }
 clap = { workspace = true }
-config = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 indexed_json = { workspace = true }
