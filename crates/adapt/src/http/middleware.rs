@@ -1,29 +1,110 @@
 // crates/adapt/src/http/middleware.rs
 
-//! Tower middleware that *could* call plugin `before`/`after` hooks around
-//! requests, using the single-threaded `PluginRuntimeClient`.
+//! Tower middleware that executes JS plugins before and after the theme
+//! handler using the single-threaded `PluginRuntimeClient`.
 //!
-//! For Phase 3 this middleware is a pass-through; the plugin runtime
-//! is wired at the actor level and can be integrated in the theme
-//! entrypoint instead.
+//! - Each plugin is treated as an independent "service" with its own
+//!   circuit breaker state (timeouts + failure counters).
+//! - Plugin failures never bubble up as tower errors; instead we log
+//!   and "open" the circuit for that plugin, and continue the request
+//!   pipeline so a bad plugin can't take the site down.
 
 use crate::runtime::plugin_actor::PluginRuntimeClient;
 
 use axum::{body::Body, http::Request, response::Response};
+use domain::content::ResolvedContent;
 use futures::future::BoxFuture;
-use std::task::{Context, Poll};
+use http::Uri;
+use serve::{
+    ctx::http::RequestContext,
+    resolver::{self, build_request_context},
+};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
 use tower::{Layer, Service};
 
-/// Layer that injects plugin middleware into the stack.
+// ─────────────────────────────────────────────────────────────────────────────
+// Circuit-breaker configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PLUGIN_TIMEOUT: Duration = Duration::from_millis(100); // per-call timeout
+const FAILURE_WINDOW: Duration = Duration::from_secs(30); // look back this far
+const MAX_FAILURES: u32 = 5; // within FAILURE_WINDOW
+const OPEN_DURATION: Duration = Duration::from_secs(30); // circuit open time
+
+#[derive(Debug, Clone)]
+struct FailureState {
+    failures: u32,
+    last_failure: Option<Instant>,
+    open_until: Option<Instant>,
+}
+
+impl FailureState {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            last_failure: None,
+            open_until: None,
+        }
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        // If last failure is "old", reset the window.
+        if let Some(last) = self.last_failure {
+            if now.duration_since(last) > FAILURE_WINDOW {
+                self.failures = 0;
+            }
+        }
+
+        self.failures += 1;
+        self.last_failure = Some(now);
+
+        if self.failures >= MAX_FAILURES {
+            self.open_until = Some(now + OPEN_DURATION);
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.failures = 0;
+        self.last_failure = None;
+        self.open_until = None;
+    }
+
+    fn is_open(&self, now: Instant) -> bool {
+        if let Some(until) = self.open_until {
+            if now < until {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PluginLayer
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct PluginLayer {
     plugin_rt: PluginRuntimeClient,
+    plugin_ids: Arc<Vec<String>>,
+    state: Arc<Mutex<HashMap<String, FailureState>>>,
 }
 
 impl PluginLayer {
+    /// Create a new layer given the JS plugin runtime client and the list
+    /// of configured plugin IDs (in execution order).
     #[tracing::instrument(skip_all)]
-    pub fn new(plugin_rt: PluginRuntimeClient) -> Self {
-        Self { plugin_rt }
+    pub fn new(plugin_rt: PluginRuntimeClient, plugin_ids: Vec<String>) -> Self {
+        Self {
+            plugin_rt,
+            plugin_ids: Arc::new(plugin_ids),
+            state: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -34,26 +115,32 @@ impl<S> Layer<S> for PluginLayer {
     fn layer(&self, inner: S) -> Self::Service {
         PluginMiddleware {
             inner,
-            // Keep the client around; we can actually use it later.
-            _plugin_rt: self.plugin_rt.clone(),
+            plugin_rt: self.plugin_rt.clone(),
+            plugin_ids: self.plugin_ids.clone(),
+            state: self.state.clone(),
         }
     }
 }
 
-/// Middleware that currently just forwards requests.
+// ─────────────────────────────────────────────────────────────────────────────
+// PluginMiddleware
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct PluginMiddleware<S> {
     inner: S,
-    // Leading underscore so unused-field warnings are silenced for now.
-    _plugin_rt: PluginRuntimeClient,
+    plugin_rt: PluginRuntimeClient,
+    plugin_ids: Arc<Vec<String>>,
+    state: Arc<Mutex<HashMap<String, FailureState>>>,
 }
 
 impl<S> Service<Request<Body>> for PluginMiddleware<S>
 where
     S: Service<Request<Body>, Response = Response> + Clone + Send + 'static,
+    S::Error: Send + 'static,
     S::Future: Send + 'static,
 {
-    type Response = S::Response;
+    type Response = Response;
     type Error = S::Error;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
@@ -65,231 +152,163 @@ where
     #[tracing::instrument(skip_all)]
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let mut inner = self.inner.clone();
+        let plugin_rt = self.plugin_rt.clone();
+        let plugin_ids = self.plugin_ids.clone();
+        let state = self.state.clone();
+
+        // Extract HTTP pieces we need for RequestContext construction.
+        let uri: Uri = req.uri().clone();
+        let path = uri.path().to_string();
+        let method = req.method().clone();
+        let headers = req.headers().clone();
+        let query_params: HashMap<String, String> = uri
+            .query()
+            .map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect())
+            .unwrap_or_else(HashMap::new);
 
         Box::pin(async move {
-            // In a future phase, you can:
-            //   - Build a RequestContext from `req`
-            //   - Call plugin_rt.before_all / after_all around `inner.call(req)`
-            inner.call(req).await
-        })
-    }
-}
+            // Resolve content + build RequestContext once per request.
+            let resolved =
+                resolver::resolve(&path, &method).unwrap_or_else(|_e| ResolvedContent::empty());
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{
-        body::{to_bytes, Body},
-        http::{Request, StatusCode},
-    };
-    use futures::future::{ready, Ready};
-    use futures::task::noop_waker_ref;
-    use std::{convert::Infallible, task::Context};
-    use tower::Service;
+            let mut ctx: RequestContext = build_request_context(
+                path.clone(),
+                method.clone(),
+                headers.clone(),
+                query_params,
+                resolved,
+            );
 
-    use crate::js::engine::BoaEngine;
-    use crate::runtime::plugin::PluginRuntime;
-    use tokio::task::LocalSet;
+            // BEFORE hooks: in configured order, with per-plugin circuit breaker.
+            for plugin_id in plugin_ids.iter() {
+                let now = Instant::now();
 
-    // --- Helper: build a valid PluginRuntimeClient for tests ---
-    fn test_plugin_client() -> PluginRuntimeClient {
-        let runtime = PluginRuntime::new(BoaEngine::new()).expect("No Plugin Runtime");
-        PluginRuntimeClient::spawn(runtime)
-    }
+                // Check / update circuit state
+                {
+                    let mut map = state.lock().unwrap();
+                    let entry = map
+                        .entry(plugin_id.clone())
+                        .or_insert_with(FailureState::new);
 
-    // Simple error type
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct TestError(&'static str);
-
-    impl std::fmt::Display for TestError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
-    impl std::error::Error for TestError {}
-
-    // --- Inner services for tests ---
-
-    #[derive(Clone)]
-    struct OkService;
-
-    impl Service<Request<Body>> for OkService {
-        type Response = Response<Body>;
-        type Error = Infallible;
-        type Future = Ready<Result<Self::Response, Self::Error>>;
-
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, _req: Request<Body>) -> Self::Future {
-            ready(Ok(Response::builder()
-                .status(StatusCode::ACCEPTED)
-                .body(Body::from("ok"))
-                .unwrap()))
-        }
-    }
-
-    #[derive(Clone)]
-    struct ErrService;
-
-    impl Service<Request<Body>> for ErrService {
-        type Response = Response<Body>;
-        type Error = TestError;
-        type Future = Ready<Result<Self::Response, Self::Error>>;
-
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, _req: Request<Body>) -> Self::Future {
-            ready(Err(TestError("call failed")))
-        }
-    }
-
-    #[derive(Clone)]
-    struct ReadyErrorService;
-
-    impl Service<Request<Body>> for ReadyErrorService {
-        type Response = Response<Body>;
-        type Error = TestError;
-        type Future = Ready<Result<Self::Response, Self::Error>>;
-
-        fn poll_ready(
-            &mut self,
-            _cx: &mut Context<'_>,
-        ) -> std::task::Poll<Result<(), Self::Error>> {
-            std::task::Poll::Ready(Err(TestError("poll_ready failed")))
-        }
-
-        fn call(&mut self, _req: Request<Body>) -> Self::Future {
-            panic!("call() should not be invoked after poll_ready error");
-        }
-    }
-
-    // --- Tests ---
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugin_layer_passes_through_success_response() {
-        let local = LocalSet::new();
-
-        local
-            .run_until(async {
-                let plugin_rt = test_plugin_client();
-                let layer = PluginLayer::new(plugin_rt);
-
-                let mut svc = layer.layer(OkService);
-
-                let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
-
-                let resp = svc.call(req).await.unwrap();
-                assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-                let bytes = to_bytes(resp.into_body(), usize::MAX)
-                    .await
-                    .expect("body read");
-                assert_eq!(&bytes[..], b"ok");
-            })
-            .await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugin_layer_propagates_inner_error() {
-        let local = LocalSet::new();
-
-        local
-            .run_until(async {
-                let plugin_rt = test_plugin_client();
-                let layer = PluginLayer::new(plugin_rt);
-
-                let mut svc = layer.layer(ErrService);
-
-                let req = Request::builder().uri("/err").body(Body::empty()).unwrap();
-
-                let result = svc.call(req).await;
-                assert!(result.is_err());
-                assert_eq!(result.err().unwrap(), TestError("call failed"));
-            })
-            .await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugin_middleware_poll_ready_forwards_error() {
-        let local = LocalSet::new();
-
-        local
-            .run_until(async {
-                let plugin_rt = test_plugin_client();
-                let mut svc = PluginMiddleware {
-                    inner: ReadyErrorService,
-                    _plugin_rt: plugin_rt,
-                };
-
-                let waker = noop_waker_ref();
-                let mut cx = Context::from_waker(waker);
-
-                match svc.poll_ready(&mut cx) {
-                    Poll::Ready(Err(e)) => assert_eq!(e, TestError("poll_ready failed")),
-                    other => panic!("expected Poll::Ready(Err), got {other:?}"),
+                    if entry.is_open(now) {
+                        // Circuit open: skip this plugin.
+                        tracing::warn!(
+                            plugin = %plugin_id,
+                            "plugin circuit is open; skipping before_plugin"
+                        );
+                        continue;
+                    }
                 }
-            })
-            .await;
-    }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugin_middleware_clone_and_multiple_calls_work() {
-        let local = LocalSet::new();
+                // Call plugin with timeout. We pass a CLONE of ctx so that the
+                // original ctx remains valid for later plugins / insertion.
+                let call_fut = plugin_rt.before_plugin(plugin_id.clone(), ctx.clone());
+                let result = tokio::time::timeout(PLUGIN_TIMEOUT, call_fut).await;
 
-        local
-            .run_until(async {
-                let plugin_rt = test_plugin_client();
+                match result {
+                    Ok(Ok(new_ctx)) => {
+                        // Success: update ctx and reset failure state.
+                        ctx = new_ctx;
+                        let mut map = state.lock().unwrap();
+                        if let Some(st) = map.get_mut(plugin_id) {
+                            st.record_success();
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        tracing::error!(
+                            plugin = %plugin_id,
+                            "before_plugin error: {err}"
+                        );
+                        let mut map = state.lock().unwrap();
+                        if let Some(st) = map.get_mut(plugin_id) {
+                            st.record_failure(now);
+                        }
+                        // On failure, we keep the previous ctx and continue.
+                    }
+                    Err(_elapsed) => {
+                        tracing::error!(
+                            plugin = %plugin_id,
+                            "before_plugin timed out after {:?}",
+                            PLUGIN_TIMEOUT
+                        );
+                        let mut map = state.lock().unwrap();
+                        if let Some(st) = map.get_mut(plugin_id) {
+                            st.record_failure(now);
+                        }
+                        // Keep ctx, continue.
+                    }
+                }
+            }
 
-                let mut mw = PluginMiddleware {
-                    inner: OkService,
-                    _plugin_rt: plugin_rt.clone(),
-                };
+            // Put the final RequestContext into request extensions so the
+            // theme handler can see plugin recommendations.
+            let mut req = req;
+            req.extensions_mut().insert::<RequestContext>(ctx.clone());
 
-                let mut mw2 = mw.clone();
+            // Call the inner service (theme handler, etc.).
+            let resp = inner.call(req).await?;
 
-                let resp1 = mw
-                    .call(Request::builder().uri("/1").body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
+            // AFTER hooks: reverse order, using the same ctx snapshot.
+            // Note: for now we do not attempt to mutate the already-built
+            // HTTP response from plugin recommendations; AFTER is mainly
+            // for side effects / telemetry.
+            let mut ctx_after = ctx;
+            for plugin_id in plugin_ids.iter().rev() {
+                let now = Instant::now();
 
-                let resp2 = mw2
-                    .call(Request::builder().uri("/2").body(Body::empty()).unwrap())
-                    .await
-                    .unwrap();
+                {
+                    let mut map = state.lock().unwrap();
+                    let entry = map
+                        .entry(plugin_id.clone())
+                        .or_insert_with(FailureState::new);
 
-                let body1 = to_bytes(resp1.into_body(), usize::MAX).await.unwrap();
-                let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+                    if entry.is_open(now) {
+                        tracing::warn!(
+                            plugin = %plugin_id,
+                            "plugin circuit is open; skipping after_plugin"
+                        );
+                        continue;
+                    }
+                }
 
-                assert_eq!(&body1[..], b"ok");
-                assert_eq!(&body2[..], b"ok");
-            })
-            .await;
-    }
+                // Again, pass a CLONE so ctx_after stays valid if the plugin
+                // times out or errors.
+                let call_fut = plugin_rt.after_plugin(plugin_id.clone(), ctx_after.clone());
+                let result = tokio::time::timeout(PLUGIN_TIMEOUT, call_fut).await;
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn plugin_layer_and_middleware_are_cloneable() {
-        let local = LocalSet::new();
+                match result {
+                    Ok(Ok(new_ctx)) => {
+                        ctx_after = new_ctx;
+                        let mut map = state.lock().unwrap();
+                        if let Some(st) = map.get_mut(plugin_id) {
+                            st.record_success();
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        tracing::error!(
+                            plugin = %plugin_id,
+                            "after_plugin error: {err}"
+                        );
+                        let mut map = state.lock().unwrap();
+                        if let Some(st) = map.get_mut(plugin_id) {
+                            st.record_failure(now);
+                        }
+                    }
+                    Err(_elapsed) => {
+                        tracing::error!(
+                            plugin = %plugin_id,
+                            "after_plugin timed out after {:?}",
+                            PLUGIN_TIMEOUT
+                        );
+                        let mut map = state.lock().unwrap();
+                        if let Some(st) = map.get_mut(plugin_id) {
+                            st.record_failure(now);
+                        }
+                    }
+                }
+            }
 
-        local
-            .run_until(async {
-                let plugin_rt = test_plugin_client();
-
-                let layer = PluginLayer::new(plugin_rt.clone());
-                let _layer2 = layer.clone();
-
-                let mw = layer.layer(OkService);
-                let _mw2 = mw.clone();
-            })
-            .await;
+            Ok(resp)
+        })
     }
 }

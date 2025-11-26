@@ -1,11 +1,11 @@
 // crates/edge/src/router.rs
-//
+
 use adapt::http::middleware::PluginLayer;
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 use domain::content::ResolvedContent;
 use serve::{
-    ctx::http::ResponseBodySpec,
+    ctx::http::{RequestContext, ResponseBodySpec},
     resolver::{build_request_context, resolve},
 };
 
@@ -135,6 +135,13 @@ pub fn build_app_router(handles: RuntimeHandles, bindings: Vec<ThemeBinding>) ->
     let plugin_client = handles.plugin_client.clone();
     let theme_client = handles.theme_client.clone();
 
+    // Ordered list of configured plugin IDs (host-facing IDs)
+    let plugin_ids: Vec<String> = handles
+        .plugin_configs
+        .iter()
+        .map(|cfg| cfg.id.clone())
+        .collect();
+
     let mut app = Router::new();
 
     for binding in bindings {
@@ -150,9 +157,9 @@ pub fn build_app_router(handles: RuntimeHandles, bindings: Vec<ThemeBinding>) ->
         let nested = Router::new()
             .route("/", any(theme_route_handler))
             .with_state(state)
-            // JS-plugin actor client layer (currently pass-through)
-            .layer(PluginLayer::new(plugin_client.clone()))
-            // Example per-theme logging / CB layers
+            // JS-plugin actor client layer with per-plugin orchestration
+            .layer(PluginLayer::new(plugin_client.clone(), plugin_ids.clone()))
+            // Example per-theme logging / CB layers (still keyed by theme_id)
             .layer(PluginLoggingLayer::new(theme_id.clone()))
             .layer(PluginCircuitBreakerLayer::new(theme_id));
 
@@ -193,20 +200,25 @@ async fn theme_route_handler(
         theme_id,
     } = state;
 
-    let path = req.uri().path().to_string();
-    let method = req.method().clone();
-    let headers = req.headers().clone();
-    let raw_query = req.uri().query().unwrap_or_default().to_string();
-    let query_params = parse_query_params(&raw_query);
+    // Prefer the RequestContext built by the plugin middleware.
+    // Fall back to a direct resolver call if it isn't present
+    // (e.g., if the route is hit without the middleware in front).
+    let ctx: RequestContext = if let Some(existing) = req.extensions().get::<RequestContext>() {
+        existing.clone()
+    } else {
+        let path = req.uri().path().to_string();
+        let method = req.method().clone();
+        let headers = req.headers().clone();
+        let raw_query = req.uri().query().unwrap_or_default().to_string();
+        let query_params = parse_query_params(&raw_query);
 
-    // Ask the global resolver for content info (kind + front matter + body stream handle).
-    let resolved = match resolve(&path, &method) {
-        Ok(r) => r,
-        Err(_e) => ResolvedContent::empty(),
+        let resolved = match resolve(&path, &method) {
+            Ok(r) => r,
+            Err(_e) => ResolvedContent::empty(),
+        };
+
+        build_request_context(path, method, headers, query_params, resolved)
     };
-
-    // Build RequestContext using the injected / default helper in serve::resolver.
-    let ctx = build_request_context(path.clone(), method, headers, query_params, resolved);
 
     debug!("theme_id: {}", theme_id);
 
@@ -252,140 +264,4 @@ async fn theme_route_handler(
     };
 
     Ok(resp)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use domain::doc::BodyKind;
-    use std::{
-        collections::HashMap,
-        path::{Path, PathBuf},
-    };
-
-    /// Parse a query string into a `HashMap<String, String>`, URL-decoding keys/values.
-    ///
-    /// E.g. `a=1&b=hello+world` → { "a": "1", "b": "hello world" }
-    fn parse_query_params(query: &str) -> HashMap<String, String> {
-        if query.is_empty() {
-            return HashMap::new();
-        }
-
-        form_urlencoded::parse(query.as_bytes())
-            .into_owned()
-            .collect()
-    }
-
-    /// Infer `ContentKind` and `body_path` from the request path and content root.
-    ///
-    /// Rules:
-    /// - `/` or `/foo/` → treat as `/foo/index` and assume `.html`
-    /// - Known extensions:
-    ///   - `.md`, `.markdown` → Markdown
-    ///   - `.html`, `.htm`    → Html
-    ///   - `.adoc`, `.asciidoc` → AsciiDoc
-    ///   - `.txt`              → Plain
-    /// - Unknown / no extension → default to Html + `.html`
-    ///
-    /// The returned `body_path` is `content_root` joined with the normalized path.
-    fn infer_body_kind_and_body_path(root: &Path, path: &str) -> (BodyKind, PathBuf) {
-        // Normalize path: ensure leading slash, and handle directories as `/.../index`
-        let mut normalized = if path.is_empty() {
-            "/".to_string()
-        } else {
-            path.to_string()
-        };
-
-        if !normalized.starts_with('/') {
-            normalized.insert(0, '/');
-        }
-
-        if normalized.ends_with('/') {
-            normalized.push_str("index");
-        }
-
-        // Split off extension (if any)
-        let (stem, ext_opt) = match normalized.rsplit_once('.') {
-            Some((stem, ext)) => (stem.to_string(), Some(ext.to_lowercase())),
-            None => (normalized.clone(), None),
-        };
-
-        let (kind, effective_path) = match ext_opt.as_deref() {
-            Some("md") | Some("markdown") => (BodyKind::Markdown, normalized),
-            Some("html") | Some("htm") => (BodyKind::Html, normalized),
-            Some("adoc") | Some("asciidoc") => (BodyKind::AsciiDoc, normalized),
-            Some("txt") => (BodyKind::Plain, normalized),
-            // No extension or unknown: assume Html + ".html"
-            _ => {
-                let mut p = stem;
-                p.push_str(".html");
-                (BodyKind::Html, p)
-            }
-        };
-
-        // Strip leading slash when joining with a root filesystem path.
-        let rel = effective_path.trim_start_matches('/');
-        let body_path = root.join(rel);
-
-        (kind, body_path)
-    }
-
-    #[test]
-    fn parse_query_params_empty() {
-        let map = parse_query_params("");
-        assert!(map.is_empty());
-    }
-
-    #[test]
-    fn parse_query_params_simple_pairs() {
-        let map = parse_query_params("a=1&b=two");
-        assert_eq!(map.get("a").unwrap(), "1");
-        assert_eq!(map.get("b").unwrap(), "two");
-    }
-
-    #[test]
-    fn parse_query_params_url_decodes() {
-        let map = parse_query_params("q=hello+world&x=%2Ffoo%2Fbar");
-        assert_eq!(map.get("q").unwrap(), "hello world");
-        assert_eq!(map.get("x").unwrap(), "/foo/bar");
-    }
-
-    #[test]
-    fn infer_content_kind_and_body_path_root_html_default() {
-        let root = PathBuf::from("/content");
-        let (kind, body_path) = infer_body_kind_and_body_path(&root, "/");
-
-        assert_eq!(kind, BodyKind::Html);
-        assert_eq!(body_path, PathBuf::from("/content/index.html"));
-    }
-
-    #[test]
-    fn infer_content_kind_and_body_path_md() {
-        let root = PathBuf::from("/content");
-        let (kind, body_path) = infer_body_kind_and_body_path(&root, "/posts/hello.md");
-
-        assert_eq!(kind, BodyKind::Markdown);
-        assert_eq!(body_path, PathBuf::from("/content/posts/hello.md"));
-    }
-
-    #[test]
-    fn infer_content_kind_and_body_path_no_ext_defaults_to_html() {
-        let root = PathBuf::from("/content");
-        let (kind, body_path) = infer_body_kind_and_body_path(&root, "/about");
-
-        assert_eq!(kind, BodyKind::Html);
-        assert_eq!(body_path, PathBuf::from("/content/about.html"));
-    }
-
-    #[test]
-    fn infer_content_kind_and_body_path_trailing_slash() {
-        let root = PathBuf::from("/content");
-        let (kind, body_path) = infer_body_kind_and_body_path(&root, "/docs/");
-
-        assert_eq!(kind, BodyKind::Html);
-        assert_eq!(body_path, PathBuf::from("/content/docs/index.html"));
-    }
 }

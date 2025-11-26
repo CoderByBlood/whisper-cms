@@ -1,3 +1,5 @@
+// crates/edge/src/fs/ext.rs
+
 use adapt::runtime::error::RuntimeError;
 use adapt::runtime::plugin::PluginSpec;
 use adapt::runtime::theme::ThemeSpec;

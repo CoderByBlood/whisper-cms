@@ -122,8 +122,8 @@ impl<E: JsEngine> ThemeRuntime<E> {
     #[tracing::instrument(skip_all, fields(req_id = %ctx.req_id))]
     pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
         debug!(
-            "Before Handling theme {} with context {:?}",
-            self.internal_id, ctx
+            "Before Handling theme {} with context {}",
+            self.internal_id, ctx.req_id
         );
         let js_ctx = ctx_to_js_for_theme(ctx, &self.configured_id);
 
@@ -137,8 +137,8 @@ impl<E: JsEngine> ThemeRuntime<E> {
         }
 
         debug!(
-            "After Handling theme {} with context {:?}",
-            self.internal_id, ctx
+            "After Handling theme {} with context {}",
+            self.internal_id, ctx.req_id
         );
         Ok(())
     }

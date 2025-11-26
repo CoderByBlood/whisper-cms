@@ -64,6 +64,7 @@ static LOOKUP_BODY_HANDLE: LazyLock<RwLock<Option<LookupBodyHandleFn>>> =
     LazyLock::new(|| RwLock::new(None));
 
 // Called by edge at startup.
+#[tracing::instrument(skip_all)]
 pub fn set_resolver_deps(
     slug_fn: LookupFmBySlugFn,
     served_fn: LookupFmByServedPathFn,
@@ -99,6 +100,7 @@ fn infer_kind_from_ext(path: &str) -> ContentKind {
 // 0–5 RESOLUTION LOGIC
 // -----------------------------------------------------------------------------
 
+#[tracing::instrument(skip_all)]
 pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, ResolverError> {
     let path = normalize(path);
 
@@ -185,6 +187,7 @@ pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, Resolver
 /// - Normalizes header names to `Accept-Language` style.
 /// - Converts query params map into a JSON object.
 /// - Uses `resolved.front_matter` as `content_meta`.
+#[tracing::instrument(skip_all)]
 pub fn build_request_context(
     path: String,
     method: Method,
@@ -216,7 +219,8 @@ pub fn build_request_context(
         .build()
 }
 
-fn canonicalize_header_name(raw: &str) -> String {
+#[tracing::instrument(skip_all)]
+pub fn canonicalize_header_name(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut upper_next = true;
 

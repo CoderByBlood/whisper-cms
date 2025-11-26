@@ -2,73 +2,12 @@
 
 use super::error::HttpError;
 use axum::body::Body;
-use domain::content::ResolvedContent;
 use http::{self, Request, Uri};
-use serde_json::{json, Map as JsonMap, Value as Json};
 use serve::ctx::http::RequestContext;
-use serve::resolver;
+use serve::resolver::{self, build_request_context};
 use std::collections::HashMap;
 use std::task::{Context, Poll};
 use tower::Service;
-
-/// Canonicalize header names to `Accept-Language` style.
-fn canonicalize_header_name(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut upper_next = true;
-
-    for ch in raw.chars() {
-        if ch == '-' {
-            out.push('-');
-            upper_next = true;
-        } else if upper_next {
-            out.extend(ch.to_uppercase());
-            upper_next = false;
-        } else {
-            out.extend(ch.to_lowercase());
-        }
-    }
-
-    out
-}
-
-/// Build a `RequestContext` from the HTTP request pieces plus `ResolvedContent`.
-///
-/// This mirrors the old default implementation in `serve::resolver`, but lives
-/// in adapt now so we don't depend on a specific serve helper API.
-fn build_request_context_from_http(
-    path: String,
-    method: http::Method,
-    headers: http::HeaderMap,
-    query_params: HashMap<String, String>,
-    resolved: ResolvedContent,
-) -> RequestContext {
-    // headers -> JSON object
-    let mut hdr_obj = JsonMap::new();
-    for (name, value) in headers.iter() {
-        let canonical = canonicalize_header_name(name.as_str());
-        hdr_obj.insert(canonical, json!(value.to_str().unwrap_or("")));
-    }
-
-    // query_params -> JSON object
-    let mut qp_obj = JsonMap::new();
-    for (k, v) in query_params.iter() {
-        qp_obj.insert(k.clone(), Json::String(v.clone()));
-    }
-
-    RequestContext::builder()
-        // req_* fields
-        .path(Json::String(path))
-        .method(Json::String(method.to_string()))
-        // let version default from the builder; resolver doesn't know the real version
-        .headers(Json::Object(hdr_obj))
-        .params(Json::Object(qp_obj))
-        // front_matter becomes the initial content_meta shape
-        .content_meta(resolved.front_matter)
-        // start empty; can be filled later by higher layers
-        .theme_config(Json::Object(JsonMap::new()))
-        .plugin_configs(HashMap::new())
-        .build()
-}
 
 /// PluginMiddleware is responsible for:
 /// - Resolving content for the incoming request (path → ContentKind, body handle, front matter)
@@ -150,7 +89,7 @@ where
             .expect("content resolver failed"); // In a real system, handle gracefully.
 
         // Build RequestContext and insert into extensions.
-        let ctx: RequestContext = build_request_context_from_http(
+        let ctx: RequestContext = build_request_context(
             path,
             req.method().clone(),
             req.headers().clone(),

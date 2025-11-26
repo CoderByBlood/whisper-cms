@@ -88,7 +88,7 @@ pub fn ctx_to_js_for_plugins(ctx: &RequestContext, plugin_id: &str) -> JsValue {
 /// symmetry with plugins. The theme config is exposed as `ctx.config`.
 #[tracing::instrument(skip_all)]
 pub fn ctx_to_js_for_theme(ctx: &RequestContext, theme_id: &str) -> JsValue {
-    debug!("RequestContext for theme {}: {:?}", theme_id, ctx);
+    debug!("RequestContext for theme {}: {:?}", theme_id, ctx.req_id);
     let cfg = Some(&ctx.theme_config);
     ctx_to_js(ctx, cfg)
 }
@@ -184,7 +184,7 @@ fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValu
 
 #[tracing::instrument(skip_all)]
 fn response_spec_to_js(spec: &ResponseSpec) -> Json {
-    debug!("Response spec: {:?}", spec);
+    debug!("Response spec headers: {:?}", spec.headers);
     let mut obj = JsonMap::new();
 
     obj.insert(

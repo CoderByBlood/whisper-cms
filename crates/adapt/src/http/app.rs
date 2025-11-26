@@ -18,6 +18,13 @@ pub struct AppState {
 
 #[tracing::instrument(skip_all)]
 pub fn build_app(content_root: PathBuf, handles: RuntimeHandles) -> Router {
+    // Collect the configured plugin IDs in the order they were discovered.
+    let plugin_ids: Vec<String> = handles
+        .plugin_configs
+        .iter()
+        .map(|cfg| cfg.id.clone())
+        .collect();
+
     let state = AppState {
         content_root,
         plugin_rt: handles.plugin_client.clone(),
@@ -28,6 +35,6 @@ pub fn build_app(content_root: PathBuf, handles: RuntimeHandles) -> Router {
 
     Router::new()
         .route("/*path", get(crate::http::theme::theme_entrypoint))
-        .with_state(state)
-        .layer(PluginLayer::new(handles.plugin_client))
+        .with_state(state.clone())
+        .layer(PluginLayer::new(state.plugin_rt.clone(), plugin_ids))
 }

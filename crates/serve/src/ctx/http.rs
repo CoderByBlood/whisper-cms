@@ -259,8 +259,7 @@ impl RequestContext {
     /// Consume the context and extract just the `ResponseBodySpec`.
     /// Used by the theme actor / HTTP layer once JS processing is finished.
     pub fn into_response_body_spec(self) -> ResponseBodySpec {
-        debug!("ResponseSpec: {:?}", self.response_spec);
-        debug!("ResponseBodySpec: {:?}", self.response_spec.body);
+        debug!("ResponseSpec Headers: {:?}", self.response_spec.headers);
         self.response_spec.body
     }
 
