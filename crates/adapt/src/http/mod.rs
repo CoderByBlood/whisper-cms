@@ -2,10 +2,10 @@
 
 pub mod app;
 pub mod error;
+pub mod middleware;
 pub mod plugin;
-pub mod plugin_middleware;
 pub mod theme;
 
 pub use error::HttpError;
-pub use plugin_middleware::{PluginLayer, PluginMiddleware};
+pub use middleware::{PluginLayer, PluginMiddleware};
 pub use theme::theme_entrypoint;

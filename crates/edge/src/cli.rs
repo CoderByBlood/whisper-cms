@@ -1,18 +1,18 @@
 // crates/edge/src/cli.rs
 
+use crate::db::resolver::{lookup_body_handle, lookup_fm_by_served, lookup_fm_by_slug};
+use crate::fs::index::inject_stream_handlers;
 use crate::{
+    cmd::{Commands, StartCmd},
     fs::{
         ext::{self, DiscoveredPlugin, DiscoveredTheme},
         filter::{self, DEFAULT_CONTENT_EXTS},
-        index::{set_content_root, set_fm_index_dir},
+        index::{index_body, index_front_matter, set_content_root, set_fm_index_dir, start_scan},
     },
     proxy::{EdgeError, EdgeRuntime},
     router::build_app_router,
 };
-use adapt::{
-    cmd::{Commands, StartCmd},
-    runtime::bootstrap::bootstrap_all,
-};
+use adapt::runtime::bootstrap::bootstrap_all;
 use axum::Router;
 use chrono::Utc;
 use clap::Parser;
@@ -21,8 +21,8 @@ use domain::{
     setting::{ContentSettings, ExtensionSettings, Settings},
 };
 use serve::indexer::scan_and_process_docs;
+use serve::resolver::set_resolver_deps;
 use serve::{ctx::http::RequestContext, indexer::FolderScanConfig};
-
 use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
 use tracing::{debug, error, info};
@@ -144,7 +144,11 @@ impl StartProcess<SettingsLoaded> {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn scan_content_directory(self) -> Result<StartProcess<ContentLoaded>> {
+    fn inject_dependencies(self) -> Result<Self> {
+        // Wire up the core resolver's storage backends (front matter + body).
+        // This is a simple global setter; it returns ().
+        set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
+
         let dir = self.command.dir.clone();
         let content_settings = match self.settings.content.clone() {
             Some(settings) => settings,
@@ -160,17 +164,41 @@ impl StartProcess<SettingsLoaded> {
             None => dir.join("./content_index/"),
         };
 
+        let root = dir.join(&content_settings.dir);
+        // NEW: tell the index layer what the content root is
+        set_content_root(root.clone());
+
         let index_dir = index_dir.join(
             regex::Regex::new(r"[^A-Za-z0-9]")
                 .unwrap()
                 .replace_all(Utc::now().to_rfc3339().as_str(), "_")
                 .to_string(),
         );
-        let root = dir.join(&content_settings.dir);
-        let mut cfg = FolderScanConfig::default();
 
-        // NEW: tell the index layer what the content root is
-        set_content_root(root.clone());
+        // inject the dependcies
+        set_fm_index_dir(index_dir.clone());
+        inject_stream_handlers();
+
+        Ok(Self {
+            command: self.command,
+            settings: self.settings,
+            documents: None,
+            content_settings: Some(content_settings),
+            extensions: self.extensions,
+            router: self.router,
+            runtime: self.runtime,
+            _state: PhantomData,
+        })
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn scan_content_directory(self) -> Result<StartProcess<ContentLoaded>> {
+        let dir = self.command.dir.clone();
+        let mut cfg = FolderScanConfig::default();
+        let content_settings = self
+            .content_settings
+            .as_ref()
+            .expect("Constraint Violated - scanning directory without content settings");
 
         cfg.file_re = Some(filter::build_filename_regex(
             match content_settings.extensions.len() {
@@ -182,12 +210,8 @@ impl StartProcess<SettingsLoaded> {
             },
         )?);
 
-        // inject the dependcies
-        set_fm_index_dir(index_dir.clone());
-
         // This now calls the serve-level pipeline
-        use crate::fs::index::{index_body, index_front_matter, start_scan};
-
+        let root = dir.join(&content_settings.dir);
         let (docs, errs) = scan_and_process_docs(
             &root,
             cfg,                // capacity
@@ -202,16 +226,16 @@ impl StartProcess<SettingsLoaded> {
             docs.len(),
             errs.len()
         );
-        Ok(self.done(content_settings, docs))
+        Ok(self.done(docs))
     }
 
     #[tracing::instrument(skip_all)]
-    fn done(self, cnt_sets: ContentSettings, docs: Vec<Document>) -> StartProcess<ContentLoaded> {
+    fn done(self, docs: Vec<Document>) -> StartProcess<ContentLoaded> {
         StartProcess {
             command: self.command,
             settings: self.settings,
             documents: Some(docs),
-            content_settings: Some(cnt_sets),
+            content_settings: self.content_settings,
             extensions: self.extensions,
             router: self.router,
             runtime: self.runtime,
@@ -333,21 +357,19 @@ impl StartProcess<ServerStarted> {
 
 #[tracing::instrument(skip_all)]
 async fn do_start(start: StartCmd) -> Result<()> {
-    // TODO: Refactor out into function that registers all injected dependencies
-    // Wire up the core resolver's storage backends (front matter + body).
-    {
-        use crate::db::resolver::{lookup_body_handle, lookup_fm_by_served, lookup_fm_by_slug};
-        use serve::resolver::set_resolver_deps;
-
-        // This is a simple global setter; it returns ().
-        set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
-    }
-
     // parse settings file -> does the settings file exist?  If yes, parse it
     let then = Utc::now();
     let process = StartProcess::<CommandIssued>::parse_settings_file(start)?;
     info!(
         "Settings parsed in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    // inject dependencies -> adapt, serve, and domain have dependencies so inject
+    let then = Utc::now();
+    let process = process.inject_dependencies()?;
+    info!(
+        "Dependencies injected in {} milliseconds",
         Utc::now().timestamp_millis() - then.timestamp_millis()
     );
 

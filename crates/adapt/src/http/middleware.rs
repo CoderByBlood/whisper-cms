@@ -1,4 +1,4 @@
-// crates/adapt/src/http/plugin_middleware.rs
+// crates/adapt/src/http/middleware.rs
 
 //! Tower middleware that *could* call plugin `before`/`after` hooks around
 //! requests, using the single-threaded `PluginRuntimeClient`.

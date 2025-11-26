@@ -1,10 +1,6 @@
 use clap::{builder::ValueHint, Parser, Subcommand};
 use std::path::PathBuf;
 
-use serve::ctx::http::ContextError;
-
-type _Result<T> = std::result::Result<T, ContextError>;
-
 /// Unified request passed into Tower pipeline
 pub struct CliReq {
     pub cmd: Commands,

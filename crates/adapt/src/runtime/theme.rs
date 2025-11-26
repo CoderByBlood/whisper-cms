@@ -1,9 +1,8 @@
 // crates/adapt/src/runtime/theme.rs
 
-use super::ctx_bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js};
+use super::bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js, CTX_SHIM_SRC};
 use super::error::RuntimeError;
 use crate::js::{JsEngine, JsValue};
-use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
 use serde_json;
 use serve::ctx::http::RequestContext;
 use tracing::debug;

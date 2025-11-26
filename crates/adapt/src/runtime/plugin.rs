@@ -2,10 +2,9 @@
 
 use std::collections::HashMap;
 
-use super::ctx_bridge::{ctx_to_js_for_plugins, merge_recommendations_from_js};
+use super::bridge::{ctx_to_js_for_plugins, merge_recommendations_from_js, CTX_SHIM_SRC};
 use super::error::RuntimeError;
 use crate::js::{JsEngine, JsError, JsValue};
-use crate::runtime::ctx_bridge::CTX_SHIM_SRC;
 use serve::ctx::http::RequestContext;
 
 use serde_json;

@@ -1,8 +1,8 @@
 // crates/adapt/src/render/pipeline.rs
 
 use super::error::RenderError;
-use super::html_rewriter::build_lol_settings_from_body_patches;
 use super::recommendation::{BodyPatch, BodyPatchKind};
+use super::rewriter::build_lol_settings_from_body_patches;
 use super::template::TemplateEngine;
 use lol_html::rewrite_str;
 use regex::Regex;

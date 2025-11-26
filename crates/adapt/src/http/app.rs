@@ -1,6 +1,6 @@
 // crates/adapt/src/http/app.rs
 
-use crate::http::plugin_middleware::PluginLayer;
+use crate::http::middleware::PluginLayer;
 use crate::runtime::bootstrap::{PluginConfig, RuntimeHandles, ThemeConfig};
 use crate::runtime::{PluginRuntimeClient, ThemeRuntimeClient};
 

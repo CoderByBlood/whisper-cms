@@ -1,6 +1,6 @@
 // crates/edge/src/router.rs
 //
-use adapt::http::plugin_middleware::PluginLayer;
+use adapt::http::middleware::PluginLayer;
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 use domain::content::ResolvedContent;

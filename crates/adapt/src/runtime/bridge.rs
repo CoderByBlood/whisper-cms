@@ -1,3 +1,5 @@
+// crates/adapt/src/runtime/bridge.rs
+
 //! Bridge between the internal Rust `ReqCtx` / `Recommendations`
 //! and the JavaScript world (plugins & themes).
 

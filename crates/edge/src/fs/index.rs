@@ -469,8 +469,6 @@ pub fn set_content_root(root: PathBuf) {
 }
 
 /// Injects:
-/// - Document FS stream functions (domain::doc::*).
-/// - CAS stream functions (domain::stream::*).
 /// - Front-matter index directory.
 /// - ContentIndex (Tantivy) instance.
 /// - IndexedJson worker thread.
@@ -479,10 +477,6 @@ pub fn set_fm_index_dir(p: PathBuf) {
         let mut w = FM_INDEX_DIR.write().expect("FM_INDEX_DIR RwLock poisoned");
         *w = Some(p.clone());
     }
-
-    // Inject filesystem-based Document streams.
-    inject_open_bytes_fn(open_bytes);
-    inject_open_utf8_fn(open_utf8);
 
     // Initialize Tantivy content index.
     let index =
@@ -494,12 +488,21 @@ pub fn set_fm_index_dir(p: PathBuf) {
         *w = Some(Arc::new(index));
     }
 
+    // Ensure the IndexedJson worker is running.
+    ensure_index_worker();
+}
+
+/// Injects:
+/// - Document FS stream functions (domain::doc::*).
+/// - CAS stream functions (domain::stream::*).
+pub fn inject_stream_handlers() {
+    // Inject filesystem-based Document streams.
+    inject_open_bytes_fn(open_bytes);
+    inject_open_utf8_fn(open_utf8);
+
     // Inject CAS-based stream handle readers.
     inject_open_bytes_from_handle_fn(cas_bytes_from_handle);
     inject_open_utf8_from_handle_fn(cas_utf8_from_handle);
-
-    // Ensure the IndexedJson worker is running.
-    ensure_index_worker();
 }
 
 // ======================================================================
