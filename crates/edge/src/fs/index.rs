@@ -224,20 +224,6 @@ fn canonical_id_from_source(path: &Path) -> String {
     }
 }
 
-/// Canonicalize a served path coming from the resolver.
-///
-/// Example:
-///   path = "index.html"   -> "/index.html"
-///   path = "/index.html"  -> "/index.html"
-fn canonical_id_from_served(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    if s.starts_with('/') {
-        s.into_owned()
-    } else {
-        format!("/{}", s)
-    }
-}
-
 // ======================================================================
 // IndexedJson handlers
 // ======================================================================
@@ -298,8 +284,6 @@ fn handle_get_front_matter_by_path(
         .clone()
         .expect("FM index dir not set");
 
-    let target = canonical_id_from_served(&served_path);
-
     rt.block_on(async {
         let mut db = IndexedJson::<IndexRecord>::open(&index_dir)
             .await
@@ -313,7 +297,7 @@ fn handle_get_front_matter_by_path(
         loop {
             match db.get(current).await {
                 Ok(Some((next, rec))) => {
-                    if rec.id == target {
+                    if rec.id == served_path {
                         let json = serde_json::to_value(rec)
                             .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
                         return Ok(Some(json));
