@@ -10,7 +10,7 @@ use crate::fs::index::{lookup_front_matter_by_path, lookup_front_matter_by_slug}
 use domain::stream::StreamHandle;
 use serde_json::Value as Json;
 use serve::resolver::ResolverError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Lookup front matter by slug, using IndexedJson.
 ///
@@ -39,5 +39,7 @@ pub fn lookup_body_handle(served: &str) -> Result<Option<StreamHandle>, Resolver
     // `serve::resolver` already normalizes paths to start with `/`,
     // and we index bodies with the same canonical ID.
     let key = served.to_owned();
-    Ok(Some(StreamHandle::Cas { key }))
+    Ok(Some(StreamHandle::Cas {
+        key: PathBuf::from(key),
+    }))
 }

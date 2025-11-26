@@ -46,7 +46,7 @@ pub enum StreamHandle {
     /// Filesystem-backed stream.
     Fs { path: PathBuf },
     /// CAS / index-backed stream (e.g. from Tantivy or some other store).
-    Cas { key: String },
+    Cas { key: PathBuf },
 }
 
 impl StreamHandle {
@@ -56,8 +56,8 @@ impl StreamHandle {
     }
 
     /// Convenience constructor for a CAS-based handle.
-    pub fn cas(key: impl Into<String>) -> Self {
-        StreamHandle::Cas { key: key.into() }
+    pub fn cas(key: PathBuf) -> Self {
+        StreamHandle::Cas { key }
     }
 
     /// What kind of backing store this handle represents.
@@ -93,18 +93,10 @@ impl StreamHandle {
     }
 
     /// Accessor for the underlying filesystem path, if any.
-    pub fn as_fs_path(&self) -> Option<&PathBuf> {
+    pub fn identity(&self) -> &PathBuf {
         match self {
-            StreamHandle::Fs { path } => Some(path),
-            _ => None,
-        }
-    }
-
-    /// Accessor for the underlying CAS key, if any.
-    pub fn as_cas_key(&self) -> Option<&str> {
-        match self {
-            StreamHandle::Cas { key } => Some(key.as_str()),
-            _ => None,
+            StreamHandle::Fs { path } => path,
+            StreamHandle::Cas { key } => key,
         }
     }
 }

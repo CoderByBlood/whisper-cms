@@ -376,10 +376,7 @@ fn cas_bytes_from_handle(handle: &StreamHandle) -> BytesStream {
     use futures::stream::once;
 
     // Take an OWNED key so the async block doesn't borrow `handle`.
-    let id = handle
-        .as_cas_key()
-        .expect("Constraint violated - handle created with a key")
-        .to_owned();
+    let id = handle.identity().to_owned();
 
     // Clone the Arc<ContentIndex> out of the global, also owned by the future.
     let index_opt = {
@@ -420,10 +417,7 @@ fn cas_utf8_from_handle(handle: &StreamHandle) -> Utf8Stream {
     use futures::stream::once;
 
     // Take an OWNED key so the async block doesn't borrow `handle`.
-    let id = handle
-        .as_cas_key()
-        .expect("Constraint violated - handle was created without a key")
-        .to_owned();
+    let id = handle.identity().to_owned();
 
     // Clone the Arc<ContentIndex> out of the global, also owned by the future.
     let index_opt = {
