@@ -1,4 +1,4 @@
-// crates/adapt/src/render/pipeline.rs
+// crates/serve/src/render/pipeline.rs
 
 use super::error::RenderError;
 use super::recommendation::{BodyPatch, BodyPatchKind};

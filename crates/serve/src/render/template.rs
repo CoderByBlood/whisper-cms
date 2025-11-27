@@ -1,4 +1,4 @@
-// crates/adapt/src/render/template.rs
+// crates/serve/src/render/template.rs
 
 use super::error::RenderError;
 use handlebars::Handlebars;

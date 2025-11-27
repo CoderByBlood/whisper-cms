@@ -1,4 +1,4 @@
-// crates/adapt/src/render/recommendation.rs
+// crates/serve/src/render/recommendation.rs
 
 use http::header::HeaderName;
 use http::HeaderMap;

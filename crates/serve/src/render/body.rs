@@ -1,4 +1,4 @@
-// crates/adapt/src/render/body_regex.rs
+// crates/serve/src/render/body.rs
 
 use super::error::RenderError;
 use regex::Regex;

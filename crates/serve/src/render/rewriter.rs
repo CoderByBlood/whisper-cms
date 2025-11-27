@@ -1,4 +1,4 @@
-// crates/adapt/src/render/html_rewriter.rs
+// crates/serve/src/render/rewriter.rs
 
 use super::recommendation::{BodyPatch, BodyPatchKind, DomOp};
 use lol_html::{
