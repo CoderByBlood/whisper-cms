@@ -121,8 +121,9 @@ pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, Resolver
     // -------------------------------------------
     // Step 1: Does the path match a slug exactly?
     // -------------------------------------------
-    if let Some(fm) = lookup_slug(&path)? {
-        if let Some(h) = lookup_body(&path)? {
+    let slug = path.strip_prefix('/').unwrap_or(path.as_str());
+    if let Some(fm) = lookup_slug(slug)? {
+        if let Some(h) = lookup_body(slug)? {
             return Ok(ResolvedContent {
                 content_kind: infer_kind_from_ext(&path),
                 front_matter: fm,

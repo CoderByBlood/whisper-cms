@@ -156,6 +156,7 @@ pub fn build_app_router(handles: RuntimeHandles, bindings: Vec<ThemeBinding>) ->
 
         let nested = Router::new()
             .route("/", any(theme_route_handler))
+            .route("/{*path}", any(theme_route_handler))
             .with_state(state)
             // JS-plugin actor client layer with per-plugin orchestration
             .layer(PluginLayer::new(plugin_client.clone(), plugin_ids.clone()))
