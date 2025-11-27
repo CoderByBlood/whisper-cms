@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 use thiserror::Error;
 
-use crate::ctx::http::RequestContext;
+use crate::render::http::RequestContext;
 
 // -----------------------------------------------------------------------------
 // Error Type

@@ -24,6 +24,9 @@ asciidocr = { workspace = true }
 rst_parser = { workspace = true }
 rst_renderer = { workspace = true }
 orgize = { workspace = true }
+minijinja = { workspace = true }
+tera = { workspace = true }
+handlebars_misc_helpers = { workspace = true }
 
 domain = { path = "../domain" }
 

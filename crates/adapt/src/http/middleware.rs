@@ -16,7 +16,7 @@ use domain::content::ResolvedContent;
 use futures::future::BoxFuture;
 use http::Uri;
 use serve::{
-    ctx::http::RequestContext,
+    render::http::RequestContext,
     resolver::{self, build_request_context},
 };
 use std::{

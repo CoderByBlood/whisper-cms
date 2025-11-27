@@ -1,5 +1,6 @@
 pub mod body;
 pub mod error;
+pub mod http;
 pub mod pipeline;
 pub mod recommendation;
 pub mod rewriter;

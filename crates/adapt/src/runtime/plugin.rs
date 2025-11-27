@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use super::bridge::{ctx_to_js_for_plugins, merge_recommendations_from_js, CTX_SHIM_SRC};
 use super::error::RuntimeError;
 use crate::js::{JsEngine, JsError, JsValue};
-use serve::ctx::http::RequestContext;
+use serve::render::http::RequestContext;
 
 use serde_json;
 use tracing::debug;

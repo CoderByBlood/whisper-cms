@@ -5,7 +5,11 @@ use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
 use domain::content::ResolvedContent;
 use serve::{
-    ctx::http::{RequestContext, ResponseBodySpec},
+    render::http::{RequestContext, ResponseBodySpec},
+    render::{
+        pipeline::{render_html_string_to, render_html_template_to, render_json_to},
+        template::TemplateRegistry,
+    },
     resolver::{build_request_context, resolve},
 };
 
@@ -20,6 +24,7 @@ use axum::{
 use http::header;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use tower::Layer;
 use tracing::{debug, error};
 
@@ -33,6 +38,10 @@ use crate::fs::ext::ThemeBinding;
 struct ThemeAppState {
     theme_client: ThemeRuntimeClient,
     theme_id: String,
+    /// Filesystem root for this theme's templates directory.
+    ///
+    /// Typically `<theme-dir>/templates`.
+    template_root: PathBuf,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,9 +136,8 @@ impl<S> Layer<S> for PluginCircuitBreakerLayer {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build the main Axum router given:
-/// - a content root for resolving markdown/html/json/etc
 /// - runtime handles (theme + plugin actors)
-/// - a list of theme bindings (mount path → theme id)
+/// - a list of theme bindings (mount path → theme id + template root)
 #[tracing::instrument(skip_all)]
 pub fn build_app_router(handles: RuntimeHandles, bindings: Vec<ThemeBinding>) -> Router {
     let plugin_client = handles.plugin_client.clone();
@@ -147,11 +155,13 @@ pub fn build_app_router(handles: RuntimeHandles, bindings: Vec<ThemeBinding>) ->
     for binding in bindings {
         let mount_path = binding.mount_path.clone();
         let theme_id = binding.theme_id.clone();
+        let template_root = binding.template_root.clone();
 
-        // Each mounted router gets its own small state (incl. theme_id)
+        // Each mounted router gets its own small state (incl. theme_id + template root)
         let state = ThemeAppState {
             theme_client: theme_client.clone(),
             theme_id: theme_id.clone(),
+            template_root,
         };
 
         let nested = Router::new()
@@ -190,7 +200,7 @@ fn parse_query_params(raw_query: &str) -> HashMap<String, String> {
 
 /// Axum handler for all requests under a given theme mount.
 ///
-/// State carries `theme_client`, `theme_id`, and the content resolver.
+/// State carries `theme_client`, `theme_id`, and the template root.
 #[tracing::instrument(skip_all)]
 async fn theme_route_handler(
     State(state): State<ThemeAppState>,
@@ -199,6 +209,7 @@ async fn theme_route_handler(
     let ThemeAppState {
         theme_client,
         theme_id,
+        template_root,
     } = state;
 
     // Prefer the RequestContext built by the plugin middleware.
@@ -227,28 +238,80 @@ async fn theme_route_handler(
     let result = theme_client.render(&theme_id, ctx).await;
     debug!("The ResponseBodySpec: {:?}", result);
 
-    let resp = match result {
-        Ok(ResponseBodySpec::HtmlString(html)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(Body::from(html))
-            .unwrap(),
+    // NOTE: body patches (from plugins/themes) are not yet wired here.
+    // We pass an empty slice for now, but route through the render pipeline
+    // so Phase 3 can bolt in Recommendations without touching this handler.
+    let body_patches: &[serve::render::recommendation::BodyPatch] = &[];
 
-        Ok(ResponseBodySpec::JsonValue(val)) => {
-            let body = serde_json::to_vec(&val).unwrap_or_else(|_| b"{}".to_vec());
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(body))
-                .unwrap()
+    let resp = match result {
+        // ─────────────────────────────────────────────────────────────
+        // NEW: HtmlTemplate – detect engine + render from /templates
+        // ─────────────────────────────────────────────────────────────
+        Ok(ResponseBodySpec::HtmlTemplate { template, model }) => {
+            let registry = TemplateRegistry::new(template_root);
+
+            let mut buf = Vec::new();
+            if let Err(e) =
+                render_html_template_to(&registry, &template, &model, body_patches, &mut buf)
+            {
+                error!(
+                    "HtmlTemplate render failed for theme {} and template {}: {}",
+                    theme_id, template, e
+                );
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("Template rendering error"))
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .body(Body::from(buf))
+                    .unwrap()
+            }
         }
 
-        Ok(ResponseBodySpec::HtmlTemplate { .. }) => Response::builder()
-            .status(StatusCode::NOT_IMPLEMENTED)
-            .body(Body::from(
-                "HtmlTemplate rendering is not wired at the edge layer",
-            ))
-            .unwrap(),
+        // ─────────────────────────────────────────────────────────────
+        // HtmlString – now routed through the same render pipeline
+        // (body patches currently empty).
+        // ─────────────────────────────────────────────────────────────
+        Ok(ResponseBodySpec::HtmlString(html)) => {
+            let mut buf = Vec::new();
+            if let Err(e) = render_html_string_to(&html, body_patches, &mut buf) {
+                error!("HtmlString render failed for theme {}: {}", theme_id, e);
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("HTML rendering error"))
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                    .body(Body::from(buf))
+                    .unwrap()
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // JsonValue – also routed through render pipeline
+        // (regex / JSON body patches; currently empty)
+        // ─────────────────────────────────────────────────────────────
+        Ok(ResponseBodySpec::JsonValue(val)) => {
+            let mut buf = Vec::new();
+            if let Err(e) = render_json_to(&val, body_patches, &mut buf) {
+                error!("JSON render failed for theme {}: {}", theme_id, e);
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("JSON rendering error"))
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(buf))
+                    .unwrap()
+            }
+        }
 
         Ok(ResponseBodySpec::None | ResponseBodySpec::Unset) => Response::builder()
             .status(StatusCode::NO_CONTENT)

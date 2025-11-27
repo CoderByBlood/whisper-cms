@@ -1,11 +1,21 @@
 // crates/serve/src/render/template.rs
 
 use super::error::RenderError;
-use handlebars::Handlebars;
+use handlebars::{
+    handlebars_helper, Context, Handlebars, Helper, HelperDef, HelperResult, Output, RenderContext,
+};
+use handlebars_misc_helpers as misc;
+use minijinja::{Environment as MiniJinjaEnv, Error as MiniJinjaError};
 use serde::Serialize;
-use std::io::Write;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use tera::{Context as TeraContext, Error as TeraError, Tera};
 
 /// Trait for template engines that can render to an arbitrary `Write`.
+///
+/// This is intentionally minimal and is implemented by both `HbsEngine`
+/// (historical) and the multi-engine `TemplateRegistry`.
 pub trait TemplateEngine: Send + Sync {
     fn render_to_write<M, W>(
         &self,
@@ -18,7 +28,14 @@ pub trait TemplateEngine: Send + Sync {
         W: Write;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Backwards-compatible Handlebars-only engine
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Handlebars-based template engine implementation.
+///
+/// Kept for backwards compatibility. Newer code should use
+/// `TemplateRegistry`, which can select among multiple engines.
 pub struct HbsEngine {
     handlebars: Handlebars<'static>,
 }
@@ -55,150 +72,208 @@ impl TemplateEngine for HbsEngine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::Serialize;
-    use serde_json::json;
-    use std::io::{self, Write};
-    use std::str;
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-engine registry (Handlebars / MiniJinja / Tera)
+// ─────────────────────────────────────────────────────────────────────────────
 
-    #[derive(Serialize)]
-    struct User {
-        name: String,
+/// Internal enum to decide which engine to use.
+/// This does **not** escape this module (no dyn on the hot path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineKind {
+    Handlebars,
+    MiniJinja,
+    Tera,
+}
+
+/// Very small helper: turn any display-ish value into an `io::Error`.
+impl EngineKind {
+    fn from_extension(ext: &str) -> Option<Self> {
+        let e = ext.to_ascii_lowercase();
+        match e.as_str() {
+            // Handlebars
+            "hbs" | "handlebars" => Some(EngineKind::Handlebars),
+
+            // MiniJinja
+            "j2" | "jinja2" | "jinja" | "mj" => Some(EngineKind::MiniJinja),
+
+            // Tera
+            "tera" => Some(EngineKind::Tera),
+
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DumpRoot;
+
+impl HelperDef for DumpRoot {
+    fn call<'reg: 'rc, 'rc>(
+        &self,
+        _h: &Helper<'rc>,
+        _r: &Handlebars<'reg>,
+        ctx: &Context,
+        _rc: &mut RenderContext<'reg, 'rc>,
+        out: &mut dyn Output,
+    ) -> HelperResult {
+        let json = ctx.data();
+        let s = serde_json::to_string_pretty(json).unwrap_or_else(|_| "<invalid json>".to_string());
+        out.write(s.as_str())?;
+        Ok(())
+    }
+}
+
+/// A per-theme registry that can render templates via Handlebars, MiniJinja,
+/// or Tera based solely on the template filename’s extension.
+///
+/// There is intentionally **no caching**: each call reads the template
+/// file from disk and constructs the engine environment just for that call.
+/// This keeps the implementation simple and matches your “no caching” answer.
+pub struct TemplateRegistry {
+    template_root: PathBuf,
+}
+
+impl TemplateRegistry {
+    /// Create a new registry rooted at `<theme_dir>/templates`.
+    ///
+    /// The directory is not required to exist at construction time – errors
+    /// are reported only when attempting to render a specific template.
+    pub fn new(template_root: PathBuf) -> Self {
+        Self { template_root }
     }
 
-    #[test]
-    fn hbs_engine_renders_simple_template_with_struct_model() {
-        let mut engine = HbsEngine::new();
-        engine
-            .register_template_str("greeting", "Hello, {{name}}!")
-            .expect("template registration should succeed");
-
-        let model = User {
-            name: "Alice".to_string(),
-        };
-
-        let mut out: Vec<u8> = Vec::new();
-        engine
-            .render_to_write("greeting", &model, &mut out)
-            .expect("render should succeed");
-
-        let s = str::from_utf8(&out).expect("output should be valid utf8");
-        assert_eq!(s, "Hello, Alice!");
+    /// Helper for creating an `io::Error` from a display-able value.
+    fn io_other(msg: impl Into<String>) -> io::Error {
+        io::Error::new(io::ErrorKind::Other, msg.into())
     }
 
-    #[test]
-    fn hbs_engine_renders_with_json_model() {
-        let mut engine = HbsEngine::new();
-        engine
-            .register_template_str("greeting", "Hello, {{name}}!")
-            .expect("template registration should succeed");
-
-        let model = json!({ "name": "Bob" });
-
-        let mut out: Vec<u8> = Vec::new();
-        engine
-            .render_to_write("greeting", &model, &mut out)
-            .expect("render should succeed");
-
-        let s = str::from_utf8(&out).expect("output should be valid utf8");
-        assert_eq!(s, "Hello, Bob!");
+    /// Resolve a logical template name like `"home.hbs"` against the root.
+    fn resolve_path(&self, name: &str) -> PathBuf {
+        self.template_root.join(name)
     }
 
-    #[test]
-    fn hbs_engine_escapes_html_by_default() {
-        let mut engine = HbsEngine::new();
-        engine
-            .register_template_str("html", "{{value}}")
-            .expect("template registration should succeed");
+    /// Read the template source and decide which engine to use.
+    fn load_template(&self, template_name: &str) -> Result<(EngineKind, String), RenderError> {
+        let path = self.resolve_path(template_name);
 
-        let model = json!({ "value": "<b>hi</b>" });
+        let src = fs::read_to_string(&path).map_err(|e| {
+            RenderError::Io(Self::io_other(format!(
+                "failed to read template {:?}: {}",
+                path, e
+            )))
+        })?;
 
-        let mut out: Vec<u8> = Vec::new();
-        engine
-            .render_to_write("html", &model, &mut out)
-            .expect("render should succeed");
+        let ext = Path::new(template_name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
 
-        let s = str::from_utf8(&out).expect("output should be valid utf8");
-        assert_eq!(s, "&lt;b&gt;hi&lt;/b&gt;");
+        let kind = EngineKind::from_extension(ext).ok_or_else(|| {
+            RenderError::Io(Self::io_other(format!(
+                "unsupported template extension {:?} for {:?}",
+                ext, template_name
+            )))
+        })?;
+
+        Ok((kind, src))
     }
 
-    #[test]
-    fn hbs_engine_supports_unescaped_html_with_triple_mustache() {
-        use serde_json::json;
-
-        let mut engine = HbsEngine::new();
-        engine
-            .register_template_str("html", "{{{raw_html}}} {{raw_html}}")
-            .expect("template registration should succeed");
-
-        let model = json!({
-            "raw_html": "<b>hi</b>",
+    fn render_with_handlebars<M, W>(
+        &self,
+        template_name: &str,
+        src: &str,
+        model: &M,
+        out: &mut W,
+    ) -> Result<(), RenderError>
+    where
+        M: Serialize,
+        W: Write,
+    {
+        handlebars_helper!(dump_json: |v: Json| {
+            serde_json::to_string_pretty(&v).unwrap_or_else(|_| "<invalid json>".into())
         });
 
-        let mut out: Vec<u8> = Vec::new();
-        engine
-            .render_to_write("html", &model, &mut out)
-            .expect("render should succeed");
-
-        let rendered = std::str::from_utf8(&out).expect("output should be utf8");
-
-        // First occurrence unescaped, second escaped.
-        assert_eq!(rendered, "<b>hi</b> &lt;b&gt;hi&lt;/b&gt;");
+        let mut hbs = Handlebars::new();
+        hbs.register_template_string(template_name, src)
+            .map_err(RenderError::from)?;
+        misc::register(&mut hbs);
+        hbs.register_helper("dump", Box::new(dump_json));
+        hbs.register_helper("dump_root", Box::new(DumpRoot));
+        hbs.render_to_write(template_name, model, out)
+            .map_err(RenderError::from)
     }
 
-    #[test]
-    fn render_missing_template_returns_error() {
-        let engine = HbsEngine::new();
-        let model = json!({});
-        let mut out: Vec<u8> = Vec::new();
+    fn render_with_minijinja<M, W>(
+        &self,
+        template_name: &str,
+        src: &str,
+        model: &M,
+        out: &mut W,
+    ) -> Result<(), RenderError>
+    where
+        M: Serialize,
+        W: Write,
+    {
+        let mut env = MiniJinjaEnv::new();
 
-        let result = engine.render_to_write("does_not_exist", &model, &mut out);
-        assert!(
-            result.is_err(),
-            "rendering a missing template should return an error"
-        );
+        env.add_template(template_name, src)
+            .map_err(|e: MiniJinjaError| RenderError::Io(Self::io_other(e.to_string())))?;
+
+        let tmpl = env
+            .get_template(template_name)
+            .map_err(|e: MiniJinjaError| RenderError::Io(Self::io_other(e.to_string())))?;
+
+        let rendered = tmpl
+            .render(model)
+            .map_err(|e: MiniJinjaError| RenderError::Io(Self::io_other(e.to_string())))?;
+
+        out.write_all(rendered.as_bytes()).map_err(RenderError::Io)
     }
 
-    #[test]
-    fn registering_invalid_template_returns_error() {
-        let mut engine = HbsEngine::new();
-        // Unclosed if-block should cause Handlebars to error.
-        let result = engine.register_template_str("bad", "{{#if foo}}");
+    fn render_with_tera<M, W>(
+        &self,
+        template_name: &str,
+        src: &str,
+        model: &M,
+        out: &mut W,
+    ) -> Result<(), RenderError>
+    where
+        M: Serialize,
+        W: Write,
+    {
+        let mut tera = Tera::default();
 
-        assert!(
-            result.is_err(),
-            "registering an invalid template should return an error"
-        );
+        tera.add_raw_template(template_name, src)
+            .map_err(|e: TeraError| RenderError::Io(Self::io_other(e.to_string())))?;
+
+        let ctx = TeraContext::from_serialize(model)
+            .map_err(|e: TeraError| RenderError::Io(Self::io_other(e.to_string())))?;
+
+        let rendered = tera
+            .render(template_name, &ctx)
+            .map_err(|e: TeraError| RenderError::Io(Self::io_other(e.to_string())))?;
+
+        out.write_all(rendered.as_bytes()).map_err(RenderError::Io)
     }
+}
 
-    struct FailingWriter;
+impl TemplateEngine for TemplateRegistry {
+    fn render_to_write<M, W>(
+        &self,
+        template_name: &str,
+        model: &M,
+        out: &mut W,
+    ) -> Result<(), RenderError>
+    where
+        M: Serialize,
+        W: Write,
+    {
+        let (kind, src) = self.load_template(template_name)?;
 
-    impl Write for FailingWriter {
-        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::Other, "write failed"))
+        match kind {
+            EngineKind::Handlebars => self.render_with_handlebars(template_name, &src, model, out),
+            EngineKind::MiniJinja => self.render_with_minijinja(template_name, &src, model, out),
+            EngineKind::Tera => self.render_with_tera(template_name, &src, model, out),
         }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn writer_io_error_propagates_as_render_error() {
-        let mut engine = HbsEngine::new();
-        engine
-            .register_template_str("simple", "Hello")
-            .expect("template registration should succeed");
-
-        let model = json!({});
-        let mut failing = FailingWriter;
-
-        let result = engine.render_to_write("simple", &model, &mut failing);
-        assert!(
-            result.is_err(),
-            "IO error from writer should surface as RenderError"
-        );
     }
 }

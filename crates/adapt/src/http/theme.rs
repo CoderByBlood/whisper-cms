@@ -10,7 +10,7 @@ use axum::{
 use http::StatusCode;
 use serve::resolver::{build_request_context, resolve};
 use serve::{
-    ctx::http::{RequestContext, ResponseBodySpec},
+    render::http::{RequestContext, ResponseBodySpec},
     resolver::ResolverError,
 };
 use std::borrow::Cow;

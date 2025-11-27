@@ -1,6 +1,10 @@
-// crates/serve/src/ctx/http.rs
+// crates/serve/src/render/http.rs
 
+use crate::render::error::RenderError;
+use crate::render::pipeline::{render_html_string_to, render_html_template_to, render_json_to};
+use crate::render::recommendation::BodyPatch;
 use crate::render::recommendation::Recommendations;
+use crate::render::template::TemplateRegistry;
 use domain::stream::StreamHandle;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -192,6 +196,93 @@ impl ResponseSpec {
     pub fn set_json_value(&mut self, value: Json) {
         self.body = ResponseBodySpec::JsonValue(value);
     }
+}
+
+/// Output of rendering a response body (no headers / status).
+pub struct RenderedBody {
+    /// UTF-8 encoded response body.
+    pub bytes: Vec<u8>,
+    /// Suggested content-type (you can override if needed).
+    pub content_type: &'static str,
+}
+
+/// Render a ResponseBodySpec into bytes, applying:
+///
+/// - HtmlTemplate: via TemplateRegistry (required)
+/// - HtmlString: regex/DOM patches via pipeline
+/// - JsonValue: regex/JSON patches via pipeline
+///
+/// If `registry` is `None` and the body is HtmlTemplate, this returns
+/// `RenderError::Template` (or whatever variant your `RenderError` uses).
+pub fn render_body_with_templates(
+    registry: Option<&TemplateRegistry>,
+    body_spec: &ResponseBodySpec,
+    body_patches: &[BodyPatch],
+) -> Result<RenderedBody, RenderError> {
+    match body_spec {
+        ResponseBodySpec::Unset | ResponseBodySpec::None => Ok(RenderedBody {
+            bytes: Vec::new(),
+            content_type: "text/plain; charset=utf-8",
+        }),
+
+        ResponseBodySpec::HtmlString(html) => {
+            let mut buf = Vec::new();
+            render_html_string_to(html, body_patches, &mut buf)?;
+            Ok(RenderedBody {
+                bytes: buf,
+                content_type: "text/html; charset=utf-8",
+            })
+        }
+
+        ResponseBodySpec::JsonValue(val) => {
+            let mut buf = Vec::new();
+            render_json_to(val, body_patches, &mut buf)?;
+            Ok(RenderedBody {
+                bytes: buf,
+                content_type: "application/json",
+            })
+        }
+
+        ResponseBodySpec::HtmlTemplate { template, model } => {
+            let registry = registry.ok_or_else(|| {
+                RenderError::Template(format!(
+                    "HtmlTemplate requested for `{template}`, but no TemplateRegistry provided"
+                ))
+            })?;
+
+            let mut buf = Vec::new();
+            // Note: `model` is already a `serde_json::Value`, which implements Serialize.
+            render_html_template_to(registry, template, model, body_patches, &mut buf)?;
+
+            Ok(RenderedBody {
+                bytes: buf,
+                content_type: "text/html; charset=utf-8",
+            })
+        }
+    }
+}
+
+/// Convenience helper if you have the full RequestContext handy.
+///
+/// This pulls:
+/// - `ctx.response_spec.body`
+/// - `ctx.recommendations.body_patches`
+///
+/// and renders into bytes using the registry for HtmlTemplate.
+pub fn render_ctx_body_with_templates(
+    registry: Option<&TemplateRegistry>,
+    ctx: &RequestContext,
+) -> Result<RenderedBody, RenderError> {
+    let body_spec = &ctx.response_spec.body;
+    let body_patches: &[BodyPatch] = &ctx.recommendations.body_patches;
+    render_body_with_templates(registry, body_spec, body_patches)
+}
+
+/// Map a rendering failure into an HTTP-ish status code.
+/// You can change this to whatever policy you want.
+pub fn status_for_render_error(_err: &RenderError) -> StatusCode {
+    // For now: all template/render failures → 500.
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

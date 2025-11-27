@@ -3,7 +3,7 @@
 use crate::js::engine::BoaEngine;
 use crate::runtime::error::RuntimeError;
 use crate::runtime::plugin::PluginRuntime;
-use serve::ctx::http::RequestContext;
+use serve::render::http::RequestContext;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands handled by the plugin actor.

@@ -4,7 +4,7 @@ use super::bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js, CTX_SHIM_SRC};
 use super::error::RuntimeError;
 use crate::js::{JsEngine, JsValue};
 use serde_json;
-use serve::ctx::http::RequestContext;
+use serve::render::http::RequestContext;
 use tracing::debug;
 use uuid::Uuid;
 

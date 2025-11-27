@@ -1,8 +1,8 @@
 use serve::resolver::ResolverError;
 use thiserror::Error;
 
-use serve::ctx::http::ContextError;
 use serve::render::error::RenderError;
+use serve::render::http::ContextError;
 
 #[derive(Debug, Error)]
 pub enum HttpError {

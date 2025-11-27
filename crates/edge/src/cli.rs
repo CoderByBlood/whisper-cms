@@ -5,7 +5,7 @@ use crate::fs::index::inject_stream_handlers;
 use crate::{
     cmd::{Commands, StartCmd},
     fs::{
-        ext::{self, DiscoveredPlugin, DiscoveredTheme},
+        ext::{self, DiscoveredPlugin, DiscoveredTheme, ThemeBinding},
         filter::{self, DEFAULT_CONTENT_EXTS},
         index::{index_body, index_front_matter, set_content_root, set_fm_index_dir, start_scan},
     },
@@ -22,7 +22,7 @@ use domain::{
 };
 use serve::indexer::scan_and_process_docs;
 use serve::resolver::set_resolver_deps;
-use serve::{ctx::http::RequestContext, indexer::FolderScanConfig};
+use serve::{indexer::FolderScanConfig, render::http::RequestContext};
 use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
 use tracing::{debug, error, info};
@@ -65,6 +65,10 @@ pub async fn start() -> ExitCode {
         })
         .await
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Start process state machine
+// ─────────────────────────────────────────────────────────────────────────────
 
 struct CommandIssued;
 struct SettingsLoaded;
@@ -146,7 +150,6 @@ impl StartProcess<SettingsLoaded> {
     #[tracing::instrument(skip_all)]
     fn inject_dependencies(self) -> Result<Self> {
         // Wire up the core resolver's storage backends (front matter + body).
-        // This is a simple global setter; it returns ().
         set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
 
         let dir = self.command.dir.clone();
@@ -175,7 +178,7 @@ impl StartProcess<SettingsLoaded> {
                 .to_string(),
         );
 
-        // inject the dependcies
+        // inject the dependencies
         set_fm_index_dir(index_dir.clone());
         inject_stream_handlers();
 
@@ -288,7 +291,10 @@ impl StartProcess<ExtensionsLoaded> {
         let (plugins, themes) = self.extensions.as_ref().unwrap();
         let plugin_cfgs = plugins.iter().map(|p| (&p.spec).into()).collect();
         let theme_cfgs = themes.iter().map(|t| (&t.spec).into()).collect();
-        let theme_bnds = themes.iter().map(|t| (&t.spec).into()).collect();
+
+        // Build ThemeBinding values from DiscoveredTheme so we have template_root.
+        let theme_bnds: Vec<ThemeBinding> = themes.iter().map(ThemeBinding::from).collect();
+
         let handles = bootstrap_all(plugin_cfgs, theme_cfgs)?;
 
         info!("Initializing themes...");
