@@ -58,6 +58,63 @@ pub async fn start() -> ExitCode {
         .await
 }
 
+#[tracing::instrument(skip_all)]
+async fn do_start(start: StartCmd) -> Result<()> {
+    // parse settings file -> does the settings file exist?  If yes, parse it
+    let then = Utc::now();
+    let process = StartProcess::<CommandIssued>::parse_settings_file(start)?;
+    info!(
+        "Settings parsed in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    // inject dependencies -> adapt, serve, and domain have dependencies so inject
+    let then = Utc::now();
+    let process = process.inject_dependencies()?;
+    info!(
+        "Dependencies injected in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    // scan for content -> does the content directory exist?  If yes, scan it
+    let then = Utc::now();
+    let process = process.scan_content_directory().await?;
+    info!(
+        "Content scanned in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    // scan for extensions -> does the extensions directory exist?  If yes, scan it
+    let then = Utc::now();
+    let process = process.scan_extensions_directory()?;
+    info!(
+        "Extensions scanned in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    // register routes and middleware in Axum
+    let then = Utc::now();
+    let process = process.register_routes_and_middleware().await?;
+    info!(
+        "Routes registered in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    // start servers (Axum web server/Pingora edge controller)
+    let then = Utc::now();
+    let process = process.start_servers().await?;
+    info!(
+        "Servers started in {} milliseconds",
+        Utc::now().timestamp_millis() - then.timestamp_millis()
+    );
+
+    while let Ok(()) = process.is_running().await {
+        info!("Restarting the server");
+    }
+
+    Ok(())
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "whispercms", version, about = "WhisperCMS command-line tool")]
 pub struct Cli {
@@ -420,61 +477,4 @@ impl StartProcess<ServerStarted> {
     async fn is_running(&self) -> Result<()> {
         Ok(futures::future::pending::<()>().await)
     }
-}
-
-#[tracing::instrument(skip_all)]
-async fn do_start(start: StartCmd) -> Result<()> {
-    // parse settings file -> does the settings file exist?  If yes, parse it
-    let then = Utc::now();
-    let process = StartProcess::<CommandIssued>::parse_settings_file(start)?;
-    info!(
-        "Settings parsed in {} milliseconds",
-        Utc::now().timestamp_millis() - then.timestamp_millis()
-    );
-
-    // inject dependencies -> adapt, serve, and domain have dependencies so inject
-    let then = Utc::now();
-    let process = process.inject_dependencies()?;
-    info!(
-        "Dependencies injected in {} milliseconds",
-        Utc::now().timestamp_millis() - then.timestamp_millis()
-    );
-
-    // scan for content -> does the content directory exist?  If yes, scan it
-    let then = Utc::now();
-    let process = process.scan_content_directory().await?;
-    info!(
-        "Content scanned in {} milliseconds",
-        Utc::now().timestamp_millis() - then.timestamp_millis()
-    );
-
-    // scan for extensions -> does the extensions directory exist?  If yes, scan it
-    let then = Utc::now();
-    let process = process.scan_extensions_directory()?;
-    info!(
-        "Extensions scanned in {} milliseconds",
-        Utc::now().timestamp_millis() - then.timestamp_millis()
-    );
-
-    // register routes and middleware in Axum
-    let then = Utc::now();
-    let process = process.register_routes_and_middleware().await?;
-    info!(
-        "Routes registered in {} milliseconds",
-        Utc::now().timestamp_millis() - then.timestamp_millis()
-    );
-
-    // start servers (Axum web server/Pingora edge controller)
-    let then = Utc::now();
-    let process = process.start_servers().await?;
-    info!(
-        "Servers started in {} milliseconds",
-        Utc::now().timestamp_millis() - then.timestamp_millis()
-    );
-
-    while let Ok(()) = process.is_running().await {
-        info!("Restarting the server");
-    }
-
-    Ok(())
 }

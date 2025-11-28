@@ -217,6 +217,7 @@ pub fn build_request_context(
         .content_meta(resolved.front_matter)
         .theme_config(Json::Object(JsonMap::new()))
         .plugin_configs(HashMap::new())
+        .content_body_opt(resolved.body)
         .build()
 }
 

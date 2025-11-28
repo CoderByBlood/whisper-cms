@@ -16,6 +16,7 @@
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use futures::StreamExt;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
@@ -71,12 +72,56 @@ impl StreamHandle {
     /// Materialize this handle as a byte stream using the injected resolver.
     ///
     /// Panics if no resolver was injected (by design: should be wired at startup).
+    pub fn get_bytes(&self) -> io::Result<Bytes> {
+        let handle = self.clone();
+        let join = std::thread::spawn(move || -> io::Result<Bytes> {
+            // Build a fresh current-thread runtime on this new thread.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+            rt.block_on(async move {
+                // Adjust this to *your* StreamHandle API.
+                // I'm assuming something like: `into_stream() -> impl Stream<Item = io::Result<Bytes>>`.
+                let mut stream = handle.open_bytes(); // <-- adapt this line
+
+                let mut buf = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?; // io::Result<Bytes>
+                    buf.extend_from_slice(&chunk);
+                }
+
+                Ok(Bytes::from(buf))
+            })
+        });
+
+        // Map thread panic into an io::Error
+        match join.join() {
+            Ok(res) => res,
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "get_bytes thread panicked",
+            )),
+        }
+    }
+
+    /// Materialize this handle as a UTF-8 text stream using the injected resolver.
+    ///
+    /// Panics if no resolver was injected (by design: should be wired at startup).
+    pub fn get_utf8(&self) -> io::Result<String> {
+        Ok(String::from_utf8_lossy(&self.get_bytes()?).to_string())
+    }
+
+    /// Materialize this handle as a byte stream using the injected resolver.
+    ///
+    /// Panics if no resolver was injected (by design: should be wired at startup).
     pub fn open_bytes(&self) -> BytesStream {
         let guard = OPEN_BYTES_FROM_HANDLE_FN
             .read()
             .expect("OPEN_BYTES_FROM_HANDLE_FN RwLock poisoned");
         let f = guard
-            .expect("open_bytes_from_handle_fn not injected; call inject_open_bytes_from_handle_fn at startup");
+                .expect("open_bytes_from_handle_fn not injected; call inject_open_bytes_from_handle_fn at startup");
         f(self)
     }
 
@@ -88,7 +133,7 @@ impl StreamHandle {
             .read()
             .expect("OPEN_UTF8_FROM_HANDLE_FN RwLock poisoned");
         let f = guard
-            .expect("open_utf8_from_handle_fn not injected; call inject_open_utf8_from_handle_fn at startup");
+                .expect("open_utf8_from_handle_fn not injected; call inject_open_utf8_from_handle_fn at startup");
         f(self)
     }
 

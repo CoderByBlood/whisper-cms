@@ -154,6 +154,19 @@ fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValu
     content_obj.insert("model".to_string(), Json::Object(JsonMap::new()));
     content_obj.insert("meta".to_string(), ctx.content_meta.clone());
 
+    match ctx.content_body.clone() {
+        Some(body) => {
+            content_obj.insert(
+                "body".to_string(),
+                body.get_utf8()
+                    .map_or_else(|_| Json::Null, |b| Json::String(b)),
+            );
+        }
+        None => {
+            content_obj.insert("body".to_string(), Json::Null);
+        }
+    }
+
     let recs = &ctx.recommendations;
     let mut recs_obj = JsonMap::new();
 
