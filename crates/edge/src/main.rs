@@ -4,7 +4,6 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 pub mod cli;
-pub mod cmd;
 pub mod db;
 pub mod fs;
 pub mod proxy;

@@ -3,7 +3,6 @@
 use crate::db::resolver::{lookup_body_handle, lookup_fm_by_served, lookup_fm_by_slug};
 use crate::fs::index::inject_stream_handlers;
 use crate::{
-    cmd::{Commands, StartCmd},
     fs::{
         ext::{self, DiscoveredPlugin, DiscoveredTheme, ThemeBinding},
         filter::{self, DEFAULT_CONTENT_EXTS},
@@ -15,7 +14,7 @@ use crate::{
 use adapt::runtime::bootstrap::bootstrap_all;
 use axum::Router;
 use chrono::Utc;
-use clap::Parser;
+use clap::{builder::ValueHint, Parser, Subcommand};
 use domain::{
     doc::Document,
     setting::{ContentSettings, ExtensionSettings, Settings},
@@ -23,20 +22,13 @@ use domain::{
 use serve::indexer::scan_and_process_docs;
 use serve::resolver::set_resolver_deps;
 use serve::{indexer::FolderScanConfig, render::http::RequestContext};
-use std::{marker::PhantomData, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
 use tracing::{debug, error, info};
 
 pub type Result<T> = std::result::Result<T, EdgeError>;
 
 /// WhisperCMS CLI — Edge Layer
-#[derive(Parser, Debug)]
-#[command(name = "whispercms", version, about = "WhisperCMS command-line tool")]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Commands,
-}
-
 #[tokio::main(flavor = "multi_thread")]
 #[tracing::instrument(skip_all)]
 pub async fn start() -> ExitCode {
@@ -66,26 +58,107 @@ pub async fn start() -> ExitCode {
         .await
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "whispercms", version, about = "WhisperCMS command-line tool")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+/// Unified request passed into Tower pipeline
+pub struct CliReq {
+    pub cmd: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Start WhisperCMS using the specified directory
+    Start(StartCmd),
+}
+
+#[derive(Parser, Debug)]
+pub struct StartCmd {
+    /// Target directory (or set WHISPERCMS_DIR)
+    ///
+    /// Must exist, be a directory, and be readable & writable.
+    #[arg(
+        value_name = "DIR",
+        env = "WHISPERCMS_DIR",
+        required = true,
+        value_hint = ValueHint::DirPath,
+        value_parser = dir_must_exist
+    )]
+    pub dir: PathBuf,
+}
+
+fn dir_must_exist(s: &str) -> std::result::Result<PathBuf, String> {
+    let p = PathBuf::from(s);
+    if !p.exists() {
+        return Err(format!("Not found: {}", p.display()));
+    }
+    if !p.is_dir() {
+        return Err(format!("Not a directory: {}", p.display()));
+    }
+    Ok(p)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Start process state machine
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct CommandIssued;
-struct SettingsLoaded;
-struct ContentLoaded;
-struct ExtensionsLoaded;
-struct RouterCreated;
-struct ServerStarted;
+trait ProcessState {}
 
-struct StartProcess<State> {
+struct CommandIssued;
+
+struct SettingsLoaded {
     command: StartCmd,
     settings: Settings,
-    content_settings: Option<ContentSettings>,
-    documents: Option<Vec<Document>>,
-    extensions: Option<(Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>)>,
-    router: Option<Router>,
-    runtime: Option<EdgeRuntime>,
-    _state: PhantomData<State>,
+    content_settings: ContentSettings,
+}
+
+struct ContentLoaded {
+    command: StartCmd,
+    settings: Settings,
+    content_settings: ContentSettings,
+    documents: Vec<Document>,
+}
+
+struct ExtensionsLoaded {
+    command: StartCmd,
+    settings: Settings,
+    content_settings: ContentSettings,
+    documents: Vec<Document>,
+    extensions: (Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>),
+}
+
+struct RouterCreated {
+    command: StartCmd,
+    settings: Settings,
+    content_settings: ContentSettings,
+    documents: Vec<Document>,
+    extensions: (Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>),
+    router: Router,
+}
+
+struct ServerStarted {
+    _command: StartCmd,
+    _settings: Settings,
+    _content_settings: ContentSettings,
+    _documents: Vec<Document>,
+    _extensions: (Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>),
+    _router: Router,
+    _runtime: EdgeRuntime,
+}
+
+impl ProcessState for CommandIssued {}
+impl ProcessState for SettingsLoaded {}
+impl ProcessState for ContentLoaded {}
+impl ProcessState for ExtensionsLoaded {}
+impl ProcessState for RouterCreated {}
+impl ProcessState for ServerStarted {}
+
+struct StartProcess<S: ProcessState> {
+    state: S,
 }
 
 impl StartProcess<CommandIssued> {
@@ -129,31 +202,7 @@ impl StartProcess<CommandIssued> {
             ))
         })?;
 
-        Ok(StartProcess::<SettingsLoaded>::new(command, settings))
-    }
-}
-
-impl StartProcess<SettingsLoaded> {
-    fn new(command: StartCmd, settings: Settings) -> Self {
-        Self {
-            command,
-            settings,
-            content_settings: None,
-            documents: None,
-            extensions: None,
-            router: None,
-            runtime: None,
-            _state: PhantomData,
-        }
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn inject_dependencies(self) -> Result<Self> {
-        // Wire up the core resolver's storage backends (front matter + body).
-        set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
-
-        let dir = self.command.dir.clone();
-        let content_settings = match self.settings.content.clone() {
+        let content_settings = match settings.content.clone() {
             Some(settings) => settings,
             None => ContentSettings {
                 dir: PathBuf::from("./content/"),
@@ -162,12 +211,38 @@ impl StartProcess<SettingsLoaded> {
             },
         };
 
-        let index_dir = match content_settings.index_dir.clone() {
+        Ok(StartProcess::<SettingsLoaded>::new(
+            command,
+            settings,
+            content_settings,
+        ))
+    }
+}
+
+impl StartProcess<SettingsLoaded> {
+    fn new(command: StartCmd, settings: Settings, content_settings: ContentSettings) -> Self {
+        Self {
+            state: SettingsLoaded {
+                command,
+                settings,
+                content_settings,
+            },
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn inject_dependencies(self) -> Result<Self> {
+        // Wire up the core resolver's storage backends (front matter + body).
+        set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
+
+        let dir = self.state.command.dir.clone();
+
+        let index_dir = match self.state.content_settings.index_dir.clone() {
             Some(d) => dir.join(d),
             None => dir.join("./content_index/"),
         };
 
-        let root = dir.join(&content_settings.dir);
+        let root = dir.join(&self.state.content_settings.dir);
         // NEW: tell the index layer what the content root is
         set_content_root(root.clone());
 
@@ -182,26 +257,14 @@ impl StartProcess<SettingsLoaded> {
         set_fm_index_dir(index_dir.clone());
         inject_stream_handlers();
 
-        Ok(Self {
-            command: self.command,
-            settings: self.settings,
-            documents: None,
-            content_settings: Some(content_settings),
-            extensions: self.extensions,
-            router: self.router,
-            runtime: self.runtime,
-            _state: PhantomData,
-        })
+        Ok(self)
     }
 
     #[tracing::instrument(skip_all)]
     async fn scan_content_directory(self) -> Result<StartProcess<ContentLoaded>> {
-        let dir = self.command.dir.clone();
+        let dir = self.state.command.dir.clone();
         let mut cfg = FolderScanConfig::default();
-        let content_settings = self
-            .content_settings
-            .as_ref()
-            .expect("Constraint Violated - scanning directory without content settings");
+        let content_settings = self.state.content_settings.clone();
 
         cfg.file_re = Some(filter::build_filename_regex(
             match content_settings.extensions.len() {
@@ -235,14 +298,12 @@ impl StartProcess<SettingsLoaded> {
     #[tracing::instrument(skip_all)]
     fn done(self, docs: Vec<Document>) -> StartProcess<ContentLoaded> {
         StartProcess {
-            command: self.command,
-            settings: self.settings,
-            documents: Some(docs),
-            content_settings: self.content_settings,
-            extensions: self.extensions,
-            router: self.router,
-            runtime: self.runtime,
-            _state: PhantomData,
+            state: ContentLoaded {
+                command: self.state.command,
+                settings: self.state.settings,
+                content_settings: self.state.content_settings,
+                documents: docs,
+            },
         }
     }
 }
@@ -250,8 +311,8 @@ impl StartProcess<SettingsLoaded> {
 impl StartProcess<ContentLoaded> {
     #[tracing::instrument(skip_all)]
     fn scan_extensions_directory(self) -> Result<StartProcess<ExtensionsLoaded>> {
-        let dir = self.command.dir.clone();
-        let ext_settings = match &self.settings.ext {
+        let dir = self.state.command.dir.clone();
+        let ext_settings = match &self.state.settings.ext {
             Some(ext) => ext,
             None => &ExtensionSettings {
                 dir: PathBuf::from("./extensions/"),
@@ -273,14 +334,13 @@ impl StartProcess<ContentLoaded> {
         themes: Vec<DiscoveredTheme>,
     ) -> StartProcess<ExtensionsLoaded> {
         StartProcess {
-            command: self.command,
-            settings: self.settings,
-            documents: self.documents,
-            content_settings: self.content_settings,
-            extensions: Some((plugins, themes)),
-            router: self.router,
-            runtime: self.runtime,
-            _state: PhantomData,
+            state: ExtensionsLoaded {
+                command: self.state.command,
+                settings: self.state.settings,
+                content_settings: self.state.content_settings,
+                documents: self.state.documents,
+                extensions: (plugins, themes),
+            },
         }
     }
 }
@@ -288,7 +348,7 @@ impl StartProcess<ContentLoaded> {
 impl StartProcess<ExtensionsLoaded> {
     #[tracing::instrument(skip_all)]
     async fn register_routes_and_middleware(self) -> Result<StartProcess<RouterCreated>> {
-        let (plugins, themes) = self.extensions.as_ref().unwrap();
+        let (plugins, themes) = self.state.extensions.clone();
         let plugin_cfgs = plugins.iter().map(|p| (&p.spec).into()).collect();
         let theme_cfgs = themes.iter().map(|t| (&t.spec).into()).collect();
 
@@ -317,39 +377,40 @@ impl StartProcess<ExtensionsLoaded> {
     #[tracing::instrument(skip_all)]
     fn done(self, router: Router) -> StartProcess<RouterCreated> {
         StartProcess {
-            command: self.command,
-            settings: self.settings,
-            documents: self.documents,
-            content_settings: self.content_settings,
-            extensions: self.extensions,
-            router: Some(router),
-            runtime: self.runtime,
-            _state: PhantomData,
+            state: RouterCreated {
+                command: self.state.command,
+                settings: self.state.settings,
+                content_settings: self.state.content_settings,
+                documents: self.state.documents,
+                extensions: self.state.extensions,
+                router,
+            },
         }
     }
 }
 
 impl StartProcess<RouterCreated> {
     #[tracing::instrument(skip_all)]
-    async fn start_servers(mut self) -> Result<StartProcess<ServerStarted>> {
-        let router = self.router.take().unwrap();
-        let settings = self.settings.clone();
+    async fn start_servers(self) -> Result<StartProcess<ServerStarted>> {
+        let router = self.state.router.clone();
+        let settings = self.state.settings.clone();
         let make_router = move || router;
 
         Ok(self.done(EdgeRuntime::start(settings, make_router).await?))
     }
 
     #[tracing::instrument(skip_all)]
-    fn done(self, rt: EdgeRuntime) -> StartProcess<ServerStarted> {
+    fn done(self, runtime: EdgeRuntime) -> StartProcess<ServerStarted> {
         StartProcess {
-            command: self.command,
-            settings: self.settings,
-            documents: self.documents,
-            content_settings: self.content_settings,
-            extensions: self.extensions,
-            router: self.router,
-            runtime: Some(rt),
-            _state: PhantomData,
+            state: ServerStarted {
+                _command: self.state.command,
+                _settings: self.state.settings,
+                _content_settings: self.state.content_settings,
+                _documents: self.state.documents,
+                _extensions: self.state.extensions,
+                _router: self.state.router,
+                _runtime: runtime,
+            },
         }
     }
 }
