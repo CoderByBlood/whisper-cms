@@ -123,13 +123,26 @@ pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, Resolver
     // -------------------------------------------
     let slug = path.strip_prefix('/').unwrap_or(path.as_str());
     if let Some(fm) = lookup_slug(slug)? {
-        if let Some(h) = lookup_body(slug)? {
+        // Try to find a served-path for the body.
+
+        // 1) Prefer an explicit served_path in front matter, if present.
+        let body_handle: Option<StreamHandle> = fm
+            .get("id") // <-- adjust this key name if needed
+            .and_then(|v| v.as_str())
+            .and_then(|served| lookup_body(served).ok())
+            .flatten();
+
+        // Only short-circuit here if we got a body as well as front matter.
+        if let Some(h) = body_handle {
             return Ok(ResolvedContent {
                 content_kind: infer_kind_from_ext(&path),
                 front_matter: fm,
                 body: Some(h),
             });
         }
+
+        // If we found FM but not body, we *deliberately* fall through to the served-path
+        // resolution steps below, which might still find a body by path.
     }
 
     // ------------------------------------------------------------
