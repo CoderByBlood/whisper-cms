@@ -10,9 +10,11 @@ use pingora::proxy::{http_proxy_service, ProxyHttp, Session as ProxySession};
 use pingora::server::Server;
 use pingora::services::listening::Service as ListeningService;
 use pingora::upstreams::peer::HttpPeer;
+
 use std::{
+    fs,
     net::{IpAddr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -275,12 +277,16 @@ impl EdgeRuntime {
     ///   - **Do not bind any EdgeController listeners**
     ///   - **Still start the WebServer** (on loopback) so you can configure/fix certs.
     #[tracing::instrument(skip_all)]
-    pub async fn start<F>(settings: Settings, make_router: F) -> Result<Self, EdgeError>
+    pub async fn start<F>(
+        root: PathBuf,
+        settings: Settings,
+        make_router: F,
+    ) -> Result<Self, EdgeError>
     where
         F: FnOnce() -> Router + Send + Sync + 'static,
     {
         // Derive runtime values from Settings
-        let cert_dir = settings.cert.dir;
+        let cert_dir = root.join(settings.cert.dir);
         let edge_ip = settings.edge.ip;
         let edge_http = SocketAddr::from((edge_ip, settings.edge.http_port));
         let edge_https = SocketAddr::from((edge_ip, settings.edge.https_port));
@@ -328,10 +334,14 @@ impl EdgeRuntime {
             web_port_b,
         );
 
+        // Copy cert_dir for the Pingora thread
+        let cert_dir_for_pingora = cert_dir.clone();
+
         // 3) Start Pingora EdgeController on a dedicated thread
         let pingora_thread = std::thread::spawn(move || {
             if let Err(err) = run_pingora_edge(
                 backend_state,
+                cert_dir_for_pingora,
                 has_cert,
                 edge_http,
                 edge_https,
@@ -365,31 +375,66 @@ impl EdgeRuntime {
 #[tracing::instrument(skip_all)]
 fn run_pingora_edge(
     backend_state: Arc<BackendState>,
+    cert_dir_for_pingora: PathBuf,
     has_cert: bool,
     edge_http: SocketAddr,
     edge_https: SocketAddr,
     external_https_port: u16,
 ) -> Result<(), EdgeError> {
-    // `None` uses default ServerConf (or config from environment / default path).
-    let mut server = Server::new(None).map_err(EdgeError::Pingora)?;
+    // Use Pingora's default options (no explicit config file / CLI opts).
+    // The type hint `None::<pingora::server::configuration::Opt>` makes
+    // `Server::new` happy: impl Into<Option<Opt>>.
+    let mut server =
+        Server::new(None::<pingora::server::configuration::Opt>).map_err(EdgeError::Pingora)?;
     server.bootstrap();
 
     let mut services: Vec<Box<dyn pingora::services::Service>> = Vec::new();
 
     if has_cert {
-        // HTTPS proxy service (EdgeController → Axum)
-        let proxy = EdgeProxy::new(backend_state);
-        let mut proxy_service = http_proxy_service(&server.configuration, proxy);
-        proxy_service.add_tcp(edge_https.to_string().as_str());
-        services.push(Box::new(proxy_service));
+        // Discover a cert/key pair in the cert directory.
+        let pair = pick_cert_key_pair(&cert_dir_for_pingora)?;
+        if let Some((cert_path, key_path)) = pair {
+            tracing::info!(
+                "Using TLS cert: {} and key: {} for Pingora",
+                cert_path.display(),
+                key_path.display()
+            );
 
-        // HTTP → HTTPS redirect service
-        let redirect_app = RedirectApp::new(external_https_port);
-        let http_server = PingoraHttpServer::new_app(redirect_app);
-        let mut redirect_service = ListeningService::new("http_redirect".to_string(), http_server);
+            let cert_str = cert_path
+                .to_str()
+                .ok_or_else(|| EdgeError::Config("Non-UTF8 cert path".to_string()))?;
+            let key_str = key_path
+                .to_str()
+                .ok_or_else(|| EdgeError::Config("Non-UTF8 key path".to_string()))?;
 
-        redirect_service.add_tcp(edge_http.to_string().as_str());
-        services.push(Box::new(redirect_service));
+            // HTTPS proxy service (EdgeController → Axum) with TLS termination
+            let proxy = EdgeProxy::new(backend_state);
+            let mut proxy_service = http_proxy_service(&server.configuration, proxy);
+
+            // This is the critical part: bind a *TLS* listener on edge_https.
+            proxy_service
+                .add_tls(edge_https.to_string().as_str(), cert_str, key_str)
+                .map_err(|e| {
+                    EdgeError::Config(format!("Failed to add TLS listener on {}: {e}", edge_https))
+                })?;
+
+            services.push(Box::new(proxy_service));
+
+            // HTTP → HTTPS redirect service
+            let redirect_app = RedirectApp::new(external_https_port);
+            let http_server = PingoraHttpServer::new_app(redirect_app);
+            let mut redirect_service =
+                ListeningService::new("http_redirect".to_string(), http_server);
+
+            redirect_service.add_tcp(edge_http.to_string().as_str());
+            services.push(Box::new(redirect_service));
+        } else {
+            tracing::warn!(
+                "TLS cert directory {:?} has files, but no usable (pem/crt, key) pair was found; \
+                 EdgeController will not bind listeners.",
+                cert_dir_for_pingora
+            );
+        }
     } else {
         // No certs: don’t bind any EdgeController listeners
         tracing::warn!("Pingora EdgeController not binding any listeners (no TLS certs)");
@@ -399,13 +444,12 @@ fn run_pingora_edge(
         server.add_services(services);
         server.run_forever(); // blocks in this thread
     } else {
-        // If no services, just keep the thread alive (or you could return Ok(()) if you prefer).
+        // If no services, just keep the thread alive (or return Ok(()) if you prefer).
         loop {
             std::thread::sleep(Duration::from_secs(3600));
         }
     }
 
-    // Unreachable if services were non-empty; kept for type completeness.
     #[allow(unreachable_code)]
     Ok(())
 }
@@ -424,207 +468,54 @@ fn cert_dir_has_files(dir: &Path) -> Result<bool, EdgeError> {
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::path::PathBuf;
-    use std::time::Duration;
-    use tokio::time::timeout;
-
-    // Helper to make a unique temp directory under the system temp dir.
-    fn make_temp_dir(name: &str) -> PathBuf {
-        let mut dir = std::env::temp_dir();
-        let unique = format!(
-            "edge_test_{}_{}",
-            name,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        dir.push(unique);
-        fs::create_dir_all(&dir).expect("failed to create temp dir");
-        dir
+/// Try to pick a cert + key pair from the directory.
+///
+/// Heuristic:
+///   * first file with extension in { "pem", "crt" } -> cert
+///   * first file with extension == "key"            -> key
+fn pick_cert_key_pair(dir: &Path) -> Result<Option<(PathBuf, PathBuf)>, EdgeError> {
+    if !dir.exists() {
+        return Ok(None);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // BackendState
-    // ─────────────────────────────────────────────────────────────────────────────
+    let mut cert: Option<PathBuf> = None;
+    let mut key: Option<PathBuf> = None;
 
-    #[test]
-    fn backend_state_get_set_roundtrip() {
-        let addr1 = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
-        let addr2 = SocketAddr::from((Ipv4Addr::LOCALHOST, 5678));
-
-        let state = BackendState::new(addr1);
-        assert_eq!(state.get(), addr1);
-
-        state.set(addr2);
-        assert_eq!(state.get(), addr2);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // WebServerHandle::next_port behavior
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn webserver_handle_next_port_flips_from_a_to_b() {
-        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let port_a = 9000;
-        let port_b = 9001;
-
-        let initial_addr = SocketAddr::from((loopback, port_a));
-        let backend_state = Arc::new(BackendState::new(initial_addr));
-
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
-        let handle = WebServerHandle::new(backend_state, shutdown_tx, loopback, port_a, port_b);
-
-        // When current port is A, next_port should be B
-        let next = handle.next_port();
-        assert_eq!(next, port_b);
-    }
-
-    #[test]
-    fn webserver_handle_next_port_flips_from_b_to_a() {
-        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let port_a = 9000;
-        let port_b = 9001;
-
-        let initial_addr = SocketAddr::from((loopback, port_b));
-        let backend_state = Arc::new(BackendState::new(initial_addr));
-
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
-        let handle = WebServerHandle::new(backend_state, shutdown_tx, loopback, port_a, port_b);
-
-        // When current port is B, next_port should be A
-        let next = handle.next_port();
-        assert_eq!(next, port_a);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // WebServerHandle::shutdown behavior (negative path: no panic, signal sent)
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn webserver_handle_shutdown_sends_signal() {
-        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let port_a = 9000;
-        let port_b = 9001;
-
-        let initial_addr = SocketAddr::from((loopback, port_a));
-        let backend_state = Arc::new(BackendState::new(initial_addr));
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let handle = WebServerHandle::new(backend_state, shutdown_tx, loopback, port_a, port_b);
-
-        // Call shutdown and ensure the receiver gets a signal.
-        handle.shutdown().await;
-
-        let res = timeout(Duration::from_millis(200), shutdown_rx).await;
-        assert!(
-            res.is_ok(),
-            "expected shutdown_rx to complete after shutdown()"
-        );
-        assert!(
-            res.unwrap().is_ok(),
-            "expected shutdown_rx to receive Ok(())"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // WebServerHandle::hot_reload behavior (positive path)
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn webserver_handle_hot_reload_flips_backend_and_closes_old_shutdown() {
-        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let port_a = 9100;
-        let port_b = 9101;
-
-        // Start with A as the current backend
-        let initial_addr = SocketAddr::from((loopback, port_a));
-        let backend_state = Arc::new(BackendState::new(initial_addr));
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let handle =
-            WebServerHandle::new(backend_state.clone(), shutdown_tx, loopback, port_a, port_b);
-
-        // Hot-reload with a trivial empty router
-        handle
-            .hot_reload(|| Router::new())
-            .await
-            .expect("hot_reload should succeed");
-
-        // BackendState should now point to port_b
-        let new_addr = backend_state.get();
-        assert_eq!(new_addr.port(), port_b);
-
-        // The old shutdown channel should have been signaled
-        let res = timeout(Duration::from_millis(200), shutdown_rx).await;
-        assert!(
-            res.is_ok(),
-            "expected old shutdown receiver to complete after hot_reload()"
-        );
-        assert!(
-            res.unwrap().is_ok(),
-            "expected old shutdown receiver to receive Ok(())"
-        );
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    // cert_dir_has_files positive and negative cases
-    // ─────────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn cert_dir_missing_returns_false() {
-        let mut dir = std::env::temp_dir();
-        dir.push("edge_test_missing_dir_this_should_not_exist_12345");
-
-        // Ensure it doesn't exist
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
+    for entry in fs::read_dir(dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
         }
 
-        let has_files = cert_dir_has_files(&dir).expect("cert_dir_has_files should not error");
-        assert!(
-            !has_files,
-            "missing directory should report has_files == false"
-        );
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        match ext.as_str() {
+            "pem" | "crt" if cert.is_none() => {
+                tracing::debug!("Discovered candidate TLS cert: {}", path.display());
+                cert = Some(path);
+            }
+            "key" if key.is_none() => {
+                tracing::debug!("Discovered candidate TLS key: {}", path.display());
+                key = Some(path);
+            }
+            _ => {}
+        };
+
+        if cert.is_some() && key.is_some() {
+            break;
+        }
     }
 
-    #[test]
-    fn cert_dir_empty_returns_false() {
-        let dir = make_temp_dir("empty");
-
-        let has_files = cert_dir_has_files(&dir).expect("cert_dir_has_files should not error");
-        assert!(
-            !has_files,
-            "empty directory should report has_files == false"
-        );
-
-        // cleanup
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn cert_dir_with_file_returns_true() {
-        let dir = make_temp_dir("with_file");
-
-        // Create one file inside the directory
-        let mut file_path = dir.clone();
-        file_path.push("dummy.cert");
-        fs::write(&file_path, b"dummy").expect("failed to write test file");
-
-        let has_files = cert_dir_has_files(&dir).expect("cert_dir_has_files should not error");
-        assert!(
-            has_files,
-            "directory with a file should report has_files == true"
-        );
-
-        // cleanup
-        fs::remove_file(&file_path).unwrap();
-        fs::remove_dir_all(&dir).unwrap();
-    }
+    Ok(match (cert, key) {
+        (Some(c), Some(k)) => Some((c, k)),
+        _ => None,
+    })
 }

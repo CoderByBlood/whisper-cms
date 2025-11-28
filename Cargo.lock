@@ -1447,6 +1447,7 @@ dependencies = [
  "orgize",
  "parking_lot 0.12.5",
  "pingora",
+ "pingora-openssl",
  "rayon",
  "regex",
  "rst_parser",

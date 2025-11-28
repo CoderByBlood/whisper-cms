@@ -451,9 +451,10 @@ impl StartProcess<RouterCreated> {
     async fn start_servers(self) -> Result<StartProcess<ServerStarted>> {
         let router = self.state.router.clone();
         let settings = self.state.settings.clone();
+        let root = self.state.command.dir.clone();
         let make_router = move || router;
 
-        Ok(self.done(EdgeRuntime::start(settings, make_router).await?))
+        Ok(self.done(EdgeRuntime::start(root, settings, make_router).await?))
     }
 
     #[tracing::instrument(skip_all)]

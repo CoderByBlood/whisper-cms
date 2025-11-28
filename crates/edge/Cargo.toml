@@ -39,6 +39,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 smallvec = { workspace = true }
 tokio-util = { workspace = true }
+pingora-openssl = { workspace = true }
 
 domain = { path = "../domain" }
 adapt = { path = "../adapt" }
