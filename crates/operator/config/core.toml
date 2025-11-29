@@ -1,8 +1,0 @@
-[site]
-name = "My WhisperCMS"
-base_url = "https://example.com/"
-timezone = "UTC"
-
-[database]
-ops_url = "sqlite://data/ops.db"
-content_url = "sqlite://data/ops.db"

@@ -1,0 +1,34 @@
+[package]
+name = "serve"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = { workspace = true }
+thiserror = { workspace = true }
+gray_matter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+handlebars = { workspace = true }
+json-patch = { workspace = true }
+lol_html = { workspace = true }
+http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+comrak = { workspace = true }
+asciidocr = { workspace = true }
+rst_parser = { workspace = true }
+rst_renderer = { workspace = true }
+orgize = { workspace = true }
+minijinja = { workspace = true }
+tera = { workspace = true }
+handlebars_misc_helpers = { workspace = true }
+
+domain = { path = "../domain" }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,36 @@
+[package]
+name = "adapt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+gray_matter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+regex = { workspace = true }
+tower = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+handlebars = { workspace = true }
+json-patch = { workspace = true }
+lol_html = { workspace = true }
+boa_engine = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+form_urlencoded = { workspace = true }
+indexed_json = { workspace = true }
+chrono = { workspace = true }
+smallvec = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+tracing = {workspace = true }
+
+domain = { path = "../domain" }
+serve = { path = "../serve" }
+
+[dev-dependencies]
