@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         .with(fmt::layer().with_file(true).with_line_number(true))
         .init();
 
-    info!("logging setup");
+    info!("logging setup complete");
     info!("engaging clap to parse commandline");
     cli::start()
 }
