@@ -1,105 +1,183 @@
 // crates/adapt/src/http/plugin.rs
 
-use super::error::HttpError;
-use axum::body::Body;
-use http::{self, Request, Uri};
+//! PluginMiddleware
+//!
+//! Actix-web middleware that:
+//!   - Reads `RequestContext` from request extensions (if present).
+//!   - Calls `before_plugin` for each plugin in forward order,
+//!     threading the updated `RequestContext` through each call.
+//!   - Inserts the final `RequestContext` back into the request extensions.
+//!   - Delegates to the inner service.
+//!   - After the response, calls `after_plugin` in *reverse* order,
+//!     again threading the updated `RequestContext`.
+//!
+//! No `unsafe` is used. The inner service is wrapped in `Rc<RefCell<_>>`
+//! so it can be moved into the async future while still satisfying
+//! Actix's `Service` trait requirements.
+
+use std::{
+    cell::RefCell,
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+    task::{Context, Poll},
+};
+
+use actix_web::{
+    dev::{Service, ServiceRequest, ServiceResponse, Transform},
+    Error, HttpMessage,
+};
+
 use serve::render::http::RequestContext;
-use serve::resolver::{self, build_request_context};
-use std::collections::HashMap;
-use std::task::{Context, Poll};
-use tower::Service;
 
-/// PluginMiddleware is responsible for:
-/// - Resolving content for the incoming request (path → ContentKind, body handle, front matter)
-/// - Building a RequestContext
-/// - Inserting it into request.extensions()
-///
-/// In later phases, it will also:
-/// - Invoke JS plugin before/after hooks to populate recommendations.
-/// For this phase, it only does the context setup.
-///
-/// Note: we keep the `R` type parameter for compatibility with higher-level
-/// wiring (e.g., PluginLayer), but the resolver itself is now the global
-/// `serve::resolver::resolve` function; `R` is not used at runtime.
-pub struct PluginMiddleware<S, R>
-where
-    S: Service<Request<Body>>,
-{
-    inner: S,
-    // Kept for compatibility / type-level wiring; not used at runtime
-    _resolver: R,
+use crate::runtime::PluginRuntimeClient;
+
+/// Actix middleware factory: holds shared plugin runtime + ordered plugin IDs.
+#[derive(Clone)]
+pub struct PluginMiddleware {
+    plugin_client: PluginRuntimeClient,
+    plugin_ids: Vec<String>,
 }
 
-impl<S, R> PluginMiddleware<S, R>
-where
-    S: Service<Request<Body>>,
-{
-    pub fn new(inner: S, resolver: R) -> Self {
+impl PluginMiddleware {
+    /// Create a new PluginMiddleware with a plugin runtime client and an
+    /// ordered list of plugin IDs.
+    pub fn new(plugin_client: PluginRuntimeClient, plugin_ids: Vec<String>) -> Self {
         Self {
-            inner,
-            _resolver: resolver,
+            plugin_client,
+            plugin_ids,
         }
     }
 }
 
-impl<S, R> Clone for PluginMiddleware<S, R>
+impl<S, B> Transform<S, ServiceRequest> for PluginMiddleware
 where
-    S: Service<Request<Body>> + Clone,
-    R: Clone,
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    B: 'static,
 {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            _resolver: self._resolver.clone(),
-        }
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    type InitError = ();
+    type Transform = PluginMiddlewareService<S>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Transform, Self::InitError>>>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        let plugin_client = self.plugin_client.clone();
+        let plugin_ids = self.plugin_ids.clone();
+
+        Box::pin(async move {
+            Ok(PluginMiddlewareService {
+                inner: Rc::new(RefCell::new(service)),
+                plugin_client,
+                plugin_ids,
+            })
+        })
     }
 }
 
-impl<S, R> Service<Request<Body>> for PluginMiddleware<S, R>
-where
-    S: Service<Request<Body>, Response = axum::response::Response, Error = HttpError>
-        + Send
-        + 'static,
-    S::Future: Send + 'static,
-    R: Clone + Send + Sync + 'static,
-{
-    type Response = axum::response::Response;
-    type Error = HttpError;
-    type Future = S::Future;
+/// Middleware service: actually processes requests/responses.
+pub struct PluginMiddlewareService<S> {
+    inner: Rc<RefCell<S>>,
+    plugin_client: PluginRuntimeClient,
+    plugin_ids: Vec<String>,
+}
 
-    #[tracing::instrument(skip_all)]
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx).map_err(|e| e)
+impl<S, B> Service<ServiceRequest> for PluginMiddlewareService<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    B: 'static,
+{
+    type Response = ServiceResponse<B>;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.borrow_mut().poll_ready(cx)
     }
 
-    #[tracing::instrument(skip_all)]
-    fn call(&mut self, mut req: Request<Body>) -> Self::Future {
-        // Extract path & query params for initial RequestContext.
-        let uri: &Uri = req.uri();
-        let path = uri.path().to_string();
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let inner = Rc::clone(&self.inner);
+        let plugin_client = self.plugin_client.clone();
+        let plugin_ids = self.plugin_ids.clone();
 
-        let query_params: HashMap<String, String> = uri
-            .query()
-            .map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect())
-            .unwrap_or_else(HashMap::new);
+        // Grab any existing RequestContext from extensions.
+        let ctx_opt = {
+            let exts = req.extensions();
+            exts.get::<RequestContext>().cloned()
+        };
 
-        // Resolve content using the injected, type-erased resolver.
-        let resolved = resolver::resolve(&path, req.method())
-            .map_err(HttpError::from)
-            .expect("content resolver failed"); // In a real system, handle gracefully.
+        Box::pin(async move {
+            // If we don't have a RequestContext, just pass through.
+            let Some(mut ctx) = ctx_opt else {
+                return inner.borrow_mut().call(req).await;
+            };
 
-        // Build RequestContext and insert into extensions.
-        let ctx: RequestContext = build_request_context(
-            path,
-            req.method().clone(),
-            req.headers().clone(),
-            query_params,
-            resolved,
-        );
+            // ─────────────────────────────────────────────────────────────
+            // BEFORE: run plugins in forward order, threading ctx.
+            // NOTE: we clone() ctx to avoid moving it; the actor owns its
+            //       parameter and returns an updated RequestContext.
+            // ─────────────────────────────────────────────────────────────
+            for plugin_id in &plugin_ids {
+                match plugin_client
+                    .before_plugin(plugin_id.clone(), ctx.clone())
+                    .await
+                {
+                    Ok(new_ctx) => {
+                        ctx = new_ctx;
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "before_plugin(\"{plugin_id}\") failed: {err}; continuing request"
+                        );
+                        // Keep previous ctx and continue; you can short-circuit here instead.
+                    }
+                }
+            }
 
-        req.extensions_mut().insert::<RequestContext>(ctx);
+            // Store the updated ctx back into the request extensions so
+            // handlers and later middleware can see it.
+            {
+                let mut exts = req.extensions_mut();
+                exts.insert::<RequestContext>(ctx.clone());
+            }
 
-        // For this phase, do not invoke any plugin hooks yet.
-        self.inner.call(req)
+            // Call the inner service (theme handler, etc).
+            let resp = inner.borrow_mut().call(req).await?;
+
+            // ─────────────────────────────────────────────────────────────
+            // AFTER: run plugins in reverse order.
+            // We start from whatever RequestContext is now in the request
+            // extensions (so any handler updates are respected).
+            // ─────────────────────────────────────────────────────────────
+            let ctx_after_opt = {
+                let exts = resp.request().extensions();
+                exts.get::<RequestContext>().cloned()
+            };
+
+            let Some(mut ctx_after) = ctx_after_opt else {
+                return Ok(resp);
+            };
+
+            for plugin_id in plugin_ids.iter().rev() {
+                match plugin_client
+                    .after_plugin(plugin_id.clone(), ctx_after.clone())
+                    .await
+                {
+                    Ok(new_ctx) => {
+                        ctx_after = new_ctx;
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "after_plugin(\"{plugin_id}\") failed: {err}; continuing response"
+                        );
+                    }
+                }
+            }
+
+            // If you want to do something with ctx_after (e.g., logging),
+            // you can do it here. We don't try to mutate extensions again.
+
+            Ok(resp)
+        })
     }
 }

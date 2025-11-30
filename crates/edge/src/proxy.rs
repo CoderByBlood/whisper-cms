@@ -1,5 +1,9 @@
+// crates/edge/src/proxy.rs
+
+use actix_web::dev::{ServerHandle, ServiceFactory, ServiceRequest, ServiceResponse};
+use actix_web::{App, HttpServer};
+use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::RuntimeError;
-use axum::Router;
 use http::{Response, StatusCode};
 use parking_lot::RwLock;
 use pingora::apps::http_app::{HttpServer as PingoraHttpServer, ServeHttp};
@@ -19,12 +23,12 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
-use tokio::{net::TcpListener, sync::oneshot};
 
-// Adjust this import path to wherever your Settings type lives
 use domain::setting::Settings;
 
 use crate::db::tantivy::ContentIndexError;
+use crate::fs::ext::ThemeBinding;
+use crate::router::build_app_router;
 
 /// Shared state: which loopback port is currently "active" for the WebServer.
 ///
@@ -81,11 +85,11 @@ pub enum EdgeError {
     Other(String),
 }
 
-/// Handle for controlling the Axum WebServer (hot reload, shutdown).
+/// Handle for controlling the Actix WebServer (hot reload, shutdown).
 pub struct WebServerHandle {
     current_backend: Arc<BackendState>,
-    /// Shutdown signal for the *current* Axum server.
-    shutdown_tx: Arc<RwLock<Option<oneshot::Sender<()>>>>,
+    /// Handle for the *current* Actix HttpServer.
+    server_handle: Arc<RwLock<Option<ServerHandle>>>,
 
     loopback_ip: IpAddr,
     port_a: u16,
@@ -95,14 +99,14 @@ pub struct WebServerHandle {
 impl WebServerHandle {
     fn new(
         current_backend: Arc<BackendState>,
-        shutdown_tx: oneshot::Sender<()>,
+        server_handle: ServerHandle,
         loopback_ip: IpAddr,
         port_a: u16,
         port_b: u16,
     ) -> Self {
         Self {
             current_backend,
-            shutdown_tx: Arc::new(RwLock::new(Some(shutdown_tx))),
+            server_handle: Arc::new(RwLock::new(Some(server_handle))),
             loopback_ip,
             port_a,
             port_b,
@@ -119,32 +123,36 @@ impl WebServerHandle {
         }
     }
 
-    /// Start Axum on the "other" port, then atomically flip Pingora to it and
-    /// gracefully drain/shutdown the old side.
+    /// Start an Actix WebServer on the "other" port, then atomically flip
+    /// Pingora to it and gracefully stop the old one.
     ///
-    /// `make_router` is a closure that builds the Axum router (so you can change routes/config).
+    /// `make_app` is a closure that builds the Actix `App` (so you can change
+    /// routes/config). We make this generic over the inner `ServiceFactory`
+    /// type `T` to satisfy `HttpServer::new`.
     #[tracing::instrument(skip_all)]
-    pub async fn hot_reload<F>(&self, make_router: F) -> Result<(), EdgeError>
+    pub async fn hot_reload<F, T>(&self, make_app: F) -> Result<(), EdgeError>
     where
-        F: Fn() -> Router + Send + 'static,
+        F: Fn() -> App<T> + Clone + Send + 'static,
+        T: ServiceFactory<
+                ServiceRequest,
+                Config = (),
+                Response = ServiceResponse,
+                Error = actix_web::Error,
+                InitError = (),
+            > + 'static,
     {
         let new_port = self.next_port();
         let new_addr = SocketAddr::from((self.loopback_ip, new_port));
 
-        tracing::info!("Starting new Axum WebServer on {new_addr}");
+        tracing::info!("Starting new Actix WebServer on {new_addr}");
 
-        let listener = TcpListener::bind(new_addr).await?;
+        let server = HttpServer::new(make_app).bind(new_addr)?.run();
 
-        // Spawn new Axum server first
-        let (new_shutdown_tx, new_shutdown_rx) = oneshot::channel::<()>();
-        let router = make_router();
-        let grace = axum::serve(listener, router).with_graceful_shutdown(async move {
-            let _ = new_shutdown_rx.await;
-        });
+        let new_handle = server.handle();
 
         tokio::spawn(async move {
-            if let Err(err) = grace.await {
-                tracing::error!("Axum (new) server error: {err}");
+            if let Err(err) = server.await {
+                tracing::error!("Actix (new) server error: {err}");
             }
         });
 
@@ -152,13 +160,13 @@ impl WebServerHandle {
         tracing::info!("Switching Pingora backend to {new_addr}");
         self.current_backend.set(new_addr);
 
-        // Tell the old Axum server to shut down
-        if let Some(tx) = self.shutdown_tx.write().take() {
-            let _ = tx.send(());
+        // Stop the old Actix server (gracefully).
+        if let Some(old) = self.server_handle.write().take() {
+            old.stop(true).await;
         }
 
-        // Replace shutdown handle with the new one
-        *self.shutdown_tx.write() = Some(new_shutdown_tx);
+        // Replace with new handle
+        *self.server_handle.write() = Some(new_handle);
 
         Ok(())
     }
@@ -166,13 +174,13 @@ impl WebServerHandle {
     /// Gracefully stop the current WebServer.
     #[tracing::instrument(skip_all)]
     pub async fn shutdown(&self) {
-        if let Some(tx) = self.shutdown_tx.write().take() {
-            let _ = tx.send(());
+        if let Some(handle) = self.server_handle.write().take() {
+            handle.stop(true).await;
         }
     }
 }
 
-/// Proxy implementation: HTTPS EdgeController → Axum WebServer.
+/// Proxy implementation: HTTPS EdgeController → Actix WebServer.
 pub struct EdgeProxy {
     backend: Arc<BackendState>,
 }
@@ -197,7 +205,7 @@ impl ProxyHttp for EdgeProxy {
         _ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
         let addr = self.backend.get();
-        // No TLS between Pingora and Axum (plain HTTP over loopback)
+        // No TLS between Pingora and Actix (plain HTTP over loopback)
         let is_tls = false;
         let sni = addr.ip().to_string();
         let peer = Box::new(HttpPeer::new((addr.ip(), addr.port()), is_tls, sni));
@@ -260,7 +268,7 @@ impl ServeHttp for RedirectApp {
     }
 }
 
-/// Aggregate runtime: owns Pingora EdgeController and Axum WebServer.
+/// Aggregate runtime: owns Pingora EdgeController and Actix WebServer.
 pub struct EdgeRuntime {
     /// Join handle for the Pingora server thread.
     pingora_thread: std::thread::JoinHandle<()>,
@@ -277,14 +285,12 @@ impl EdgeRuntime {
     ///   - **Do not bind any EdgeController listeners**
     ///   - **Still start the WebServer** (on loopback) so you can configure/fix certs.
     #[tracing::instrument(skip_all)]
-    pub async fn start<F>(
+    pub async fn start(
         root: PathBuf,
         settings: Settings,
-        make_router: F,
-    ) -> Result<Self, EdgeError>
-    where
-        F: FnOnce() -> Router + Send + Sync + 'static,
-    {
+        handles: RuntimeHandles,
+        bindings: Vec<ThemeBinding>,
+    ) -> Result<Self, EdgeError> {
         // Derive runtime values from Settings
         let cert_dir = root.join(settings.cert.dir);
         let edge_ip = settings.edge.ip;
@@ -306,29 +312,35 @@ impl EdgeRuntime {
             );
         }
 
-        // 2) Start initial Axum WebServer (port A)
+        // 2) Start initial Actix WebServer (port A)
         let initial_addr = SocketAddr::from((loopback_ip, web_port_a));
-        let listener = TcpListener::bind(initial_addr).await?;
-
         let backend_state = Arc::new(BackendState::new(initial_addr));
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let router = make_router();
-        let serve = axum::serve(listener, router).with_graceful_shutdown(async move {
-            let _ = shutdown_rx.await;
-        });
+        let handles_for_server = handles.clone();
+        let bindings_for_server = bindings.clone();
 
-        tracing::info!("Axum WebServer started on {}", initial_addr);
+        tracing::info!("Actix WebServer started on {}", initial_addr);
+
+        let server = HttpServer::new(move || {
+            App::new().service(build_app_router(
+                handles_for_server.clone(),
+                bindings_for_server.clone(),
+            ))
+        })
+        .bind(initial_addr)?
+        .run();
+
+        let server_handle = server.handle();
 
         tokio::spawn(async move {
-            if let Err(err) = serve.await {
-                tracing::error!("Axum WebServer error: {err}");
+            if let Err(err) = server.await {
+                tracing::error!("Actix WebServer error: {err}");
             }
         });
 
         let web_handle = WebServerHandle::new(
             backend_state.clone(),
-            shutdown_tx,
+            server_handle,
             loopback_ip,
             web_port_a,
             web_port_b,
@@ -362,7 +374,7 @@ impl EdgeRuntime {
         &self.web_handle
     }
 
-    /// Stop Axum and wait for Pingora thread to exit.
+    /// Stop Actix and wait for Pingora thread to exit.
     pub async fn shutdown(self) {
         self.web_handle.shutdown().await;
         // For now, we don’t send any shutdown signal to Pingora; you’d usually
@@ -382,8 +394,6 @@ fn run_pingora_edge(
     external_https_port: u16,
 ) -> Result<(), EdgeError> {
     // Use Pingora's default options (no explicit config file / CLI opts).
-    // The type hint `None::<pingora::server::configuration::Opt>` makes
-    // `Server::new` happy: impl Into<Option<Opt>>.
     let mut server =
         Server::new(None::<pingora::server::configuration::Opt>).map_err(EdgeError::Pingora)?;
     server.bootstrap();
@@ -407,11 +417,11 @@ fn run_pingora_edge(
                 .to_str()
                 .ok_or_else(|| EdgeError::Config("Non-UTF8 key path".to_string()))?;
 
-            // HTTPS proxy service (EdgeController → Axum) with TLS termination
+            // HTTPS proxy service (EdgeController → Actix) with TLS termination
             let proxy = EdgeProxy::new(backend_state);
             let mut proxy_service = http_proxy_service(&server.configuration, proxy);
 
-            // This is the critical part: bind a *TLS* listener on edge_https.
+            // Bind a TLS listener on edge_https.
             proxy_service
                 .add_tls(edge_https.to_string().as_str(), cert_str, key_str)
                 .map_err(|e| {

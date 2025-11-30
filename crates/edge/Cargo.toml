@@ -20,7 +20,7 @@ tower = { workspace = true }
 http = { workspace = true }
 pingora = { workspace = true }
 parking_lot = { workspace = true }
-axum = { workspace = true }
+actix-web = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tantivy = { workspace = true }

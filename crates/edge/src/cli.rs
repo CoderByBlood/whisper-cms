@@ -9,10 +9,8 @@ use crate::{
         index::{index_body, index_front_matter, set_content_root, set_fm_index_dir, start_scan},
     },
     proxy::{EdgeError, EdgeRuntime},
-    router::build_app_router,
 };
-use adapt::runtime::bootstrap::bootstrap_all;
-use axum::Router;
+use adapt::runtime::bootstrap::{bootstrap_all, RuntimeHandles};
 use chrono::Utc;
 use clap::{builder::ValueHint, Parser, Subcommand};
 use domain::{
@@ -92,7 +90,7 @@ async fn do_start(start: StartCmd) -> Result<()> {
         Utc::now().timestamp_millis() - then.timestamp_millis()
     );
 
-    // register routes and middleware in Axum
+    // register routes and middleware in Actix
     let then = Utc::now();
     let process = process.register_routes_and_middleware().await?;
     info!(
@@ -100,7 +98,7 @@ async fn do_start(start: StartCmd) -> Result<()> {
         Utc::now().timestamp_millis() - then.timestamp_millis()
     );
 
-    // start servers (Axum web server/Pingora edge controller)
+    // start servers (Actix web server/Pingora edge controller)
     let then = Utc::now();
     let process = process.start_servers().await?;
     info!(
@@ -122,7 +120,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-/// Unified request passed into Tower pipeline
+/// Unified request passed into Tower pipeline (placeholder for future use)
 pub struct CliReq {
     pub cmd: Commands,
 }
@@ -194,7 +192,8 @@ struct RouterCreated {
     content_settings: ContentSettings,
     documents: Vec<Document>,
     extensions: (Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>),
-    router: Router,
+    handles: RuntimeHandles,
+    theme_bindings: Vec<ThemeBinding>,
 }
 
 struct ServerStarted {
@@ -203,7 +202,8 @@ struct ServerStarted {
     _content_settings: ContentSettings,
     _documents: Vec<Document>,
     _extensions: (Vec<DiscoveredPlugin>, Vec<DiscoveredTheme>),
-    _router: Router,
+    _handles: RuntimeHandles,
+    _theme_bindings: Vec<ThemeBinding>,
     _runtime: EdgeRuntime,
 }
 
@@ -427,12 +427,15 @@ impl StartProcess<ExtensionsLoaded> {
 
         info!("Plugins and themes initialized successfully");
 
-        let router = build_app_router(handles, theme_bnds);
-        Ok(self.done(router))
+        Ok(self.done(handles, theme_bnds))
     }
 
     #[tracing::instrument(skip_all)]
-    fn done(self, router: Router) -> StartProcess<RouterCreated> {
+    fn done(
+        self,
+        handles: RuntimeHandles,
+        theme_bindings: Vec<ThemeBinding>,
+    ) -> StartProcess<RouterCreated> {
         StartProcess {
             state: RouterCreated {
                 command: self.state.command,
@@ -440,7 +443,8 @@ impl StartProcess<ExtensionsLoaded> {
                 content_settings: self.state.content_settings,
                 documents: self.state.documents,
                 extensions: self.state.extensions,
-                router,
+                handles,
+                theme_bindings,
             },
         }
     }
@@ -449,12 +453,15 @@ impl StartProcess<ExtensionsLoaded> {
 impl StartProcess<RouterCreated> {
     #[tracing::instrument(skip_all)]
     async fn start_servers(self) -> Result<StartProcess<ServerStarted>> {
-        let router = self.state.router.clone();
+        let handles = self.state.handles.clone();
+        let theme_bindings = self.state.theme_bindings.clone();
         let settings = self.state.settings.clone();
         let root = self.state.command.dir.clone();
-        let make_router = move || router;
 
-        Ok(self.done(EdgeRuntime::start(root, settings, make_router).await?))
+        let runtime =
+            EdgeRuntime::start(root, settings, handles.clone(), theme_bindings.clone()).await?;
+
+        Ok(self.done(runtime))
     }
 
     #[tracing::instrument(skip_all)]
@@ -466,7 +473,8 @@ impl StartProcess<RouterCreated> {
                 _content_settings: self.state.content_settings,
                 _documents: self.state.documents,
                 _extensions: self.state.extensions,
-                _router: self.state.router,
+                _handles: self.state.handles,
+                _theme_bindings: self.state.theme_bindings,
                 _runtime: runtime,
             },
         }
