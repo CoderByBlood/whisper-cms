@@ -1,10 +1,10 @@
 // crates/adapt/src/http/app.rs
 
-use crate::http::middleware::PluginLayer;
+use crate::http::PluginMiddleware;
 use crate::runtime::bootstrap::{PluginConfig, RuntimeHandles, ThemeConfig};
 use crate::runtime::{PluginRuntimeClient, ThemeRuntimeClient};
 
-use axum::{routing::get, Router};
+use actix_web::{dev::HttpServiceFactory, web};
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -17,24 +17,33 @@ pub struct AppState {
 }
 
 #[tracing::instrument(skip_all)]
-pub fn build_app(content_root: PathBuf, handles: RuntimeHandles) -> Router {
-    // Collect the configured plugin IDs in the order they were discovered.
-    let plugin_ids: Vec<String> = handles
-        .plugin_configs
-        .iter()
-        .map(|cfg| cfg.id.clone())
-        .collect();
+pub fn build_app(content_root: PathBuf, handles: RuntimeHandles) -> impl HttpServiceFactory {
+    use crate::http::theme::theme_entrypoint;
+
+    // Extract / clone what we need from `handles` up front.
+    let plugin_client = handles.plugin_client.clone();
+    let theme_client = handles.theme_client.clone();
+    let plugin_configs = handles.plugin_configs.clone();
+    let theme_configs = handles.theme_configs.clone();
+
+    // Ordered list of plugin IDs for before/after hooks.
+    let plugin_ids: Vec<String> = plugin_configs.iter().map(|cfg| cfg.id.clone()).collect();
 
     let state = AppState {
         content_root,
-        plugin_rt: handles.plugin_client.clone(),
-        theme_rt: handles.theme_client,
-        plugin_configs: handles.plugin_configs,
-        theme_configs: handles.theme_configs,
+        plugin_rt: plugin_client.clone(),
+        theme_rt: theme_client,
+        plugin_configs,
+        theme_configs,
     };
 
-    Router::new()
-        .route("/*path", get(crate::http::theme::theme_entrypoint))
-        .with_state(state.clone())
-        .layer(PluginLayer::new(state.plugin_rt.clone(), plugin_ids))
+    // Scope that can be mounted at app root or elsewhere.
+    web::scope("/")
+        .app_data(web::Data::new(state))
+        // Single middleware that drives JS plugins via PluginRuntimeClient.
+        .wrap(PluginMiddleware::new(plugin_client, plugin_ids))
+        // Handle the bare "/" path.
+        .route("/", web::to(theme_entrypoint))
+        // Catch-all: handle *all* methods and paths under this scope.
+        .route("/{tail:.*}", web::to(theme_entrypoint))
 }

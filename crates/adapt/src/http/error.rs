@@ -1,3 +1,5 @@
+// crates/adapt/src/http/error.rs
+
 use serve::resolver::ResolverError;
 use thiserror::Error;
 

@@ -15,12 +15,13 @@ regex = { workspace = true }
 tower = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 uuid = { workspace = true }
 handlebars = { workspace = true }
 json-patch = { workspace = true }
 lol_html = { workspace = true }
 boa_engine = { workspace = true }
-axum = { workspace = true }
+actix-web = { workspace = true }
 http = { workspace = true }
 form_urlencoded = { workspace = true }
 indexed_json = { workspace = true }
