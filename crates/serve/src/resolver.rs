@@ -14,29 +14,11 @@
 //! All the data retrieval — FM lookup, content lookup, slug lookup, CAS stream creation —
 //! is performed via injected closures.
 
-use domain::content::{ContentKind, ResolvedContent};
+use crate::{indexer::ContentManager, render::http::RequestContext, Error};
+use domain::content::{Content, ContentKind};
 use http::{HeaderMap, Method};
 use serde_json::{json, Map as JsonMap, Value as Json};
-use std::{collections::HashMap, string::FromUtf8Error};
-use thiserror::Error;
-
-use crate::{indexer::ContentManager, render::http::RequestContext};
-
-// -----------------------------------------------------------------------------
-// Error Type
-// -----------------------------------------------------------------------------
-
-#[derive(Debug, Error)]
-pub enum ResolverError {
-    #[error("Io error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("FromUTF8 error: {0}")]
-    FromUTF8(#[from] FromUtf8Error),
-
-    #[error("Backend error: {0}")]
-    Backend(String),
-}
+use std::collections::HashMap;
 
 // -----------------------------------------------------------------------------
 // Utility
@@ -68,7 +50,7 @@ pub async fn resolve(
     resolver: &impl ContentManager,
     path: &str,
     _method: &Method,
-) -> Result<ResolvedContent, ResolverError> {
+) -> Result<Content, Error> {
     let path = normalize(path);
 
     // -------------------------------------------
@@ -83,7 +65,7 @@ pub async fn resolve(
         if let Some(h) = handle {
             if let Some(body) = resolver.lookup_body(h).await? {
                 // Only short-circuit here if we got a body as well as front matter.
-                return Ok(ResolvedContent {
+                return Ok(Content {
                     content_kind: infer_kind_from_ext(&path),
                     front_matter: fm,
                     body: Some(body),
@@ -100,7 +82,7 @@ pub async fn resolve(
     // ------------------------------------------------------------
     if let Some(fm) = resolver.lookup_served(&path).await? {
         if let Some(h) = resolver.lookup_body(&path).await? {
-            return Ok(ResolvedContent {
+            return Ok(Content {
                 content_kind: infer_kind_from_ext(&path),
                 front_matter: fm,
                 body: Some(h),
@@ -115,7 +97,7 @@ pub async fn resolve(
         let html = format!("{}.html", path.trim_end_matches('/'));
         if let Some(fm) = resolver.lookup_served(&html).await? {
             if let Some(h) = resolver.lookup_body(&html).await? {
-                return Ok(ResolvedContent {
+                return Ok(Content {
                     content_kind: ContentKind::Html,
                     front_matter: fm,
                     body: Some(h),
@@ -131,7 +113,7 @@ pub async fn resolve(
         let index = format!("{}index.html", path);
         if let Some(fm) = resolver.lookup_served(&index).await? {
             if let Some(h) = resolver.lookup_body(&index).await? {
-                return Ok(ResolvedContent {
+                return Ok(Content {
                     content_kind: ContentKind::Html,
                     front_matter: fm,
                     body: Some(h),
@@ -143,7 +125,7 @@ pub async fn resolve(
     // ------------------------------------------------------------
     // Step 5: No matches — return empty
     // ------------------------------------------------------------
-    Ok(ResolvedContent::empty())
+    Ok(Content::empty())
 }
 
 /// Default implementation used by both adapt and edge.
@@ -157,7 +139,7 @@ pub fn build_request_context(
     method: Method,
     headers: HeaderMap,
     query_params: HashMap<String, String>,
-    resolved: ResolvedContent,
+    resolved: Content,
 ) -> RequestContext {
     // headers -> JSON object
     let mut hdr_obj = JsonMap::new();

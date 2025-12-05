@@ -2,11 +2,11 @@
 
 use crate::js::engine::BoaEngine;
 use crate::js::JsEngine;
-use crate::runtime::error::RuntimeError;
 use crate::runtime::plugin::{PluginRuntime, PluginSpec};
 use crate::runtime::plugin_actor::PluginRuntimeClient;
 use crate::runtime::theme::{ThemeRuntime, ThemeSpec};
 use crate::runtime::theme_actor::ThemeRuntimeClient;
+use crate::Error;
 use serve::render::http::{RequestContext, ResponseBodySpec};
 
 /// Configuration for plugins.
@@ -101,7 +101,7 @@ impl<E: JsEngine> BoundTheme<E> {
 
 impl BoundTheme<BoaEngine> {
     /// Initialize this theme with a context (optional boot hook).
-    pub fn init(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
+    pub fn init(&mut self, ctx: &RequestContext) -> Result<(), Error> {
         self.runtime.init(ctx)
     }
 
@@ -112,7 +112,7 @@ impl BoundTheme<BoaEngine> {
     /// 2. Call `<themeId>.handle(ctx)` in JS.
     /// 3. Merge the JS-returned ctx back into the Rust `RequestContext`.
     /// 4. Extract a `ResponseBodySpec` from the final ctx.
-    pub fn render(&mut self, mut ctx: RequestContext) -> Result<ResponseBodySpec, RuntimeError> {
+    pub fn render(&mut self, mut ctx: RequestContext) -> Result<ResponseBodySpec, Error> {
         // Delegate the heavy lifting to the ThemeRuntime.
         self.runtime.handle(&mut ctx)?;
         Ok(ctx.into_response_body_spec())
@@ -126,7 +126,7 @@ impl BoundTheme<BoaEngine> {
 pub fn bootstrap_all(
     plugin_cfgs: Vec<PluginConfig>,
     theme_cfgs: Vec<ThemeConfig>,
-) -> Result<RuntimeHandles, RuntimeError> {
+) -> Result<RuntimeHandles, Error> {
     // ─────────────────────────────────────────────────────────────────────
     // 1. Build plugin runtime: one Boa engine shared across all plugins.
     // ─────────────────────────────────────────────────────────────────────
@@ -163,7 +163,7 @@ pub fn bootstrap_all(
 /// Each theme gets its own `BoaEngine` and `ThemeRuntime`. This keeps the
 /// Boa requirement of "single-threaded" satisfied while still letting the
 /// outer Axum server be multi-threaded (via the actor indirection).
-fn load_themes(theme_cfgs: &[ThemeConfig]) -> Result<Vec<BoundTheme<BoaEngine>>, RuntimeError> {
+fn load_themes(theme_cfgs: &[ThemeConfig]) -> Result<Vec<BoundTheme<BoaEngine>>, Error> {
     let mut themes = Vec::with_capacity(theme_cfgs.len());
 
     for cfg in theme_cfgs {

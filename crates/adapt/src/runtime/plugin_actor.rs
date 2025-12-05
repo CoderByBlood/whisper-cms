@@ -1,8 +1,7 @@
 // crates/adapt/src/runtime/plugin_actor.rs
 
-use crate::js::engine::BoaEngine;
-use crate::runtime::error::RuntimeError;
 use crate::runtime::plugin::PluginRuntime;
+use crate::{js::engine::BoaEngine, Error};
 use serve::render::http::RequestContext;
 use tokio::sync::{mpsc, oneshot};
 
@@ -14,21 +13,21 @@ enum PluginCommand {
     /// Call `init_all(&ctx)` on the runtime.
     InitAll {
         ctx: RequestContext,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
+        reply: oneshot::Sender<Result<(), Error>>,
     },
 
     /// Call `before_plugin(configured_id, &mut ctx)` for a single plugin.
     BeforePlugin {
         plugin_id: String,
         ctx: RequestContext,
-        reply: oneshot::Sender<Result<RequestContext, RuntimeError>>,
+        reply: oneshot::Sender<Result<RequestContext, Error>>,
     },
 
     /// Call `after_plugin(configured_id, &mut ctx)` for a single plugin.
     AfterPlugin {
         plugin_id: String,
         ctx: RequestContext,
-        reply: oneshot::Sender<Result<RequestContext, RuntimeError>>,
+        reply: oneshot::Sender<Result<RequestContext, Error>>,
     },
 
     /// Stop the actor loop.
@@ -65,7 +64,7 @@ impl PluginRuntimeClient {
 
     /// Call `init_all(ctx)` in the actor.
     #[tracing::instrument(skip_all)]
-    pub async fn init_all(&self, ctx: RequestContext) -> Result<(), RuntimeError> {
+    pub async fn init_all(&self, ctx: RequestContext) -> Result<(), Error> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
@@ -87,7 +86,7 @@ impl PluginRuntimeClient {
         &self,
         plugin_id: impl Into<String>,
         ctx: RequestContext,
-    ) -> Result<RequestContext, RuntimeError> {
+    ) -> Result<RequestContext, Error> {
         let plugin_id = plugin_id.into();
         let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -111,7 +110,7 @@ impl PluginRuntimeClient {
         &self,
         plugin_id: impl Into<String>,
         ctx: RequestContext,
-    ) -> Result<RequestContext, RuntimeError> {
+    ) -> Result<RequestContext, Error> {
         let plugin_id = plugin_id.into();
         let (reply_tx, reply_rx) = oneshot::channel();
 
@@ -134,13 +133,13 @@ impl PluginRuntimeClient {
     }
 }
 
-/// Internal helper to map channel failures into a `RuntimeError`.
+/// Internal helper to map channel failures into a `Error`.
 #[tracing::instrument(skip_all)]
-fn channel_error(msg: &str) -> RuntimeError {
+fn channel_error(msg: &str) -> Error {
     // Reuse an existing variant instead of forcing you to change error.rs.
-    // If you prefer a dedicated variant, you can add e.g. `RuntimeError::Actor(String)`
+    // If you prefer a dedicated variant, you can add e.g. `Error::Actor(String)`
     // and switch to that here.
-    RuntimeError::ThemeBootstrap(msg.to_string())
+    Error::ThemeBootstrap(msg.to_string())
 }
 
 /// Actor event loop – runs on the Tokio `LocalSet` thread.
@@ -166,7 +165,7 @@ async fn plugin_actor_loop(
             } => {
                 let res = (|| {
                     runtime.before_plugin(&plugin_id, &mut ctx)?;
-                    Ok::<_, RuntimeError>(ctx)
+                    Ok::<_, Error>(ctx)
                 })();
 
                 let _ = reply.send(res);
@@ -179,7 +178,7 @@ async fn plugin_actor_loop(
             } => {
                 let res = (|| {
                     runtime.after_plugin(&plugin_id, &mut ctx)?;
-                    Ok::<_, RuntimeError>(ctx)
+                    Ok::<_, Error>(ctx)
                 })();
 
                 let _ = reply.send(res);

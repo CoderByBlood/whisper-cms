@@ -1,11 +1,11 @@
 // crates/adapt/src/mql/parser.rs
 
 use super::ast::{CmpOp, FieldExpr, Filter, FindOptions};
-use super::error::QueryError;
+use crate::Error;
 use serde_json::Value as Json;
 
 /// Parse a Mongo-style JSON filter into a Filter AST.
-pub fn parse_filter(json: &Json) -> Result<Filter, QueryError> {
+pub fn parse_filter(json: &Json) -> Result<Filter, Error> {
     match json {
         Json::Object(map) => {
             // top-level: fields & logical operators
@@ -30,13 +30,13 @@ pub fn parse_filter(json: &Json) -> Result<Filter, QueryError> {
                 Ok(Filter::And(filters))
             }
         }
-        _ => Err(QueryError::InvalidFilter(
+        _ => Err(Error::InvalidFilter(
             "top-level filter must be an object".into(),
         )),
     }
 }
 
-fn parse_and(value: &Json) -> Result<Filter, QueryError> {
+fn parse_and(value: &Json) -> Result<Filter, Error> {
     match value {
         Json::Array(arr) => {
             let mut filters = Vec::new();
@@ -45,13 +45,11 @@ fn parse_and(value: &Json) -> Result<Filter, QueryError> {
             }
             Ok(Filter::And(filters))
         }
-        _ => Err(QueryError::InvalidFilter(
-            "$and value must be an array".into(),
-        )),
+        _ => Err(Error::InvalidFilter("$and value must be an array".into())),
     }
 }
 
-fn parse_or(value: &Json) -> Result<Filter, QueryError> {
+fn parse_or(value: &Json) -> Result<Filter, Error> {
     match value {
         Json::Array(arr) => {
             let mut filters = Vec::new();
@@ -60,13 +58,11 @@ fn parse_or(value: &Json) -> Result<Filter, QueryError> {
             }
             Ok(Filter::Or(filters))
         }
-        _ => Err(QueryError::InvalidFilter(
-            "$or value must be an array".into(),
-        )),
+        _ => Err(Error::InvalidFilter("$or value must be an array".into())),
     }
 }
 
-fn parse_field_expr(path: &str, v: &Json) -> Result<Filter, QueryError> {
+fn parse_field_expr(path: &str, v: &Json) -> Result<Filter, Error> {
     // Shorthand: { field: value } → Eq
     if !v.is_object() {
         let op = CmpOp::Eq(v.clone());
@@ -78,7 +74,7 @@ fn parse_field_expr(path: &str, v: &Json) -> Result<Filter, QueryError> {
 
     let obj = v.as_object().unwrap();
     if obj.is_empty() {
-        return Err(QueryError::InvalidFilter(format!(
+        return Err(Error::InvalidFilter(format!(
             "empty operator object for field {}",
             path
         )));
@@ -101,7 +97,7 @@ fn parse_field_expr(path: &str, v: &Json) -> Result<Filter, QueryError> {
     }
 }
 
-fn parse_cmp_op(_path: &str, op_name: &str, value: &Json) -> Result<CmpOp, QueryError> {
+fn parse_cmp_op(_path: &str, op_name: &str, value: &Json) -> Result<CmpOp, Error> {
     use CmpOp::*;
 
     match op_name {
@@ -114,33 +110,33 @@ fn parse_cmp_op(_path: &str, op_name: &str, value: &Json) -> Result<CmpOp, Query
         "$in" => {
             let arr = value
                 .as_array()
-                .ok_or_else(|| QueryError::InvalidFilter("$in expects array".into()))?;
+                .ok_or_else(|| Error::InvalidFilter("$in expects array".into()))?;
             Ok(In(arr.clone()))
         }
         "$nin" => {
             let arr = value
                 .as_array()
-                .ok_or_else(|| QueryError::InvalidFilter("$nin expects array".into()))?;
+                .ok_or_else(|| Error::InvalidFilter("$nin expects array".into()))?;
             Ok(Nin(arr.clone()))
         }
         "$all" => {
             let arr = value
                 .as_array()
-                .ok_or_else(|| QueryError::InvalidFilter("$all expects array".into()))?;
+                .ok_or_else(|| Error::InvalidFilter("$all expects array".into()))?;
             Ok(All(arr.clone()))
         }
         "$exists" => {
             let b = value
                 .as_bool()
-                .ok_or_else(|| QueryError::InvalidFilter("$exists expects boolean".into()))?;
+                .ok_or_else(|| Error::InvalidFilter("$exists expects boolean".into()))?;
             Ok(Exists(b))
         }
         "$size" => {
             let n = match value {
                 Json::Number(num) => num
                     .as_i64()
-                    .ok_or_else(|| QueryError::InvalidFilter("$size expects integer".into()))?,
-                _ => return Err(QueryError::InvalidFilter("$size expects integer".into())),
+                    .ok_or_else(|| Error::InvalidFilter("$size expects integer".into()))?,
+                _ => return Err(Error::InvalidFilter("$size expects integer".into())),
             };
             Ok(Size(n))
         }
@@ -148,9 +144,9 @@ fn parse_cmp_op(_path: &str, op_name: &str, value: &Json) -> Result<CmpOp, Query
             // $not value is a single-field expression object
             let inner_obj = value
                 .as_object()
-                .ok_or_else(|| QueryError::InvalidFilter("$not expects object".into()))?;
+                .ok_or_else(|| Error::InvalidFilter("$not expects object".into()))?;
             if inner_obj.len() != 1 {
-                return Err(QueryError::InvalidFilter(
+                return Err(Error::InvalidFilter(
                     "$not expects a single operator object".into(),
                 ));
             }
@@ -162,7 +158,7 @@ fn parse_cmp_op(_path: &str, op_name: &str, value: &Json) -> Result<CmpOp, Query
             };
             Ok(Not(Box::new(field_expr)))
         }
-        _ => Err(QueryError::InvalidOperator(format!(
+        _ => Err(Error::InvalidOperator(format!(
             "unsupported operator {}",
             op_name
         ))),
@@ -176,7 +172,7 @@ fn parse_cmp_op(_path: &str, op_name: &str, value: &Json) -> Result<CmpOp, Query
 ///   limit: 10,
 ///   skip: 5
 /// }
-pub fn parse_find_options(json: &Json) -> Result<FindOptions, QueryError> {
+pub fn parse_find_options(json: &Json) -> Result<FindOptions, Error> {
     let mut opts = FindOptions::default();
 
     let obj = match json {
@@ -191,24 +187,18 @@ pub fn parse_find_options(json: &Json) -> Result<FindOptions, QueryError> {
             for (field, dir_val) in sort_obj {
                 let dir = match dir_val {
                     Json::Number(n) => n.as_i64().ok_or_else(|| {
-                        QueryError::InvalidSort("sort direction must be 1 or -1".into())
+                        Error::InvalidSort("sort direction must be 1 or -1".into())
                     })? as i8,
-                    _ => {
-                        return Err(QueryError::InvalidSort(
-                            "sort direction must be 1 or -1".into(),
-                        ))
-                    }
+                    _ => return Err(Error::InvalidSort("sort direction must be 1 or -1".into())),
                 };
                 if dir != 1 && dir != -1 {
-                    return Err(QueryError::InvalidSort(
-                        "sort direction must be 1 or -1".into(),
-                    ));
+                    return Err(Error::InvalidSort("sort direction must be 1 or -1".into()));
                 }
                 sort_vec.push((field.clone(), dir));
             }
             opts.sort = sort_vec;
         } else {
-            return Err(QueryError::InvalidSort(
+            return Err(Error::InvalidSort(
                 "sort must be object { field: 1|-1 }".into(),
             ));
         }
@@ -239,7 +229,6 @@ pub fn parse_find_options(json: &Json) -> Result<FindOptions, QueryError> {
 mod tests {
     use super::*;
     use crate::mql::ast::{CmpOp, FieldExpr, Filter};
-    use crate::mql::error::QueryError;
     use serde_json::json;
 
     // Helper to extract a single FieldExpr from a Filter::Field, panic otherwise.
@@ -290,7 +279,7 @@ mod tests {
     fn parse_filter_top_level_must_be_object() {
         let json = json!(["not-an-object"]);
         let err = parse_filter(&json).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -338,14 +327,14 @@ mod tests {
     fn parse_and_value_must_be_array() {
         let json = json!({ "$and": { "status": "published" } });
         let err = parse_filter(&json).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     #[test]
     fn parse_or_value_must_be_array() {
         let json = json!({ "$or": { "status": "published" } });
         let err = parse_filter(&json).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -399,7 +388,7 @@ mod tests {
         });
 
         let err = parse_filter(&json).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -457,15 +446,15 @@ mod tests {
     fn parse_in_nin_all_require_array() {
         let bad_in = json!({ "tags": { "$in": "not-array" } });
         let err = parse_filter(&bad_in).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
 
         let bad_nin = json!({ "tags": { "$nin": 123 } });
         let err = parse_filter(&bad_nin).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
 
         let bad_all = json!({ "tags": { "$all": { "x": 1 } } });
         let err = parse_filter(&bad_all).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     #[test]
@@ -475,7 +464,7 @@ mod tests {
 
         let bad = json!({ "flag": { "$exists": 1 } });
         let err = parse_filter(&bad).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     #[test]
@@ -485,11 +474,11 @@ mod tests {
 
         let bad_float = json!({ "arr": { "$size": 3.5 } });
         let err = parse_filter(&bad_float).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
 
         let bad_type = json!({ "arr": { "$size": "not-int" } });
         let err = parse_filter(&bad_type).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     #[test]
@@ -520,7 +509,7 @@ mod tests {
         // non-object
         let bad = json!({ "views": { "$not": 123 } });
         let err = parse_filter(&bad).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
 
         // multiple operators inside $not
         let bad_multi = json!({
@@ -529,7 +518,7 @@ mod tests {
             }
         });
         let err = parse_filter(&bad_multi).unwrap_err();
-        matches!(err, QueryError::InvalidFilter(_));
+        matches!(err, Error::InvalidFilter(_));
     }
 
     #[test]
@@ -539,7 +528,7 @@ mod tests {
         });
 
         let err = parse_filter(&json).unwrap_err();
-        matches!(err, QueryError::InvalidOperator(_));
+        matches!(err, Error::InvalidOperator(_));
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -582,7 +571,7 @@ mod tests {
         });
 
         let err = parse_find_options(&json).unwrap_err();
-        matches!(err, QueryError::InvalidSort(_));
+        matches!(err, Error::InvalidSort(_));
     }
 
     #[test]
@@ -592,14 +581,14 @@ mod tests {
             "sort": { "a": "asc" }
         });
         let err = parse_find_options(&json).unwrap_err();
-        matches!(err, QueryError::InvalidSort(_));
+        matches!(err, Error::InvalidSort(_));
 
         // number but not 1/-1
         let json = json!({
             "sort": { "a": 2 }
         });
         let err = parse_find_options(&json).unwrap_err();
-        matches!(err, QueryError::InvalidSort(_));
+        matches!(err, Error::InvalidSort(_));
     }
 
     #[test]

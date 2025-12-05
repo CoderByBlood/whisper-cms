@@ -8,7 +8,7 @@ use actix_web::{
 use adapt::runtime::bootstrap::RuntimeHandles;
 use adapt::runtime::plugin_actor::PluginRuntimeClient;
 use adapt::runtime::theme_actor::ThemeRuntimeClient;
-use domain::content::ResolvedContent;
+use domain::content::Content;
 use serve::{
     render::{
         http::{RequestContext, ResponseBodySpec},
@@ -183,7 +183,7 @@ async fn theme_route_handler(state: web::Data<ThemeAppState>, req: HttpRequest) 
 
         let resolved = match resolve(&content_mgr, &path, &method).await {
             Ok(r) => r,
-            Err(_e) => ResolvedContent::empty(),
+            Err(_e) => Content::empty(),
         };
 
         build_request_context(path, method, headers, query_params, resolved)

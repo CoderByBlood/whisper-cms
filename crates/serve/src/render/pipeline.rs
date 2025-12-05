@@ -1,9 +1,9 @@
 // crates/serve/src/render/pipeline.rs
 
-use super::error::RenderError;
 use super::recommendation::{BodyPatch, BodyPatchKind};
 use super::rewriter::build_lol_settings_from_body_patches;
 use super::template::TemplateEngine; // <-- needed for render_to_write()
+use crate::Error;
 use lol_html::rewrite_str;
 use regex::Regex;
 use serde::Serialize;
@@ -21,7 +21,7 @@ pub fn render_html_template_to<T, M, W>(
     model: &M,
     body_patches: &[BodyPatch],
     mut out: W,
-) -> Result<(), RenderError>
+) -> Result<(), Error>
 where
     T: TemplateEngine,
     M: Serialize,
@@ -44,7 +44,7 @@ where
                     }
                     Err(e) => {
                         // Log & skip in real system; here we treat as error.
-                        return Err(RenderError::InvalidRegex {
+                        return Err(Error::InvalidRegex {
                             pattern: pattern.clone(),
                             error: e.to_string(),
                         });
@@ -80,13 +80,11 @@ where
     if !html_dom_patches.is_empty() {
         let settings = build_lol_settings_from_body_patches(&html_dom_patches);
         let rewritten =
-            rewrite_str(&html_text, settings).map_err(|e| RenderError::LolHtml(e.to_string()))?;
-        out.write_all(rewritten.as_bytes())
-            .map_err(RenderError::Io)?;
+            rewrite_str(&html_text, settings).map_err(|e| Error::LolHtml(e.to_string()))?;
+        out.write_all(rewritten.as_bytes()).map_err(Error::Io)?;
     } else {
         // No HtmlDom patches; write regex-transformed HTML directly.
-        out.write_all(html_text.as_bytes())
-            .map_err(RenderError::Io)?;
+        out.write_all(html_text.as_bytes()).map_err(Error::Io)?;
     }
 
     Ok(())
@@ -100,7 +98,7 @@ pub fn render_html_string_to<W: Write>(
     html: &str,
     body_patches: &[BodyPatch],
     mut out: W,
-) -> Result<(), RenderError> {
+) -> Result<(), Error> {
     let mut regex_specs = Vec::new();
     let mut html_dom_patches = Vec::new();
 
@@ -114,7 +112,7 @@ pub fn render_html_string_to<W: Write>(
                     regex_specs.push((re, replacement.clone()));
                 }
                 Err(e) => {
-                    return Err(RenderError::InvalidRegex {
+                    return Err(Error::InvalidRegex {
                         pattern: pattern.clone(),
                         error: e.to_string(),
                     });
@@ -143,13 +141,11 @@ pub fn render_html_string_to<W: Write>(
     if !html_dom_patches.is_empty() {
         let settings = build_lol_settings_from_body_patches(&html_dom_patches);
         let rewritten =
-            rewrite_str(&html_text, settings).map_err(|e| RenderError::LolHtml(e.to_string()))?;
-        out.write_all(rewritten.as_bytes())
-            .map_err(RenderError::Io)?;
+            rewrite_str(&html_text, settings).map_err(|e| Error::LolHtml(e.to_string()))?;
+        out.write_all(rewritten.as_bytes()).map_err(Error::Io)?;
     } else {
         // No HtmlDom patches; write regex-transformed HTML directly.
-        out.write_all(html_text.as_bytes())
-            .map_err(RenderError::Io)?;
+        out.write_all(html_text.as_bytes()).map_err(Error::Io)?;
     }
 
     Ok(())
@@ -165,7 +161,7 @@ pub fn render_json_to<W: Write>(
     value: &Json,
     body_patches: &[BodyPatch],
     mut out: W,
-) -> Result<(), RenderError> {
+) -> Result<(), Error> {
     // Partition patches.
     let mut regex_specs = Vec::new();
     let mut json_patches = Vec::new();
@@ -180,7 +176,7 @@ pub fn render_json_to<W: Write>(
                     regex_specs.push((re, replacement.clone()));
                 }
                 Err(e) => {
-                    return Err(RenderError::InvalidRegex {
+                    return Err(Error::InvalidRegex {
                         pattern: pattern.clone(),
                         error: e.to_string(),
                     });
@@ -209,7 +205,7 @@ pub fn render_json_to<W: Write>(
     let mut patched_value: Json = match serde_json::from_str(&json_text) {
         Ok(v) => v,
         Err(e) => {
-            return Err(RenderError::JsonAfterRegex(e.to_string()));
+            return Err(Error::JsonAfterRegex(e.to_string()));
         }
     };
 

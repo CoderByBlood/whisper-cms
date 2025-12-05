@@ -1,5 +1,5 @@
-use super::error::JsError;
 use super::value::JsValue;
+use crate::Error;
 use boa_engine::context::Context;
 use boa_engine::property::PropertyKey;
 use boa_engine::JsValue as BoaJsValue;
@@ -12,16 +12,16 @@ use serde_json::Value as Json;
 /// a JSON-like value (no engine-specific objects crossing the boundary).
 pub trait JsEngine {
     /// Evaluate arbitrary JS code and return a JsValue.
-    fn eval(&mut self, code: &str) -> Result<JsValue, JsError>;
+    fn eval(&mut self, code: &str) -> Result<JsValue, Error>;
 
     /// Load a module / plugin script.
     ///
     /// For Boa we simply `eval` the source into the current context. The
     /// `name` is currently unused but kept for future engine implementations.
-    fn load_module(&mut self, name: &str, source: &str) -> Result<(), JsError>;
+    fn load_module(&mut self, name: &str, source: &str) -> Result<(), Error>;
 
     /// Call a JS function by a dotted path (e.g. "plugin.handle" or "theme.handle").
-    fn call_function(&mut self, func_path: &str, args: &[JsValue]) -> Result<JsValue, JsError>;
+    fn call_function(&mut self, func_path: &str, args: &[JsValue]) -> Result<JsValue, Error>;
 }
 
 /// Concrete Boa-backed engine.
@@ -79,16 +79,16 @@ impl BoaEngine {
         }
     }
 
-    fn to_boajs_value(&mut self, value: &JsValue) -> Result<BoaJsValue, JsError> {
+    fn to_boajs_value(&mut self, value: &JsValue) -> Result<BoaJsValue, Error> {
         let json = Self::host_to_json(value);
         BoaJsValue::from_json(&json, &mut self.context)
-            .map_err(|e| JsError::Conversion(e.to_string()))
+            .map_err(|e| Error::Conversion(e.to_string()))
     }
 
-    fn from_boajs_value(&mut self, value: &BoaJsValue) -> Result<JsValue, JsError> {
+    fn from_boajs_value(&mut self, value: &BoaJsValue) -> Result<JsValue, Error> {
         let json = value
             .to_json(&mut self.context)
-            .map_err(|e| JsError::Conversion(e.to_string()))?;
+            .map_err(|e| Error::Conversion(e.to_string()))?;
         Ok(match json {
             Some(ref v) => Self::json_to_host(v),
             None => JsValue::Null,
@@ -100,10 +100,10 @@ impl BoaEngine {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Resolve a dotted path against the global object, e.g. "plugin.handle".
-    fn resolve_path(&mut self, func_path: &str) -> Result<BoaJsValue, JsError> {
+    fn resolve_path(&mut self, func_path: &str) -> Result<BoaJsValue, Error> {
         let trimmed = func_path.trim();
         if trimmed.is_empty() {
-            return Err(JsError::Call("empty function path".into()));
+            return Err(Error::Call("empty function path".into()));
         }
 
         // Start from global object.
@@ -112,13 +112,13 @@ impl BoaEngine {
         for part in trimmed.split('.') {
             let obj = current
                 .as_object()
-                .ok_or_else(|| JsError::Call("intermediate value is not object".into()))?
+                .ok_or_else(|| Error::Call("intermediate value is not object".into()))?
                 .clone();
 
             let key = PropertyKey::from(js_string!(part));
             current = obj
                 .get(key, &mut self.context)
-                .map_err(|e| JsError::Call(e.to_string()))?;
+                .map_err(|e| Error::Call(e.to_string()))?;
         }
 
         Ok(current)
@@ -126,29 +126,29 @@ impl BoaEngine {
 }
 
 impl JsEngine for BoaEngine {
-    fn eval(&mut self, code: &str) -> Result<JsValue, JsError> {
+    fn eval(&mut self, code: &str) -> Result<JsValue, Error> {
         match self.context.eval(Source::from_bytes(code)) {
             Ok(v) => self.from_boajs_value(&v),
-            Err(e) => Err(JsError::Eval(e.to_string())),
+            Err(e) => Err(Error::Eval(e.to_string())),
         }
     }
 
-    fn load_module(&mut self, _name: &str, source: &str) -> Result<(), JsError> {
+    fn load_module(&mut self, _name: &str, source: &str) -> Result<(), Error> {
         // For Boa, "loading a module" is just evaluating the source in this context.
         // The module itself is expected to attach things to globalThis (e.g.,
         // globalThis.plugin = { init(ctx) { ... }, handle(ctx) { ... } }).
         self.context
             .eval(Source::from_bytes(source))
-            .map_err(|e| JsError::Eval(e.to_string()))?;
+            .map_err(|e| Error::Eval(e.to_string()))?;
         Ok(())
     }
 
-    fn call_function(&mut self, func_path: &str, args: &[JsValue]) -> Result<JsValue, JsError> {
+    fn call_function(&mut self, func_path: &str, args: &[JsValue]) -> Result<JsValue, Error> {
         // Resolve the function value.
         let func_val = self.resolve_path(func_path)?;
         let func_obj = func_val
             .as_object()
-            .ok_or_else(|| JsError::Call("function value is not object".into()))?
+            .ok_or_else(|| Error::Call("function value is not object".into()))?
             .clone();
 
         // Convert args.
@@ -163,7 +163,7 @@ impl JsEngine for BoaEngine {
 
         match res {
             Ok(v) => self.from_boajs_value(&v),
-            Err(e) => Err(JsError::Call(e.to_string())),
+            Err(e) => Err(Error::Call(e.to_string())),
         }
     }
 }
@@ -251,7 +251,7 @@ mod tests {
         let mut engine = BoaEngine::new();
         let result = engine.eval("let =");
         assert!(result.is_err(), "expected syntax error, got {:?}", result);
-        if let Err(JsError::Eval(msg)) = result {
+        if let Err(Error::Eval(msg)) = result {
             assert!(
                 msg.to_lowercase().contains("syntax"),
                 "expected syntax-related message, got: {msg}"
@@ -291,7 +291,7 @@ mod tests {
 
         let res = engine.load_module("bad_plugin", bad_src);
         assert!(res.is_err(), "expected load_module error, got {:?}", res);
-        if let Err(JsError::Eval(msg)) = res {
+        if let Err(Error::Eval(msg)) = res {
             assert!(
                 msg.to_lowercase().contains("syntax") || msg.to_lowercase().contains("parse"),
                 "expected syntax/parse-related message, got: {msg}"
@@ -333,7 +333,7 @@ mod tests {
         let res = engine.call_function("", &[]);
         assert!(res.is_err(), "expected error for empty path");
 
-        if let Err(JsError::Call(msg)) = res {
+        if let Err(Error::Call(msg)) = res {
             assert!(
                 msg.to_lowercase().contains("empty"),
                 "expected message mentioning 'empty', got: {msg}"
@@ -349,7 +349,7 @@ mod tests {
         let res = engine.call_function("does.not.exist", &[]);
         assert!(res.is_err(), "expected error for missing function path");
 
-        if let Err(JsError::Call(msg)) = res {
+        if let Err(Error::Call(msg)) = res {
             assert!(
                 msg.to_lowercase().contains("object") || msg.to_lowercase().contains("undefined"),
                 "expected message about non-object/undefined, got: {msg}"
@@ -369,7 +369,7 @@ mod tests {
         let res = engine.call_function("notAFunction", &[]);
         assert!(res.is_err(), "expected error for non-function target");
 
-        if let Err(JsError::Call(msg)) = res {
+        if let Err(Error::Call(msg)) = res {
             assert!(
                 msg.to_lowercase().contains("function value is not object")
                     || msg.to_lowercase().contains("not object"),
@@ -394,7 +394,7 @@ mod tests {
         let res = engine.call_function("boom", &[]);
         assert!(res.is_err(), "expected error from thrown JS exception");
 
-        if let Err(JsError::Call(msg)) = res {
+        if let Err(Error::Call(msg)) = res {
             assert!(
                 msg.to_lowercase().contains("boom"),
                 "expected error mentioning 'boom', got: {msg}"

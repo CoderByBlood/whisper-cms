@@ -33,7 +33,7 @@ pub enum ContentKind {
 /// - Materialization (`StreamHandle -> BoxStream`) is done via the DI in
 ///   `crate::stream`.
 #[derive(Debug, Clone)]
-pub struct ResolvedContent {
+pub struct Content {
     /// Classified content kind (HTML / JSON / Asset).
     pub content_kind: ContentKind,
 
@@ -44,7 +44,7 @@ pub struct ResolvedContent {
     pub body: Option<Arc<String>>,
 }
 
-impl ResolvedContent {
+impl Content {
     /// Convenience constructor for "no content" / empty cases.
     ///
     /// - `content_kind`: Asset

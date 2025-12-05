@@ -1,7 +1,8 @@
 // crates/adapt/src/mql/query.rs
 
+use crate::Error;
+
 use super::ast::{CmpOp, FieldExpr, Filter, FindOptions};
-use super::error::QueryError;
 use super::eval::{eval_filter, get_field_value};
 use super::index::{IndexBackend, IndexConfig, JsonStore};
 
@@ -45,7 +46,7 @@ impl<'a> QueryPlanner<'a> {
         index: &I,
         filter: &Filter,
         opts: &FindOptions,
-    ) -> Result<Vec<QueryResult<S::Id>>, QueryError>
+    ) -> Result<Vec<QueryResult<S::Id>>, Error>
     where
         S: JsonStore,
         I: IndexBackend<Id = S::Id>,
@@ -108,7 +109,7 @@ pub async fn execute_query<S, I>(
     index: &I,
     filter: &Filter,
     opts: &FindOptions,
-) -> Result<Vec<QueryResult<S::Id>>, QueryError>
+) -> Result<Vec<QueryResult<S::Id>>, Error>
 where
     S: JsonStore,
     I: IndexBackend<Id = S::Id>,

@@ -1,6 +1,6 @@
 // crates/serve/src/render/body.rs
 
-use super::error::RenderError;
+use crate::Error;
 use regex::Regex;
 use std::io::{Result as IoResult, Write};
 
@@ -42,11 +42,9 @@ impl<W: Write> BodyRegexWriter<W> {
     }
 
     /// Process everything currently in the buffer, writing all of it out.
-    pub fn finish(mut self) -> Result<W, RenderError> {
+    pub fn finish(mut self) -> Result<W, Error> {
         let output = self.apply_patches(&self.buffer);
-        self.inner
-            .write_all(output.as_bytes())
-            .map_err(RenderError::Io)?;
+        self.inner.write_all(output.as_bytes()).map_err(Error::Io)?;
         self.buffer.clear();
         Ok(self.inner)
     }
@@ -282,7 +280,7 @@ mod tests {
 
         let res = writer.finish();
         match res {
-            Err(RenderError::Io(e)) => {
+            Err(Error::Io(e)) => {
                 assert_eq!(e.kind(), io::ErrorKind::Other);
             }
             other => panic!("finish should surface inner write error, got {:?}", other),

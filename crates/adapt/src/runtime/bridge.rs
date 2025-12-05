@@ -4,7 +4,7 @@
 //! and the JavaScript world (plugins & themes).
 
 use crate::js::value::JsValue;
-use crate::runtime::error::RuntimeError;
+use crate::Error;
 use http::{header, HeaderMap, HeaderValue, StatusCode};
 use serde_json::{json, Map as JsonMap, Value as Json};
 use serve::render::http::{RequestContext, ResponseBodySpec, ResponseSpec};
@@ -95,19 +95,13 @@ pub fn ctx_to_js_for_theme(ctx: &RequestContext, theme_id: &str) -> JsValue {
 
 /// Merge JS result back into Rust context for plugins.
 #[tracing::instrument(skip_all)]
-pub fn merge_recommendations_from_js(
-    ret: &JsValue,
-    ctx: &mut RequestContext,
-) -> Result<(), RuntimeError> {
+pub fn merge_recommendations_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), Error> {
     merge_from_js(ret, ctx)
 }
 
 /// Merge JS result back into Rust context for themes.
 #[tracing::instrument(skip_all)]
-pub fn merge_theme_ctx_from_js(
-    ret: &JsValue,
-    ctx: &mut RequestContext,
-) -> Result<(), RuntimeError> {
+pub fn merge_theme_ctx_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), Error> {
     merge_from_js(ret, ctx)
 }
 
@@ -518,7 +512,7 @@ fn parse_response_spec(v: &Json) -> Option<ResponseSpec> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tracing::instrument(skip_all)]
-fn merge_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
+fn merge_from_js(ret: &JsValue, ctx: &mut RequestContext) -> Result<(), Error> {
     let json = ret.to_json();
     let obj = match json.as_object() {
         Some(o) => o,

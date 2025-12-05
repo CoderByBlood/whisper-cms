@@ -10,24 +10,19 @@
 // - Exposes start_scan / index_front_matter / index_body with signatures
 //   expected by serve::indexer.
 
-use crate::db::tantivy::{ContentIndex, ContentIndexError};
+use crate::db::tantivy::ContentIndex;
 use crate::fs::scan::start_folder_scan;
-use crate::proxy::EdgeError;
-
+use crate::Error;
 use adapt::mql::index::IndexRecord;
-use anyhow::Error as AnyError;
 use async_trait::async_trait;
 use domain::doc::BodyKind;
 use indexed_json::IndexedJson;
 use serde_json::Value as Json;
-use serve::indexer::{ContentManager, DocContextError, FolderScanConfig, ScanStopFn};
-use serve::resolver::ResolverError;
+use serve::indexer::{ContentManager, FolderScanConfig, ScanStopFn};
+use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::string::FromUtf8Error;
 use std::sync::{Arc, LazyLock};
-use std::{fs, io};
-use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
 
 static CAS: LazyLock<RwLock<Option<ContentIndex>>> = LazyLock::new(|| RwLock::new(None));
@@ -35,7 +30,7 @@ static CAS: LazyLock<RwLock<Option<ContentIndex>>> = LazyLock::new(|| RwLock::ne
 static INDEX: LazyLock<RwLock<Option<IndexedJson<IndexRecord>>>> =
     LazyLock::new(|| RwLock::new(None));
 
-pub async fn set_cas_index(index_dir: PathBuf) -> Result<(), FrontMatterIndexError> {
+pub async fn set_cas_index(index_dir: PathBuf) -> Result<(), Error> {
     let cas = ContentIndex::open_or_create(&index_dir, 15_000_000)
         .expect("Failed to open/create Tantivy index");
     {
@@ -44,7 +39,7 @@ pub async fn set_cas_index(index_dir: PathBuf) -> Result<(), FrontMatterIndexErr
     }
     let index = IndexedJson::<IndexRecord>::open(&index_dir)
         .await
-        .map_err(FrontMatterIndexError::IndexedJson)?;
+        .map_err(Error::IndexedJson)?;
 
     {
         let mut i = INDEX.write().await;
@@ -52,34 +47,6 @@ pub async fn set_cas_index(index_dir: PathBuf) -> Result<(), FrontMatterIndexErr
     }
 
     Ok(())
-}
-
-// ======================================================================
-// ERRORS
-// ======================================================================
-
-#[derive(Debug, Error)]
-pub enum FrontMatterIndexError {
-    #[error("I/O: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("IndexedJson: {0}")]
-    IndexedJson(#[source] AnyError),
-
-    #[error("No Index")]
-    NoIndex(String),
-}
-
-#[derive(Debug, Error)]
-pub enum ContentBodyIndexError {
-    #[error("Tantivy: {0}")]
-    Tantivy(#[from] ContentIndexError),
-
-    #[error("No Casm{0}")]
-    NoCas(String),
-
-    #[error("FromUtf8Error {0}")]
-    FromUtf8Error(#[from] FromUtf8Error),
 }
 
 // ======================================================================
@@ -104,14 +71,25 @@ fn canonical_id_from_source(root: &Path, path: &Path) -> String {
 }
 
 // ======================================================================
-// IndexedJson handlers (reuse a single DB instance)
+// 1. FOLDER SCAN ADAPTER — matches serve::indexer::StartFolderScanFn
 // ======================================================================
 
-async fn handle_fm_index(
-    root: PathBuf,
-    served_path: PathBuf,
-    fm: Json,
-) -> Result<(), FrontMatterIndexError> {
+pub fn start_scan(
+    root: &Path,
+    cfg: &FolderScanConfig,
+) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), Error> {
+    let (tx, rx) = mpsc::channel(cfg.channel_capacity);
+    let stop = start_folder_scan(root, cfg.clone(), tx)?;
+    let stop_fn: ScanStopFn = Box::new(move || stop());
+    Ok((rx, stop_fn))
+}
+
+// ======================================================================
+// 2. FRONT MATTER INDEXER (sync) — matches IndexFrontMatterFn
+// ======================================================================
+
+#[tracing::instrument(skip_all)]
+pub async fn index_front_matter(root: PathBuf, served_path: &Path, fm: &Json) -> Result<(), Error> {
     // IMPORTANT: use canonical *served* ID, not absolute FS path.
     let id = canonical_id_from_source(&root, &served_path);
     let mut record = IndexRecord::from_json_with_id(id, &fm);
@@ -128,23 +106,19 @@ async fn handle_fm_index(
     }
 
     if let Some(db) = INDEX.write().await.as_mut() {
-        db.append(&record)
-            .await
-            .map_err(FrontMatterIndexError::IndexedJson)?;
+        db.append(&record).await.map_err(Error::IndexedJson)?;
 
-        db.flush().await.map_err(FrontMatterIndexError::IndexedJson)
+        db.flush().await.map_err(Error::IndexedJson)
     } else {
-        Err(FrontMatterIndexError::NoIndex("No Database".into()))
+        Err(Error::NoIndex("No Database".into()))
     }
 }
 
-/// Linear scan by `record.id == served_path` (served-path form).
+/// Public helper used by the resolver to load front matter by served path.
 ///
-/// We serialize the IndexRecord back to JSON to use as front_matter.
-/// This is the *projection* shape, not necessarily the original FM.
-async fn handle_get_front_matter_by_path(
-    served_path: &Path,
-) -> Result<Option<Json>, FrontMatterIndexError> {
+/// `served_path` here is already HTTP-style (e.g. `/index.html`).
+/// Returns Ok(None) if the id is not present in the index.
+pub async fn lookup_front_matter_by_path(served_path: &Path) -> Result<Option<Json>, Error> {
     if let Some(db) = INDEX.write().await.as_mut() {
         let mut current = match db.first() {
             Some(entry) => entry,
@@ -157,24 +131,26 @@ async fn handle_get_front_matter_by_path(
                     // NOTE: If IndexRecord.id is a String, you may need to
                     // compare to served_path.to_string_lossy().
                     if rec.id == served_path.to_path_buf() {
-                        let json = serde_json::to_value(rec)
-                            .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
+                        let json =
+                            serde_json::to_value(rec).map_err(|e| Error::IndexedJson(e.into()))?;
                         return Ok(Some(json));
                     }
                     current = next;
                 }
                 Ok(None) => return Ok(None),
-                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
+                Err(e) => return Err(Error::IndexedJson(e.into())),
             }
         }
     } else {
-        Err(FrontMatterIndexError::NoIndex("No Database".into()))
+        Err(Error::NoIndex("No Database".into()))
     }
 }
 
-async fn handle_get_front_matter_by_slug(
-    slug: &str,
-) -> Result<Option<Json>, FrontMatterIndexError> {
+/// Public helper used by the resolver to load front matter by **slug**.
+///
+/// This scans the IndexedJson archive for a record whose `slug` field
+/// matches the provided slug. Returns Ok(None) if not found.
+pub async fn lookup_front_matter_by_slug(slug: &str) -> Result<Option<Json>, Error> {
     if let Some(db) = INDEX.write().await.as_mut() {
         let mut current = match db.first() {
             None => return Ok(None),
@@ -187,75 +163,28 @@ async fn handle_get_front_matter_by_slug(
                     if let Some(s) = &rec.slug {
                         if s == &slug {
                             let json = serde_json::to_value(rec)
-                                .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
+                                .map_err(|e| Error::IndexedJson(e.into()))?;
                             return Ok(Some(json));
                         }
                     }
                     current = next;
                 }
                 Ok(None) => return Ok(None),
-                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
+                Err(e) => return Err(Error::IndexedJson(e.into())),
             }
         }
     } else {
-        Err(FrontMatterIndexError::NoIndex("No Database".into()))
+        Err(Error::NoIndex("No Database".into()))
     }
 }
 
-// ======================================================================
-// 1. FOLDER SCAN ADAPTER — matches serve::indexer::StartFolderScanFn
-// ======================================================================
-
-pub fn start_scan(
-    root: &Path,
-    cfg: &FolderScanConfig,
-) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), EdgeError> {
-    let (tx, rx) = mpsc::channel(cfg.channel_capacity);
-    let stop = start_folder_scan(root, cfg.clone(), tx)?;
-    let stop_fn: ScanStopFn = Box::new(move || stop());
-    Ok((rx, stop_fn))
-}
-
-// ======================================================================
-// 2. FRONT MATTER INDEXER (sync) — matches IndexFrontMatterFn
-// ======================================================================
-
-#[tracing::instrument(skip_all)]
-pub async fn index_front_matter(
-    root: PathBuf,
-    served_path: &Path,
-    fm: &Json,
-) -> Result<(), FrontMatterIndexError> {
-    handle_fm_index(root, served_path.to_path_buf(), fm.clone()).await
-}
-
-/// Public helper used by the resolver to load front matter by served path.
-///
-/// `served_path` here is already HTTP-style (e.g. `/index.html`).
-/// Returns Ok(None) if the id is not present in the index.
-pub async fn lookup_front_matter_by_path(
-    served_path: &Path,
-) -> Result<Option<Json>, FrontMatterIndexError> {
-    handle_get_front_matter_by_path(served_path).await
-}
-
-/// Public helper used by the resolver to load front matter by **slug**.
-///
-/// This scans the IndexedJson archive for a record whose `slug` field
-/// matches the provided slug. Returns Ok(None) if not found.
-pub async fn lookup_front_matter_by_slug(
-    slug: &str,
-) -> Result<Option<Json>, FrontMatterIndexError> {
-    handle_get_front_matter_by_slug(slug).await
-}
-
-pub async fn lookup_body(key: &str) -> Result<Option<Arc<String>>, ContentBodyIndexError> {
+pub async fn lookup_body(key: &str) -> Result<Option<Arc<String>>, Error> {
     if let Some(cas) = CAS.write().await.as_mut() {
         let cursor = cas.get(Path::new(key))?;
         let bytes = cursor.into_inner(); // take ownership of the Vec<u8>
         Ok(Some(Arc::new(String::from_utf8(bytes)?)))
     } else {
-        Err(ContentBodyIndexError::NoCas("No Database".into()))
+        Err(Error::NoCas("No Database".into()))
     }
 }
 
@@ -268,7 +197,7 @@ pub async fn index_body(
     served_path: &Path,
     html: &str,
     _kind: BodyKind,
-) -> Result<(), ContentBodyIndexError> {
+) -> Result<(), Error> {
     if let Some(cas) = CAS.write().await.as_mut() {
         // Canonicalize to served ID so CAS lookups by HTTP path work.
         let id = canonical_id_from_source(root, served_path);
@@ -276,7 +205,7 @@ pub async fn index_body(
         cas.add(Path::new(&id), &mut cursor)?;
         Ok(())
     } else {
-        Err(ContentBodyIndexError::NoCas("No Cas".into()))
+        Err(Error::NoCas("No Cas".into()))
     }
 }
 
@@ -292,7 +221,7 @@ impl ContentMgr {
 }
 #[async_trait]
 impl ContentManager for ContentMgr {
-    async fn scan_file(&self, path: &Path) -> Result<String, DocContextError> {
+    async fn scan_file(&self, path: &Path) -> Result<String, serve::Error> {
         let bytes = fs::read(path)?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
     }
@@ -301,18 +230,14 @@ impl ContentManager for ContentMgr {
         &self,
         root: &Path,
         cfg: &FolderScanConfig,
-    ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), DocContextError> {
-        start_scan(root, cfg).map_err(|e| DocContextError::Scan(e.to_string()))
+    ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), serve::Error> {
+        start_scan(root, cfg).map_err(|e| serve::Error::Scan(e.to_string()))
     }
 
-    async fn index_front_matter(
-        &self,
-        served_path: &Path,
-        fm: &Json,
-    ) -> Result<(), DocContextError> {
+    async fn index_front_matter(&self, served_path: &Path, fm: &Json) -> Result<(), serve::Error> {
         index_front_matter(self.root.clone(), served_path, fm)
             .await
-            .map_err(|e| DocContextError::FrontMatterIndex(e.to_string()))
+            .map_err(|e| serve::Error::FrontMatterIndex(e.to_string()))
     }
 
     async fn index_body(
@@ -320,27 +245,27 @@ impl ContentManager for ContentMgr {
         served_path: &Path,
         html: &str,
         kind: BodyKind,
-    ) -> Result<(), DocContextError> {
+    ) -> Result<(), serve::Error> {
         index_body(self.root.as_path(), served_path, html, kind)
             .await
-            .map_err(|e| DocContextError::ContentIndex(e.to_string()))
+            .map_err(|e| serve::Error::ContentIndex(e.to_string()))
     }
 
-    async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, ResolverError> {
+    async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, serve::Error> {
         lookup_front_matter_by_slug(slug)
             .await
-            .map_err(|e| ResolverError::Backend(e.to_string()))
+            .map_err(|e| serve::Error::Backend(e.to_string()))
     }
 
-    async fn lookup_served(&self, served: &str) -> Result<Option<Json>, ResolverError> {
+    async fn lookup_served(&self, served: &str) -> Result<Option<Json>, serve::Error> {
         lookup_front_matter_by_path(Path::new(served))
             .await
-            .map_err(|e| ResolverError::Backend(e.to_string()))
+            .map_err(|e| serve::Error::Backend(e.to_string()))
     }
 
-    async fn lookup_body(&self, key: &str) -> Result<Option<Arc<String>>, ResolverError> {
+    async fn lookup_body(&self, key: &str) -> Result<Option<Arc<String>>, serve::Error> {
         lookup_body(key)
             .await
-            .map_err(|e| ResolverError::Backend(e.to_string()))
+            .map_err(|e| serve::Error::Backend(e.to_string()))
     }
 }

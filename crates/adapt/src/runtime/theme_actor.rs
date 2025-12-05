@@ -1,8 +1,7 @@
 // crates/adapt/src/runtime/theme_actor.rs
 
-use crate::js::engine::BoaEngine;
 use crate::runtime::bootstrap::BoundTheme;
-use crate::runtime::error::RuntimeError;
+use crate::{js::engine::BoaEngine, Error};
 use serve::render::http::{RequestContext, ResponseBodySpec};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
@@ -12,14 +11,14 @@ enum ThemeCommand {
     /// Call `init` on all themes with the given context.
     InitAll {
         ctx: RequestContext,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
+        reply: oneshot::Sender<Result<(), Error>>,
     },
 
     /// Render using a specific theme id.
     Render {
         theme_id: String,
         ctx: RequestContext,
-        reply: oneshot::Sender<Result<ResponseBodySpec, RuntimeError>>,
+        reply: oneshot::Sender<Result<ResponseBodySpec, Error>>,
     },
 
     /// Stop the actor loop.
@@ -50,7 +49,7 @@ impl ThemeRuntimeClient {
     }
 
     /// Initialize all themes with a context (optional, but often useful at boot).
-    pub async fn init_all(&self, ctx: RequestContext) -> Result<(), RuntimeError> {
+    pub async fn init_all(&self, ctx: RequestContext) -> Result<(), Error> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
@@ -70,7 +69,7 @@ impl ThemeRuntimeClient {
         &self,
         theme_id: &str,
         ctx: RequestContext,
-    ) -> Result<ResponseBodySpec, RuntimeError> {
+    ) -> Result<ResponseBodySpec, Error> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
@@ -92,8 +91,8 @@ impl ThemeRuntimeClient {
     }
 }
 
-fn channel_error(msg: &str) -> RuntimeError {
-    RuntimeError::ThemeBootstrap(msg.to_string())
+fn channel_error(msg: &str) -> Error {
+    Error::ThemeBootstrap(msg.to_string())
 }
 
 async fn theme_actor_loop(
@@ -119,7 +118,7 @@ async fn theme_actor_loop(
                     for theme in themes_by_id.values_mut() {
                         theme.init(&ctx)?;
                     }
-                    Ok::<_, RuntimeError>(())
+                    Ok::<_, Error>(())
                 })();
 
                 let _ = reply.send(res);
@@ -132,7 +131,7 @@ async fn theme_actor_loop(
             } => {
                 let res = (|| {
                     let theme = themes_by_id.get_mut(&theme_id).ok_or_else(|| {
-                        RuntimeError::ThemeBootstrap(format!("unknown theme id: {theme_id}"))
+                        Error::ThemeBootstrap(format!("unknown theme id: {theme_id}"))
                     })?;
 
                     theme.render(ctx)
@@ -183,7 +182,7 @@ mod tests {
         let err = channel_error("actor issue");
 
         match err {
-            RuntimeError::ThemeBootstrap(msg) => {
+            Error::ThemeBootstrap(msg) => {
                 assert_eq!(msg, "actor issue");
             }
             other => panic!("expected ThemeBootstrap error, got {other:?}"),
@@ -205,7 +204,7 @@ mod tests {
 
         let res = client.init_all(dummy_ctx()).await;
         match res {
-            Err(RuntimeError::ThemeBootstrap(msg)) => {
+            Err(Error::ThemeBootstrap(msg)) => {
                 assert!(
                     msg.contains("terminated before init_all"),
                     "expected channel error message, got {msg}"
@@ -252,7 +251,7 @@ mod tests {
 
         let res = client.render("default", dummy_ctx()).await;
         match res {
-            Err(RuntimeError::ThemeBootstrap(msg)) => {
+            Err(Error::ThemeBootstrap(msg)) => {
                 assert!(
                     msg.contains("terminated before render"),
                     "expected channel error message, got {msg}"
@@ -278,7 +277,7 @@ mod tests {
 
                 let res = client.render("missing-theme", dummy_ctx()).await;
                 match res {
-                    Err(RuntimeError::ThemeBootstrap(msg)) => {
+                    Err(Error::ThemeBootstrap(msg)) => {
                         assert!(
                             msg.contains("unknown theme id: missing-theme"),
                             "unexpected error message: {msg}"
@@ -318,7 +317,7 @@ mod tests {
                 // render with unknown theme id should give ThemeBootstrap error.
                 let render_res = client.render("nonexistent", dummy_ctx()).await;
                 match render_res {
-                    Err(RuntimeError::ThemeBootstrap(msg)) => {
+                    Err(Error::ThemeBootstrap(msg)) => {
                         assert!(
                             msg.contains("unknown theme id: nonexistent"),
                             "unexpected error message: {msg}"

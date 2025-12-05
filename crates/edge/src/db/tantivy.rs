@@ -1,15 +1,13 @@
 // crates/edge/src/db/tantivy.rs
 
+use crate::Error;
 use std::fs;
-use std::io::{self, Cursor, Read};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-use thiserror::Error;
-
 use tantivy::collector::TopDocs;
-use tantivy::directory::{error::OpenDirectoryError, MmapDirectory};
-use tantivy::query::{QueryParser, QueryParserError, TermQuery};
+use tantivy::directory::MmapDirectory;
+use tantivy::query::{QueryParser, TermQuery};
 use tantivy::schema::document::{OwnedValue, TantivyDocument};
 use tantivy::schema::{Field, NamedFieldDocument, Schema, STORED, STRING, TEXT};
 use tantivy::Document;
@@ -25,34 +23,7 @@ pub struct SearchHit {
     pub score: f32,
 }
 
-#[derive(Debug, Error)]
-pub enum ContentIndexError {
-    #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("Tantivy error: {0}")]
-    Tantivy(#[from] tantivy::TantivyError),
-
-    #[error("query parse error: {0}")]
-    QueryParse(#[from] QueryParserError),
-
-    #[error("failed to open directory: {0}")]
-    OpenDirectory(#[from] OpenDirectoryError),
-
-    #[error("writer lock was poisoned")]
-    WriterPoisoned,
-
-    #[error("document with path {0:?} not found")]
-    NotFound(PathBuf),
-
-    #[error("path field missing or not a string")]
-    MissingPathField,
-
-    #[error("content field missing or not a string")]
-    MissingContentField,
-}
-
-pub type Result<T> = std::result::Result<T, ContentIndexError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Thin wrapper around Tantivy for storing & searching documents by path.
 ///
@@ -118,10 +89,7 @@ impl ContentIndex {
 
         let path_str = path.to_string_lossy().to_string();
 
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| ContentIndexError::WriterPoisoned)?;
+        let mut writer = self.writer.lock().map_err(|_| Error::WriterPoisoned)?;
 
         let doc = doc!(
             self.path_field => path_str,
@@ -147,7 +115,7 @@ impl ContentIndex {
         missing_factory: F,
     ) -> Result<String>
     where
-        F: Fn() -> ContentIndexError,
+        F: Fn() -> Error,
     {
         // NamedFieldDocument(BTreeMap<String, Vec<OwnedValue>>)
         let value = named
@@ -175,7 +143,7 @@ impl ContentIndex {
         let (_, doc_address): (f32, DocAddress) = top_docs
             .into_iter()
             .next()
-            .ok_or_else(|| ContentIndexError::NotFound(path.to_path_buf()))?;
+            .ok_or_else(|| Error::NotFound(path.to_path_buf()))?;
 
         // Concrete document type: schema::document::TantivyDocument
         let retrieved: TantivyDocument = searcher.doc(doc_address)?;
@@ -183,9 +151,8 @@ impl ContentIndex {
         // Convert to NamedFieldDocument so we can extract fields by name.
         let named_doc: NamedFieldDocument = retrieved.to_named_doc(&self.schema);
 
-        let content_str = Self::first_string_from_named(&named_doc, "content", || {
-            ContentIndexError::MissingContentField
-        })?;
+        let content_str =
+            Self::first_string_from_named(&named_doc, "content", || Error::MissingContentField)?;
 
         Ok(Cursor::new(content_str.into_bytes()))
     }
@@ -213,9 +180,8 @@ impl ContentIndex {
             let retrieved: TantivyDocument = searcher.doc(doc_address)?;
             let named_doc: NamedFieldDocument = retrieved.to_named_doc(&self.schema);
 
-            let path_str = Self::first_string_from_named(&named_doc, "path", || {
-                ContentIndexError::MissingPathField
-            })?;
+            let path_str =
+                Self::first_string_from_named(&named_doc, "path", || Error::MissingPathField)?;
 
             hits.push(SearchHit {
                 path: PathBuf::from(path_str),
@@ -272,7 +238,7 @@ mod tests {
         let err = index.get(&missing).unwrap_err();
 
         match err {
-            ContentIndexError::NotFound(p) => {
+            Error::NotFound(p) => {
                 assert_eq!(p, missing);
             }
             other => panic!("expected NotFound error, got {other:?}"),

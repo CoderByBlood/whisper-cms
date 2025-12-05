@@ -1,12 +1,13 @@
 // crates/edge/src/cli.rs
 
 use crate::fs::index::{set_cas_index, ContentMgr};
+use crate::Error;
 use crate::{
     fs::{
         ext::{self, DiscoveredPlugin, DiscoveredTheme, ThemeBinding},
         filter::{self, DEFAULT_CONTENT_EXTS},
     },
-    proxy::{EdgeError, EdgeRuntime},
+    proxy::EdgeRuntime,
 };
 use adapt::runtime::bootstrap::{bootstrap_all, RuntimeHandles};
 use chrono::Utc;
@@ -21,7 +22,7 @@ use std::{path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
 use tracing::{debug, error, info};
 
-pub type Result<T> = std::result::Result<T, EdgeError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// WhisperCMS CLI — Edge Layer
 #[tokio::main(flavor = "multi_thread")]
@@ -224,7 +225,7 @@ impl StartProcess<CommandIssued> {
         let dir = command.dir.clone();
         // Ensure directory exists
         if !dir.exists() {
-            return Err(EdgeError::Config(format!(
+            return Err(Error::Config(format!(
                 "Settings directory does not exist: {}",
                 dir.display()
             )));
@@ -236,20 +237,19 @@ impl StartProcess<CommandIssued> {
 
         // Ensure file exists
         if !path.exists() {
-            return Err(EdgeError::Config(format!(
+            return Err(Error::Config(format!(
                 "settings.toml not found at {}",
                 path.display()
             )));
         }
 
         // Read the file
-        let text = std::fs::read_to_string(&path).map_err(|err| {
-            EdgeError::Config(format!("Failed reading {}: {}", path.display(), err))
-        })?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| Error::Config(format!("Failed reading {}: {}", path.display(), err)))?;
 
         // Deserialize
         let settings: Settings = toml::from_str(&text).map_err(|err| {
-            EdgeError::Config(format!(
+            Error::Config(format!(
                 "Invalid settings.toml at {}: {}",
                 path.display(),
                 err

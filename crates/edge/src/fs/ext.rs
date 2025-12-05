@@ -1,8 +1,8 @@
 // crates/edge/src/fs/ext.rs
 
-use adapt::runtime::error::RuntimeError;
 use adapt::runtime::plugin::PluginSpec;
 use adapt::runtime::theme::ThemeSpec;
+use adapt::Error;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ struct ThemeManifest {
 // Plugin discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>, RuntimeError> {
+pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>, Error> {
     let root = root.as_ref();
 
     if !root.exists() {
@@ -81,10 +81,10 @@ pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>,
     let mut out = Vec::new();
 
     for entry in fs::read_dir(root)
-        .map_err(|e| RuntimeError::Other(format!("failed to read plugin root {:?}: {e}", root)))?
+        .map_err(|e| Error::Other(format!("failed to read plugin root {:?}: {e}", root)))?
     {
-        let entry = entry
-            .map_err(|e| RuntimeError::Other(format!("failed to read plugin dir entry: {e}")))?;
+        let entry =
+            entry.map_err(|e| Error::Other(format!("failed to read plugin dir entry: {e}")))?;
 
         let path = entry.path();
         if !path.is_dir() {
@@ -97,14 +97,14 @@ pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>,
         }
 
         let manifest_src = fs::read_to_string(&manifest_path).map_err(|e| {
-            RuntimeError::Other(format!(
+            Error::Other(format!(
                 "failed reading plugin manifest {:?}: {e}",
                 manifest_path
             ))
         })?;
 
         let manifest: PluginManifest = toml::from_str(&manifest_src).map_err(|e| {
-            RuntimeError::Other(format!(
+            Error::Other(format!(
                 "failed parsing plugin manifest {:?}: {e}",
                 manifest_path
             ))
@@ -122,7 +122,7 @@ pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>,
         let main_path = path.join(&main);
 
         let js_src = fs::read_to_string(&main_path).map_err(|e| {
-            RuntimeError::Other(format!(
+            Error::Other(format!(
                 "failed reading plugin JS file {:?}: {e}",
                 main_path
             ))
@@ -144,7 +144,7 @@ pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>,
 // Theme discovery
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, RuntimeError> {
+pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, Error> {
     let root = root.as_ref();
 
     if !root.exists() {
@@ -154,10 +154,10 @@ pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, R
     let mut out = Vec::new();
 
     for entry in fs::read_dir(root)
-        .map_err(|e| RuntimeError::Other(format!("failed to read themes root {:?}: {e}", root)))?
+        .map_err(|e| Error::Other(format!("failed to read themes root {:?}: {e}", root)))?
     {
-        let entry = entry
-            .map_err(|e| RuntimeError::Other(format!("failed to read theme dir entry: {e}")))?;
+        let entry =
+            entry.map_err(|e| Error::Other(format!("failed to read theme dir entry: {e}")))?;
 
         let path = entry.path();
         if !path.is_dir() {
@@ -170,14 +170,14 @@ pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, R
         }
 
         let manifest_src = fs::read_to_string(&manifest_path).map_err(|e| {
-            RuntimeError::Other(format!(
+            Error::Other(format!(
                 "failed reading theme manifest {:?}: {e}",
                 manifest_path
             ))
         })?;
 
         let manifest: ThemeManifest = toml::from_str(&manifest_src).map_err(|e| {
-            RuntimeError::Other(format!(
+            Error::Other(format!(
                 "failed parsing theme manifest {:?}: {e}",
                 manifest_path
             ))
@@ -195,7 +195,7 @@ pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, R
         let main_path = path.join(&main);
 
         let js_src = fs::read_to_string(&main_path).map_err(|e| {
-            RuntimeError::Other(format!("failed reading theme JS file {:?}: {e}", main_path))
+            Error::Other(format!("failed reading theme JS file {:?}: {e}", main_path))
         })?;
 
         let assets_dir = match path.join("assets/") {

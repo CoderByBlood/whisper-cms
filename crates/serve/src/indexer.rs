@@ -13,18 +13,14 @@
 //! After indexing, the runtime resolvers (in edge + serve/resolver.rs) will search these
 //! stores using additional functions injected separately.
 
+use crate::Error;
 use async_trait::async_trait;
 use domain::doc::{BodyKind, Document, FmKind};
 use regex::Regex;
 use serde_json::Value as Json;
-use thiserror::Error;
-
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-use crate::resolver::ResolverError;
 
 // ---------------------------------------------------------------------------
 // Folder Scan Configuration
@@ -72,40 +68,6 @@ impl std::fmt::Debug for DocContext {
 }
 
 // ---------------------------------------------------------------------------
-// Error Types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Error)]
-pub enum DocContextError {
-    #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("front matter parse error: {0}")]
-    FrontMatter(String),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("front-matter index error: {0}")]
-    FrontMatterIndex(String),
-
-    #[error("content index error: {0}")]
-    ContentIndex(String),
-
-    #[error("AsciiDoc conversion error: {0}")]
-    AsciiDoc(String),
-
-    #[error("reStructuredText conversion error: {0}")]
-    ReStructuredText(String),
-
-    #[error("Org-mode conversion error: {0}")]
-    Org(String),
-
-    #[error("Edge scan error: {0}")]
-    Scan(String),
-}
-
-// ---------------------------------------------------------------------------
 // Injection Function Types (provided by edge layer)
 // ---------------------------------------------------------------------------
 
@@ -113,30 +75,22 @@ pub type ScanStopFn = Box<dyn FnOnce() + Send + 'static>;
 
 #[async_trait]
 pub trait ContentManager {
-    async fn scan_file(&self, path: &Path) -> Result<String, DocContextError>;
+    async fn scan_file(&self, path: &Path) -> Result<String, Error>;
 
     async fn scan_folder(
         &self,
         root: &Path,
         cfg: &FolderScanConfig,
-    ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), DocContextError>;
+    ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), Error>;
 
-    async fn index_front_matter(
-        &self,
-        served_path: &Path,
-        fm: &Json,
-    ) -> Result<(), DocContextError>;
+    async fn index_front_matter(&self, served_path: &Path, fm: &Json) -> Result<(), Error>;
 
-    async fn index_body(
-        &self,
-        served_path: &Path,
-        html: &str,
-        kind: BodyKind,
-    ) -> Result<(), DocContextError>;
+    async fn index_body(&self, served_path: &Path, html: &str, kind: BodyKind)
+        -> Result<(), Error>;
 
-    async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, ResolverError>;
-    async fn lookup_served(&self, served: &str) -> Result<Option<Json>, ResolverError>;
-    async fn lookup_body(&self, body: &str) -> Result<Option<Arc<String>>, ResolverError>;
+    async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, Error>;
+    async fn lookup_served(&self, served: &str) -> Result<Option<Json>, Error>;
+    async fn lookup_body(&self, body: &str) -> Result<Option<Arc<String>>, Error>;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +142,7 @@ fn served_path_for_source(path: &Path) -> PathBuf {
 async fn read_document_utf8(
     mut ctx: DocContext,
     scan_indexer: &impl ContentManager,
-) -> Result<DocContext, DocContextError> {
+) -> Result<DocContext, Error> {
     if ctx.document.cache.is_some() {
         return Ok(ctx);
     }
@@ -202,7 +156,7 @@ async fn read_document_utf8(
 pub async fn upsert_front_matter_db(
     ctx: DocContext,
     scan_indexer: &impl ContentManager,
-) -> Result<DocContext, DocContextError> {
+) -> Result<DocContext, Error> {
     use gray_matter::engine::YAML;
     use gray_matter::Matter;
 
@@ -241,12 +195,12 @@ pub async fn upsert_front_matter_db(
                     Ok(toml_val) => {
                         fm_json = Some(
                             serde_json::to_value(toml_val)
-                                .map_err(|e| DocContextError::FrontMatter(e.to_string()))?,
+                                .map_err(|e| Error::FrontMatter(e.to_string()))?,
                         );
                         fm_kind = Some(FmKind::Toml);
                         body = Some(after[end_idx + 4..].trim_start().to_owned());
                     }
-                    Err(e) => return Err(DocContextError::FrontMatter(e.to_string())),
+                    Err(e) => return Err(Error::FrontMatter(e.to_string())),
                 }
             }
         }
@@ -262,7 +216,7 @@ pub async fn upsert_front_matter_db(
                     fm_kind = Some(FmKind::Json);
                     body = Some(String::new());
                 }
-                Err(e) => return Err(DocContextError::FrontMatter(e.to_string())),
+                Err(e) => return Err(Error::FrontMatter(e.to_string())),
             }
         }
     }
@@ -277,7 +231,7 @@ pub async fn upsert_front_matter_db(
         scan_indexer
             .index_front_matter(&served, &data)
             .await
-            .map_err(|e| DocContextError::FrontMatterIndex(e.to_string()))?;
+            .map_err(|e| Error::FrontMatterIndex(e.to_string()))?;
     }
 
     if let Some(kind) = fm_kind {
@@ -295,7 +249,7 @@ pub async fn upsert_front_matter_db(
 // Stage 2 — Body Rendering + Content Indexing
 // ---------------------------------------------------------------------------
 
-fn render_asciidoc(src: &str, origin: &Path) -> Result<String, DocContextError> {
+fn render_asciidoc(src: &str, origin: &Path) -> Result<String, Error> {
     use asciidocr::backends::htmls::render_htmlbook;
     use asciidocr::parser::Parser;
     use asciidocr::scanner::Scanner;
@@ -304,36 +258,34 @@ fn render_asciidoc(src: &str, origin: &Path) -> Result<String, DocContextError> 
     let mut parser = Parser::new(origin.to_path_buf());
     let graph = parser
         .parse(scanner)
-        .map_err(|e| DocContextError::AsciiDoc(e.to_string()))?;
-    Ok(render_htmlbook(&graph).map_err(|e| DocContextError::AsciiDoc(e.to_string()))?)
+        .map_err(|e| Error::AsciiDoc(e.to_string()))?;
+    Ok(render_htmlbook(&graph).map_err(|e| Error::AsciiDoc(e.to_string()))?)
 }
 
-fn render_rst(src: &str) -> Result<String, DocContextError> {
+fn render_rst(src: &str) -> Result<String, Error> {
     use rst_parser::parse_only;
     use rst_renderer::render_html;
 
-    let doc = parse_only(src).map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
+    let doc = parse_only(src).map_err(|e| Error::ReStructuredText(e.to_string()))?;
     let mut buf = Vec::new();
-    render_html(&doc, &mut buf, true)
-        .map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
-    let html =
-        String::from_utf8(buf).map_err(|e| DocContextError::ReStructuredText(e.to_string()))?;
+    render_html(&doc, &mut buf, true).map_err(|e| Error::ReStructuredText(e.to_string()))?;
+    let html = String::from_utf8(buf).map_err(|e| Error::ReStructuredText(e.to_string()))?;
     Ok(html)
 }
 
-fn render_org(src: &str) -> Result<String, DocContextError> {
+fn render_org(src: &str) -> Result<String, Error> {
     use orgize::Org;
     let org = Org::parse(src);
     let mut buf = Vec::new();
     org.write_html(&mut buf)
-        .map_err(|e| DocContextError::Org(e.to_string()))?;
-    Ok(String::from_utf8(buf).map_err(|e| DocContextError::Org(e.to_string()))?)
+        .map_err(|e| Error::Org(e.to_string()))?;
+    Ok(String::from_utf8(buf).map_err(|e| Error::Org(e.to_string()))?)
 }
 
 pub async fn upsert_body_db(
     ctx: DocContext,
     scan_indexer: &impl ContentManager,
-) -> Result<DocContext, DocContextError> {
+) -> Result<DocContext, Error> {
     let mut ctx = read_document_utf8(ctx, scan_indexer).await?;
 
     let ext = ctx.document.path.extension().and_then(|s| s.to_str());
@@ -362,7 +314,7 @@ pub async fn upsert_body_db(
     scan_indexer
         .index_body(&served, &html, kind)
         .await
-        .map_err(|e| DocContextError::ContentIndex(e.to_string()))?;
+        .map_err(|e| Error::ContentIndex(e.to_string()))?;
 
     ctx.document = ctx.document.with_body_kind(kind);
     Ok(ctx)
@@ -376,7 +328,7 @@ pub async fn scan_and_process_docs(
     root: &Path,
     scan_cfg: FolderScanConfig,
     scan_indexer: impl ContentManager,
-) -> Result<(Vec<Document>, Vec<(PathBuf, DocContextError)>), DocContextError> {
+) -> Result<(Vec<Document>, Vec<(PathBuf, Error)>), Error> {
     let (mut rx, stop) = scan_indexer.scan_folder(root, &scan_cfg).await?;
 
     let mut docs = Vec::new();
@@ -389,7 +341,7 @@ pub async fn scan_and_process_docs(
         let processed = async {
             let ctx = upsert_front_matter_db(ctx, &scan_indexer).await?;
             let ctx = upsert_body_db(ctx, &scan_indexer).await?;
-            Ok::<_, DocContextError>(ctx)
+            Ok::<_, Error>(ctx)
         }
         .await;
 

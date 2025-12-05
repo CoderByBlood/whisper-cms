@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use super::bridge::{ctx_to_js_for_plugins, merge_recommendations_from_js, CTX_SHIM_SRC};
-use super::error::RuntimeError;
-use crate::js::{JsEngine, JsError, JsValue};
+use crate::js::{JsEngine, JsValue};
+use crate::Error;
 use serve::render::http::RequestContext;
 
 use serde_json;
@@ -66,7 +66,7 @@ fn build_plugin_prelude(internal_id: &str) -> String {
 
 impl<E: JsEngine> PluginRuntime<E> {
     #[tracing::instrument(skip_all)]
-    pub fn new(mut engine: E) -> Result<Self, RuntimeError> {
+    pub fn new(mut engine: E) -> Result<Self, Error> {
         engine.load_module("__ctx_shim__", CTX_SHIM_SRC)?;
         Ok(Self {
             engine,
@@ -75,7 +75,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn load_plugins(&mut self, specs: &[PluginSpec]) -> Result<(), RuntimeError> {
+    pub fn load_plugins(&mut self, specs: &[PluginSpec]) -> Result<(), Error> {
         for spec in specs {
             let configured_id = spec.id.clone();
             let internal_id = format!("plugin_{}", Uuid::new_v4().simple());
@@ -104,7 +104,7 @@ impl<E: JsEngine> PluginRuntime<E> {
 
     /// Call `init(ctx)` on every loaded plugin, in registration order.
     #[tracing::instrument(skip_all)]
-    pub fn init_all(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
+    pub fn init_all(&mut self, ctx: &RequestContext) -> Result<(), Error> {
         let metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
         for meta in &metas {
             self.call_init(meta, ctx)?;
@@ -113,7 +113,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn call_init(&mut self, meta: &PluginMeta, ctx: &RequestContext) -> Result<(), RuntimeError> {
+    fn call_init(&mut self, meta: &PluginMeta, ctx: &RequestContext) -> Result<(), Error> {
         let js_ctx = ctx_to_js_for_plugins(ctx, &meta.configured_id);
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
@@ -123,7 +123,7 @@ impl<E: JsEngine> PluginRuntime<E> {
             .engine
             .call_function("init", &[js_ctx])
             .or_else(|err| {
-                if let JsError::Call(msg) = &err {
+                if let Error::Call(msg) = &err {
                     if msg.contains("is not a function") {
                         // Plugin has no init(ctx); that's fine.
                         return Ok(JsValue::Null);
@@ -143,7 +143,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     // ─────────────────────────────────────────────────────────────────────
 
     #[tracing::instrument(skip_all)]
-    pub fn before_all(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
+    pub fn before_all(&mut self, ctx: &mut RequestContext) -> Result<(), Error> {
         let metas: Vec<PluginMeta> = self.plugins.values().cloned().collect();
         for meta in &metas {
             self.call_before(meta, ctx)?;
@@ -152,7 +152,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn after_all(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
+    pub fn after_all(&mut self, ctx: &mut RequestContext) -> Result<(), Error> {
         // Reverse order for after()
         let mut metas: Vec<_> = self.plugins.values().cloned().collect();
         metas.reverse();
@@ -176,7 +176,7 @@ impl<E: JsEngine> PluginRuntime<E> {
         &mut self,
         configured_id: &str,
         ctx: &mut RequestContext,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), Error> {
         let meta_opt = {
             // Limit the immutable borrow of `self` to this block so we
             // can mutably borrow `self` later when calling `call_before`.
@@ -199,7 +199,7 @@ impl<E: JsEngine> PluginRuntime<E> {
         &mut self,
         configured_id: &str,
         ctx: &mut RequestContext,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<(), Error> {
         let meta_opt = {
             // Again, restrict the immutable borrow of `self` to this block.
             let mut iter = self.plugins.values();
@@ -217,11 +217,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     // ─────────────────────────────────────────────────────────────────────
 
     #[tracing::instrument(skip_all)]
-    fn call_before(
-        &mut self,
-        meta: &PluginMeta,
-        ctx: &mut RequestContext,
-    ) -> Result<(), RuntimeError> {
+    fn call_before(&mut self, meta: &PluginMeta, ctx: &mut RequestContext) -> Result<(), Error> {
         let js_ctx = ctx_to_js_for_plugins(ctx, &meta.configured_id);
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
@@ -231,7 +227,7 @@ impl<E: JsEngine> PluginRuntime<E> {
             .engine
             .call_function(&func_name, &[js_ctx])
             .or_else(|err| {
-                if let JsError::Call(msg) = &err {
+                if let Error::Call(msg) = &err {
                     if msg.contains("is not a function") {
                         // Plugin has no before() hook; silently ignore.
                         return Ok(JsValue::Null);
@@ -253,11 +249,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn call_after(
-        &mut self,
-        meta: &PluginMeta,
-        ctx: &mut RequestContext,
-    ) -> Result<(), RuntimeError> {
+    fn call_after(&mut self, meta: &PluginMeta, ctx: &mut RequestContext) -> Result<(), Error> {
         let js_ctx = ctx_to_js_for_plugins(ctx, &meta.configured_id);
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
 
@@ -267,7 +259,7 @@ impl<E: JsEngine> PluginRuntime<E> {
             .engine
             .call_function(&func_name, &[js_ctx])
             .or_else(|err| {
-                if let JsError::Call(msg) = &err {
+                if let Error::Call(msg) = &err {
                     if msg.contains("is not a function") {
                         // Plugin has no after() hook; silently ignore.
                         return Ok(JsValue::Null);

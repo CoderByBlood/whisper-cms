@@ -1,6 +1,6 @@
 // crates/serve/src/render/template.rs
 
-use super::error::RenderError;
+use crate::Error;
 use handlebars::{
     handlebars_helper, Context, Handlebars, Helper, HelperDef, HelperResult, Output, RenderContext,
 };
@@ -22,7 +22,7 @@ pub trait TemplateEngine: Send + Sync {
         template_name: &str,
         model: &M,
         out: &mut W,
-    ) -> Result<(), RenderError>
+    ) -> Result<(), Error>
     where
         M: Serialize,
         W: Write;
@@ -48,10 +48,10 @@ impl HbsEngine {
     }
 
     /// Register a template by name.
-    pub fn register_template_str(&mut self, name: &str, template: &str) -> Result<(), RenderError> {
+    pub fn register_template_str(&mut self, name: &str, template: &str) -> Result<(), Error> {
         self.handlebars
             .register_template_string(name, template)
-            .map_err(RenderError::from)
+            .map_err(Error::from)
     }
 }
 
@@ -61,14 +61,14 @@ impl TemplateEngine for HbsEngine {
         template_name: &str,
         model: &M,
         out: &mut W,
-    ) -> Result<(), RenderError>
+    ) -> Result<(), Error>
     where
         M: Serialize,
         W: Write,
     {
         self.handlebars
             .render_to_write(template_name, model, out)
-            .map_err(RenderError::from)
+            .map_err(Error::from)
     }
 }
 
@@ -153,11 +153,11 @@ impl TemplateRegistry {
     }
 
     /// Read the template source and decide which engine to use.
-    fn load_template(&self, template_name: &str) -> Result<(EngineKind, String), RenderError> {
+    fn load_template(&self, template_name: &str) -> Result<(EngineKind, String), Error> {
         let path = self.resolve_path(template_name);
 
         let src = fs::read_to_string(&path).map_err(|e| {
-            RenderError::Io(Self::io_other(format!(
+            Error::Io(Self::io_other(format!(
                 "failed to read template {:?}: {}",
                 path, e
             )))
@@ -169,7 +169,7 @@ impl TemplateRegistry {
             .unwrap_or("");
 
         let kind = EngineKind::from_extension(ext).ok_or_else(|| {
-            RenderError::Io(Self::io_other(format!(
+            Error::Io(Self::io_other(format!(
                 "unsupported template extension {:?} for {:?}",
                 ext, template_name
             )))
@@ -184,7 +184,7 @@ impl TemplateRegistry {
         src: &str,
         model: &M,
         out: &mut W,
-    ) -> Result<(), RenderError>
+    ) -> Result<(), Error>
     where
         M: Serialize,
         W: Write,
@@ -195,12 +195,12 @@ impl TemplateRegistry {
 
         let mut hbs = Handlebars::new();
         hbs.register_template_string(template_name, src)
-            .map_err(RenderError::from)?;
+            .map_err(Error::from)?;
         misc::register(&mut hbs);
         hbs.register_helper("dump", Box::new(dump_json));
         hbs.register_helper("dump_root", Box::new(DumpRoot));
         hbs.render_to_write(template_name, model, out)
-            .map_err(RenderError::from)
+            .map_err(Error::from)
     }
 
     fn render_with_minijinja<M, W>(
@@ -209,7 +209,7 @@ impl TemplateRegistry {
         src: &str,
         model: &M,
         out: &mut W,
-    ) -> Result<(), RenderError>
+    ) -> Result<(), Error>
     where
         M: Serialize,
         W: Write,
@@ -217,17 +217,17 @@ impl TemplateRegistry {
         let mut env = MiniJinjaEnv::new();
 
         env.add_template(template_name, src)
-            .map_err(|e: MiniJinjaError| RenderError::Io(Self::io_other(e.to_string())))?;
+            .map_err(|e: MiniJinjaError| Error::Io(Self::io_other(e.to_string())))?;
 
         let tmpl = env
             .get_template(template_name)
-            .map_err(|e: MiniJinjaError| RenderError::Io(Self::io_other(e.to_string())))?;
+            .map_err(|e: MiniJinjaError| Error::Io(Self::io_other(e.to_string())))?;
 
         let rendered = tmpl
             .render(model)
-            .map_err(|e: MiniJinjaError| RenderError::Io(Self::io_other(e.to_string())))?;
+            .map_err(|e: MiniJinjaError| Error::Io(Self::io_other(e.to_string())))?;
 
-        out.write_all(rendered.as_bytes()).map_err(RenderError::Io)
+        out.write_all(rendered.as_bytes()).map_err(Error::Io)
     }
 
     fn render_with_tera<M, W>(
@@ -236,7 +236,7 @@ impl TemplateRegistry {
         src: &str,
         model: &M,
         out: &mut W,
-    ) -> Result<(), RenderError>
+    ) -> Result<(), Error>
     where
         M: Serialize,
         W: Write,
@@ -244,16 +244,16 @@ impl TemplateRegistry {
         let mut tera = Tera::default();
 
         tera.add_raw_template(template_name, src)
-            .map_err(|e: TeraError| RenderError::Io(Self::io_other(e.to_string())))?;
+            .map_err(|e: TeraError| Error::Io(Self::io_other(e.to_string())))?;
 
         let ctx = TeraContext::from_serialize(model)
-            .map_err(|e: TeraError| RenderError::Io(Self::io_other(e.to_string())))?;
+            .map_err(|e: TeraError| Error::Io(Self::io_other(e.to_string())))?;
 
         let rendered = tera
             .render(template_name, &ctx)
-            .map_err(|e: TeraError| RenderError::Io(Self::io_other(e.to_string())))?;
+            .map_err(|e: TeraError| Error::Io(Self::io_other(e.to_string())))?;
 
-        out.write_all(rendered.as_bytes()).map_err(RenderError::Io)
+        out.write_all(rendered.as_bytes()).map_err(Error::Io)
     }
 }
 
@@ -263,7 +263,7 @@ impl TemplateEngine for TemplateRegistry {
         template_name: &str,
         model: &M,
         out: &mut W,
-    ) -> Result<(), RenderError>
+    ) -> Result<(), Error>
     where
         M: Serialize,
         W: Write,

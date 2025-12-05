@@ -1,13 +1,16 @@
-use std::process::ExitCode;
-
-use tracing::info;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-
 pub mod cli;
 pub mod db;
 pub mod fs;
 pub mod proxy;
 pub mod router;
+
+mod error;
+
+pub use error::Error;
+
+use std::process::ExitCode;
+use tracing::info;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn main() -> ExitCode {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")); // fallback

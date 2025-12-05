@@ -1,8 +1,10 @@
 // crates/adapt/src/runtime/theme.rs
 
 use super::bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js, CTX_SHIM_SRC};
-use super::error::RuntimeError;
-use crate::js::{JsEngine, JsValue};
+use crate::{
+    js::{JsEngine, JsValue},
+    Error,
+};
 use serde_json;
 use serve::render::http::RequestContext;
 use tracing::debug;
@@ -73,7 +75,7 @@ pub struct ThemeRuntime<E: JsEngine> {
 
 impl<E: JsEngine> ThemeRuntime<E> {
     #[tracing::instrument(skip_all)]
-    pub fn new(mut engine: E, spec: ThemeSpec) -> Result<Self, RuntimeError> {
+    pub fn new(mut engine: E, spec: ThemeSpec) -> Result<Self, Error> {
         let configured_id = spec.id;
         let internal_id = format!("theme_{}", Uuid::new_v4().simple());
 
@@ -97,7 +99,7 @@ impl<E: JsEngine> ThemeRuntime<E> {
 
     /// Optionally call `init(ctx)` once.
     #[tracing::instrument(skip_all)]
-    pub fn init(&mut self, ctx: &RequestContext) -> Result<(), RuntimeError> {
+    pub fn init(&mut self, ctx: &RequestContext) -> Result<(), Error> {
         let js_ctx = ctx_to_js_for_theme(ctx, &self.configured_id);
 
         let js_ctx = self.engine.call_function("__wrapCtx", &[js_ctx])?;
@@ -106,7 +108,7 @@ impl<E: JsEngine> ThemeRuntime<E> {
         self.engine
             .call_function("init", &[js_ctx])
             .or_else(|err| {
-                if let crate::js::JsError::Call(msg) = &err {
+                if let Error::Call(msg) = &err {
                     if msg.contains("is not a function") {
                         // theme has no init → fine
                         return Ok(JsValue::Null);
@@ -120,7 +122,7 @@ impl<E: JsEngine> ThemeRuntime<E> {
 
     /// Call `<internal_id>.render(ctx)` on the registered hooks.
     #[tracing::instrument(skip_all, fields(req_id = %ctx.req_id))]
-    pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), RuntimeError> {
+    pub fn handle(&mut self, ctx: &mut RequestContext) -> Result<(), Error> {
         debug!(
             "Before Handling theme {} with context {}",
             self.internal_id, ctx.req_id

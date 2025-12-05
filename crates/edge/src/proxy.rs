@@ -1,21 +1,21 @@
 // crates/edge/src/proxy.rs
 
+use crate::fs::ext::ThemeBinding;
+use crate::router::build_app_router;
+use crate::Error;
 use actix_web::dev::{ServerHandle, ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, HttpServer};
 use adapt::runtime::bootstrap::RuntimeHandles;
-use adapt::runtime::RuntimeError;
+use domain::setting::Settings;
 use http::{Response, StatusCode};
 use parking_lot::RwLock;
 use pingora::apps::http_app::{HttpServer as PingoraHttpServer, ServeHttp};
 use pingora::prelude::*;
 use pingora::protocols::http::server::Session as HttpSession;
-use pingora::protocols::raw_connect::ConnectProxyError;
 use pingora::proxy::{http_proxy_service, ProxyHttp, Session as ProxySession};
 use pingora::server::Server;
 use pingora::services::listening::Service as ListeningService;
 use pingora::upstreams::peer::HttpPeer;
-use serve::indexer::DocContextError;
-
 use std::{
     fs,
     net::{IpAddr, SocketAddr},
@@ -23,14 +23,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use thiserror::Error;
-
-use domain::setting::Settings;
-
-use crate::db::tantivy::ContentIndexError;
-use crate::fs::ext::ThemeBinding;
-use crate::fs::index::FrontMatterIndexError;
-use crate::router::build_app_router;
 
 /// Shared state: which loopback port is currently "active" for the WebServer.
 ///
@@ -54,43 +46,6 @@ impl BackendState {
     pub fn set(&self, addr: SocketAddr) {
         *self.inner.write() = addr;
     }
-}
-
-#[derive(Debug, Error)]
-pub enum EdgeError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-
-    // Note: Server::new returns Result<Server, Box<pingora::Error>>
-    #[error("Pingora error: {0}")]
-    Pingora(#[from] Box<pingora::Error>),
-
-    #[error("Config error: {0}")]
-    Config(String),
-
-    #[error("Channel closed")]
-    Channel,
-
-    #[error("Proxy error: {0}")]
-    Proxy(#[from] ConnectProxyError),
-
-    #[error("Content Index Error {0}")]
-    ContentIndex(#[from] ContentIndexError),
-
-    #[error("FrontMatter Index Error {0}")]
-    FrontMatterIndexError(#[from] FrontMatterIndexError),
-
-    #[error("Regex error: {0}")]
-    Regex(#[from] regex::Error),
-
-    #[error("Runtime error: {0}")]
-    Runtime(#[from] RuntimeError),
-
-    #[error("DocContextError error: {0}")]
-    DocContextError(#[from] DocContextError),
-
-    #[error("Other: {0}")]
-    Other(String),
 }
 
 /// Handle for controlling the Actix WebServer (hot reload, shutdown).
@@ -138,7 +93,7 @@ impl WebServerHandle {
     /// routes/config). We make this generic over the inner `ServiceFactory`
     /// type `T` to satisfy `HttpServer::new`.
     #[tracing::instrument(skip_all)]
-    pub async fn hot_reload<F, T>(&self, make_app: F) -> Result<(), EdgeError>
+    pub async fn hot_reload<F, T>(&self, make_app: F) -> Result<(), Error>
     where
         F: Fn() -> App<T> + Clone + Send + 'static,
         T: ServiceFactory<
@@ -298,7 +253,7 @@ impl EdgeRuntime {
         settings: Settings,
         handles: RuntimeHandles,
         bindings: Vec<ThemeBinding>,
-    ) -> Result<Self, EdgeError> {
+    ) -> Result<Self, Error> {
         // Derive runtime values from Settings
         let cert_dir = root.join(settings.cert.dir);
         let edge_ip = settings.edge.ip;
@@ -401,10 +356,10 @@ fn run_pingora_edge(
     edge_http: SocketAddr,
     edge_https: SocketAddr,
     external_https_port: u16,
-) -> Result<(), EdgeError> {
+) -> Result<(), Error> {
     // Use Pingora's default options (no explicit config file / CLI opts).
     let mut server =
-        Server::new(None::<pingora::server::configuration::Opt>).map_err(EdgeError::Pingora)?;
+        Server::new(None::<pingora::server::configuration::Opt>).map_err(Error::Pingora)?;
     server.bootstrap();
 
     let mut services: Vec<Box<dyn pingora::services::Service>> = Vec::new();
@@ -421,10 +376,10 @@ fn run_pingora_edge(
 
             let cert_str = cert_path
                 .to_str()
-                .ok_or_else(|| EdgeError::Config("Non-UTF8 cert path".to_string()))?;
+                .ok_or_else(|| Error::Config("Non-UTF8 cert path".to_string()))?;
             let key_str = key_path
                 .to_str()
-                .ok_or_else(|| EdgeError::Config("Non-UTF8 key path".to_string()))?;
+                .ok_or_else(|| Error::Config("Non-UTF8 key path".to_string()))?;
 
             // HTTPS proxy service (EdgeController → Actix) with TLS termination
             let proxy = EdgeProxy::new(backend_state);
@@ -434,7 +389,7 @@ fn run_pingora_edge(
             proxy_service
                 .add_tls(edge_https.to_string().as_str(), cert_str, key_str)
                 .map_err(|e| {
-                    EdgeError::Config(format!("Failed to add TLS listener on {}: {e}", edge_https))
+                    Error::Config(format!("Failed to add TLS listener on {}: {e}", edge_https))
                 })?;
 
             services.push(Box::new(proxy_service));
@@ -474,7 +429,7 @@ fn run_pingora_edge(
 }
 
 /// Return true if `cert_dir` contains at least one regular file.
-fn cert_dir_has_files(dir: &Path) -> Result<bool, EdgeError> {
+fn cert_dir_has_files(dir: &Path) -> Result<bool, Error> {
     if !dir.exists() {
         return Ok(false);
     }
@@ -492,7 +447,7 @@ fn cert_dir_has_files(dir: &Path) -> Result<bool, EdgeError> {
 /// Heuristic:
 ///   * first file with extension in { "pem", "crt" } -> cert
 ///   * first file with extension == "key"            -> key
-fn pick_cert_key_pair(dir: &Path) -> Result<Option<(PathBuf, PathBuf)>, EdgeError> {
+fn pick_cert_key_pair(dir: &Path) -> Result<Option<(PathBuf, PathBuf)>, Error> {
     if !dir.exists() {
         return Ok(None);
     }

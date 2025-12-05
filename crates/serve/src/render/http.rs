@@ -1,17 +1,16 @@
 // crates/serve/src/render/http.rs
 
-use crate::render::error::RenderError;
 use crate::render::pipeline::{render_html_string_to, render_html_template_to, render_json_to};
 use crate::render::recommendation::BodyPatch;
 use crate::render::recommendation::Recommendations;
 use crate::render::template::TemplateRegistry;
+use crate::Error;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -219,7 +218,7 @@ pub fn render_body_with_templates(
     registry: Option<&TemplateRegistry>,
     body_spec: &ResponseBodySpec,
     body_patches: &[BodyPatch],
-) -> Result<RenderedBody, RenderError> {
+) -> Result<RenderedBody, Error> {
     match body_spec {
         ResponseBodySpec::Unset | ResponseBodySpec::None => Ok(RenderedBody {
             bytes: Vec::new(),
@@ -246,7 +245,7 @@ pub fn render_body_with_templates(
 
         ResponseBodySpec::HtmlTemplate { template, model } => {
             let registry = registry.ok_or_else(|| {
-                RenderError::Template(format!(
+                Error::Template(format!(
                     "HtmlTemplate requested for `{template}`, but no TemplateRegistry provided"
                 ))
             })?;
@@ -273,7 +272,7 @@ pub fn render_body_with_templates(
 pub fn render_ctx_body_with_templates(
     registry: Option<&TemplateRegistry>,
     ctx: &RequestContext,
-) -> Result<RenderedBody, RenderError> {
+) -> Result<RenderedBody, Error> {
     let body_spec = &ctx.response_spec.body;
     let body_patches: &[BodyPatch] = &ctx.recommendations.body_patches;
     render_body_with_templates(registry, body_spec, body_patches)
@@ -281,7 +280,7 @@ pub fn render_ctx_body_with_templates(
 
 /// Map a rendering failure into an HTTP-ish status code.
 /// You can change this to whatever policy you want.
-pub fn status_for_render_error(_err: &RenderError) -> StatusCode {
+pub fn status_for_render_error(_err: &Error) -> StatusCode {
     // For now: all template/render failures → 500.
     StatusCode::INTERNAL_SERVER_ERROR
 }
