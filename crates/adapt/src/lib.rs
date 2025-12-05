@@ -3,15 +3,11 @@ pub mod mql;
 pub mod plugin;
 pub mod runtime;
 
-use serve::render::http::ContextError;
 use serve::Error as ServeError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("core error: {0}")]
-    Context(#[from] ContextError),
-
     #[error("Serve error: {0}")]
     ServeError(#[from] ServeError),
 

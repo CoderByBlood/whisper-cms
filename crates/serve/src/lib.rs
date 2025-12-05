@@ -2,6 +2,7 @@ pub mod indexer;
 pub mod render;
 pub mod resolver;
 
+use http::StatusCode;
 use std::{io, string::FromUtf8Error};
 use thiserror::Error;
 
@@ -46,6 +47,9 @@ pub enum Error {
     #[error("lol_html error: {0}")]
     LolHtml(String),
 
+    #[error("invalid header value: {0}")]
+    InvalidHeaderValue(String),
+
     #[error("json-patch error: {0}")]
     JsonPatch(#[from] json_patch::PatchError),
 
@@ -57,10 +61,22 @@ pub enum Error {
 
     #[error("Backend error: {0}")]
     Backend(String),
+
+    #[error("other core error: {0}")]
+    Other(String),
 }
 
 impl From<handlebars::TemplateError> for Error {
     fn from(e: handlebars::TemplateError) -> Self {
         Error::Template(e.to_string())
+    }
+}
+
+impl Error {
+    pub fn to_status(&self) -> StatusCode {
+        match self {
+            Error::InvalidHeaderValue(_) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        }
     }
 }
