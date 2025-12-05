@@ -16,98 +16,42 @@ use crate::proxy::EdgeError;
 
 use adapt::mql::index::IndexRecord;
 use anyhow::Error as AnyError;
-use bytes::Bytes;
+use async_trait::async_trait;
 use domain::doc::BodyKind;
-use domain::doc::{inject_open_bytes_fn, inject_open_utf8_fn};
-use domain::stream::{
-    inject_open_bytes_from_handle_fn, inject_open_utf8_from_handle_fn, BytesStream, StreamHandle,
-    Utf8Stream,
-};
-use futures::stream::{self, BoxStream};
 use indexed_json::IndexedJson;
 use serde_json::Value as Json;
-use serve::indexer::{FolderScanConfig, ScanStopFn};
+use serve::indexer::{ContentManager, DocContextError, FolderScanConfig, ScanStopFn};
+use serve::resolver::ResolverError;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc as std_mpsc, Arc, LazyLock, RwLock};
-use std::{fs, io, thread};
+use std::string::FromUtf8Error;
+use std::sync::{Arc, LazyLock};
+use std::{fs, io};
 use thiserror::Error;
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
-use tracing::debug;
+use tokio::sync::{mpsc, RwLock};
 
-// ======================================================================
-// GLOBAL SINGLETON STATE
-// ======================================================================
+static CAS: LazyLock<RwLock<Option<ContentIndex>>> = LazyLock::new(|| RwLock::new(None));
 
-/// Directory used for storing IndexedJson front-matter archive.
-static FM_INDEX_DIR: LazyLock<RwLock<Option<PathBuf>>> = LazyLock::new(|| RwLock::new(None));
-
-/// Root folder for *source* content (e.g. `/…/site/content`).
-///
-/// We strip this prefix from absolute filesystem paths to derive the
-/// HTTP-style served ID, like `/index.html` or `/docs/search.html`.
-static CONTENT_ROOT: LazyLock<RwLock<Option<PathBuf>>> = LazyLock::new(|| RwLock::new(None));
-
-/// Global Tantivy content index (rendered HTML).
-static CONTENT_INDEX: LazyLock<RwLock<Option<Arc<ContentIndex>>>> =
+static INDEX: LazyLock<RwLock<Option<IndexedJson<IndexRecord>>>> =
     LazyLock::new(|| RwLock::new(None));
 
-/// Sender into the IndexedJson worker thread.
-static INDEX_WORKER_SENDER: LazyLock<RwLock<Option<std_mpsc::Sender<IndexJob>>>> =
-    LazyLock::new(|| RwLock::new(None));
-
-// ======================================================================
-// FILESYSTEM STREAM HELPERS (for Document)
-// ======================================================================
-
-enum ReadState {
-    Opening(PathBuf),
-    Reading(File),
-    Done,
-}
-
-fn open_bytes(path: &PathBuf) -> BoxStream<'static, io::Result<Bytes>> {
-    let state = ReadState::Opening(path.clone());
-
-    let s = stream::unfold(state, |state| async move {
-        match state {
-            ReadState::Opening(path) => match File::open(path).await {
-                Err(e) => Some((Err(e), ReadState::Done)),
-                Ok(f) => read_next_chunk(f).await,
-            },
-
-            ReadState::Reading(file) => read_next_chunk(file).await,
-
-            ReadState::Done => None,
-        }
-    });
-
-    Box::pin(s)
-}
-
-fn open_utf8(path: &PathBuf) -> BoxStream<'static, io::Result<String>> {
-    let path = path.clone();
-    let s = stream::once(async move {
-        let mut file = File::open(path).await?;
-        let mut s = String::new();
-        file.read_to_string(&mut s).await?;
-        Ok(s)
-    });
-    Box::pin(s)
-}
-
-async fn read_next_chunk(mut file: File) -> Option<(io::Result<Bytes>, ReadState)> {
-    let mut buf = vec![0; 8 * 1024];
-    match file.read(&mut buf).await {
-        Ok(0) => None,
-        Ok(n) => {
-            buf.truncate(n);
-            Some((Ok(Bytes::from(buf)), ReadState::Reading(file)))
-        }
-        Err(e) => Some((Err(e), ReadState::Done)),
+pub async fn set_cas_index(index_dir: PathBuf) -> Result<(), FrontMatterIndexError> {
+    let cas = ContentIndex::open_or_create(&index_dir, 15_000_000)
+        .expect("Failed to open/create Tantivy index");
+    {
+        let mut c = CAS.write().await;
+        *c = Some(cas);
     }
+    let index = IndexedJson::<IndexRecord>::open(&index_dir)
+        .await
+        .map_err(FrontMatterIndexError::IndexedJson)?;
+
+    {
+        let mut i = INDEX.write().await;
+        *i = Some(index);
+    }
+
+    Ok(())
 }
 
 // ======================================================================
@@ -118,102 +62,24 @@ async fn read_next_chunk(mut file: File) -> Option<(io::Result<Bytes>, ReadState
 pub enum FrontMatterIndexError {
     #[error("I/O: {0}")]
     Io(#[from] io::Error),
+
     #[error("IndexedJson: {0}")]
     IndexedJson(#[source] AnyError),
+
+    #[error("No Index")]
+    NoIndex(String),
 }
 
 #[derive(Debug, Error)]
 pub enum ContentBodyIndexError {
     #[error("Tantivy: {0}")]
     Tantivy(#[from] ContentIndexError),
-}
 
-// ======================================================================
-// INDEX WORKER (IndexedJson front-matter)
-// ======================================================================
+    #[error("No Casm{0}")]
+    NoCas(String),
 
-enum IndexJob {
-    FrontMatter {
-        /// Absolute *source* path from the scanner.
-        served_path: PathBuf,
-        fm: Json,
-        resp: std_mpsc::Sender<Result<(), FrontMatterIndexError>>,
-    },
-    GetFrontMatterByPath {
-        /// HTTP-style served path, e.g. `/index.html`.
-        served_path: PathBuf,
-        resp: std_mpsc::Sender<Result<Option<Json>, FrontMatterIndexError>>,
-    },
-    GetFrontMatterBySlug {
-        slug: String,
-        resp: std_mpsc::Sender<Result<Option<Json>, FrontMatterIndexError>>,
-    },
-}
-
-/// Ensure the IndexedJson worker thread is running.
-///
-/// The worker owns a single current-thread Tokio runtime and processes
-/// jobs sequentially. This avoids nested runtimes and keeps the
-/// indexer APIs synchronous at the edge layer.
-///
-/// NEW: The IndexedJson DB is opened once at worker startup and
-/// reused for all jobs.
-fn ensure_index_worker() {
-    let mut guard = INDEX_WORKER_SENDER
-        .write()
-        .expect("INDEX_WORKER_SENDER RwLock poisoned");
-
-    if guard.is_some() {
-        return;
-    }
-
-    let (tx, rx) = std_mpsc::channel::<IndexJob>();
-    *guard = Some(tx);
-
-    thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build IndexedJson worker runtime");
-
-        // Open the front-matter DB once and reuse it.
-        let index_dir = FM_INDEX_DIR
-            .read()
-            .expect("FM_INDEX_DIR RwLock poisoned")
-            .clone()
-            .expect("FM index dir not set");
-
-        fs::create_dir_all(&index_dir).expect("failed to create front-matter index directory");
-
-        let mut db = rt
-            .block_on(async {
-                IndexedJson::<IndexRecord>::open(&index_dir)
-                    .await
-                    .map_err(FrontMatterIndexError::IndexedJson)
-            })
-            .expect("failed to open IndexedJson front-matter DB");
-
-        while let Ok(job) = rx.recv() {
-            match job {
-                IndexJob::FrontMatter {
-                    served_path,
-                    fm,
-                    resp,
-                } => {
-                    let result = rt.block_on(handle_fm_index(&mut db, served_path, fm));
-                    let _ = resp.send(result);
-                }
-                IndexJob::GetFrontMatterByPath { served_path, resp } => {
-                    let result = rt.block_on(handle_get_front_matter_by_path(&mut db, served_path));
-                    let _ = resp.send(result);
-                }
-                IndexJob::GetFrontMatterBySlug { slug, resp } => {
-                    let result = rt.block_on(handle_get_front_matter_by_slug(&mut db, slug));
-                    let _ = resp.send(result);
-                }
-            }
-        }
-    });
+    #[error("FromUtf8Error {0}")]
+    FromUtf8Error(#[from] FromUtf8Error),
 }
 
 // ======================================================================
@@ -226,17 +92,10 @@ fn ensure_index_worker() {
 ///   CONTENT_ROOT = "/…/docsy-gitlab/content"
 ///   src          = "/…/docsy-gitlab/content/index.html"
 ///   -> "/index.html"
-fn canonical_id_from_source(path: &Path) -> String {
-    let rel = {
-        let guard = CONTENT_ROOT.read().expect("CONTENT_ROOT RwLock poisoned");
-        if let Some(root) = &*guard {
-            path.strip_prefix(root).unwrap_or(path).to_owned()
-        } else {
-            path.to_owned()
-        }
-    };
-
+fn canonical_id_from_source(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path).to_owned();
     let s = rel.to_string_lossy();
+
     if s.starts_with('/') {
         s.into_owned()
     } else {
@@ -249,12 +108,12 @@ fn canonical_id_from_source(path: &Path) -> String {
 // ======================================================================
 
 async fn handle_fm_index(
-    db: &mut IndexedJson<IndexRecord>,
+    root: PathBuf,
     served_path: PathBuf,
     fm: Json,
 ) -> Result<(), FrontMatterIndexError> {
     // IMPORTANT: use canonical *served* ID, not absolute FS path.
-    let id = canonical_id_from_source(&served_path);
+    let id = canonical_id_from_source(&root, &served_path);
     let mut record = IndexRecord::from_json_with_id(id, &fm);
 
     // Optionally hydrate slug from FM if not already set.
@@ -268,11 +127,15 @@ async fn handle_fm_index(
         }
     }
 
-    db.append(&record)
-        .await
-        .map_err(FrontMatterIndexError::IndexedJson)?;
+    if let Some(db) = INDEX.write().await.as_mut() {
+        db.append(&record)
+            .await
+            .map_err(FrontMatterIndexError::IndexedJson)?;
 
-    db.flush().await.map_err(FrontMatterIndexError::IndexedJson)
+        db.flush().await.map_err(FrontMatterIndexError::IndexedJson)
+    } else {
+        Err(FrontMatterIndexError::NoIndex("No Database".into()))
+    }
 }
 
 /// Linear scan by `record.id == served_path` (served-path form).
@@ -280,194 +143,63 @@ async fn handle_fm_index(
 /// We serialize the IndexRecord back to JSON to use as front_matter.
 /// This is the *projection* shape, not necessarily the original FM.
 async fn handle_get_front_matter_by_path(
-    db: &mut IndexedJson<IndexRecord>,
-    served_path: PathBuf,
+    served_path: &Path,
 ) -> Result<Option<Json>, FrontMatterIndexError> {
-    let mut current = match db.first() {
-        None => return Ok(None),
-        Some(entry) => entry,
-    };
+    if let Some(db) = INDEX.write().await.as_mut() {
+        let mut current = match db.first() {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
 
-    loop {
-        match db.get(current).await {
-            Ok(Some((next, rec))) => {
-                // NOTE: If IndexRecord.id is a String, you may need to
-                // compare to served_path.to_string_lossy().
-                if rec.id == served_path {
-                    let json = serde_json::to_value(rec)
-                        .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
-                    return Ok(Some(json));
-                }
-                current = next;
-            }
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
-        }
-    }
-}
-
-async fn handle_get_front_matter_by_slug(
-    db: &mut IndexedJson<IndexRecord>,
-    slug: String,
-) -> Result<Option<Json>, FrontMatterIndexError> {
-    let mut current = match db.first() {
-        None => return Ok(None),
-        Some(entry) => entry,
-    };
-
-    loop {
-        match db.get(current).await {
-            Ok(Some((next, rec))) => {
-                if let Some(s) = &rec.slug {
-                    if s == &slug {
+        loop {
+            match db.get(current).await {
+                Ok(Some((next, rec))) => {
+                    // NOTE: If IndexRecord.id is a String, you may need to
+                    // compare to served_path.to_string_lossy().
+                    if rec.id == served_path.to_path_buf() {
                         let json = serde_json::to_value(rec)
                             .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
                         return Ok(Some(json));
                     }
+                    current = next;
                 }
-                current = next;
+                Ok(None) => return Ok(None),
+                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
             }
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
         }
+    } else {
+        Err(FrontMatterIndexError::NoIndex("No Database".into()))
     }
 }
 
-// ======================================================================
-// STREAM HANDLE INJECTION (CAS via Tantivy ContentIndex)
-// ======================================================================
-
-fn cas_bytes_from_handle(handle: &StreamHandle) -> BytesStream {
-    use futures::stream::once;
-
-    // Take an OWNED key so the async block doesn't borrow `handle`.
-    let id = handle.identity().to_owned();
-
-    // Clone the Arc<ContentIndex> out of the global, also owned by the future.
-    let index_opt = {
-        CONTENT_INDEX
-            .read()
-            .expect("CONTENT_INDEX RwLock poisoned")
-            .clone()
-    };
-
-    let fut = async move {
-        let index = match index_opt {
-            Some(idx) => idx,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "Content index not initialized",
-                ))
-            }
+async fn handle_get_front_matter_by_slug(
+    slug: &str,
+) -> Result<Option<Json>, FrontMatterIndexError> {
+    if let Some(db) = INDEX.write().await.as_mut() {
+        let mut current = match db.first() {
+            None => return Ok(None),
+            Some(entry) => entry,
         };
 
-        let path = PathBuf::from(id);
-        let mut cursor = index
-            .get(&path)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        let mut buf = Vec::new();
-        // Disambiguate the trait method.
-        std::io::Read::read_to_end(&mut cursor, &mut buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(Bytes::from(buf))
-    };
-
-    Box::pin(once(fut))
-}
-
-fn cas_utf8_from_handle(handle: &StreamHandle) -> Utf8Stream {
-    use futures::stream::once;
-
-    // Take an OWNED key so the async block doesn't borrow `handle`.
-    let id = handle.identity().to_owned();
-
-    // Clone the Arc<ContentIndex> out of the global, also owned by the future.
-    let index_opt = {
-        CONTENT_INDEX
-            .read()
-            .expect("CONTENT_INDEX RwLock poisoned")
-            .clone()
-    };
-
-    let fut = async move {
-        let index = match index_opt {
-            Some(idx) => idx,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "Content index not initialized",
-                ))
+        loop {
+            match db.get(current).await {
+                Ok(Some((next, rec))) => {
+                    if let Some(s) = &rec.slug {
+                        if s == &slug {
+                            let json = serde_json::to_value(rec)
+                                .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
+                            return Ok(Some(json));
+                        }
+                    }
+                    current = next;
+                }
+                Ok(None) => return Ok(None),
+                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
             }
-        };
-
-        let path = PathBuf::from(id);
-        let mut cursor = index
-            .get(&path)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        let mut buf = String::new();
-        // Disambiguate the trait method.
-        std::io::Read::read_to_string(&mut cursor, &mut buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(buf)
-    };
-
-    Box::pin(once(fut))
-}
-
-// ======================================================================
-// PUBLIC INIT: called once from CLI before scanning
-// ======================================================================
-
-/// Set the *content root* used to compute served IDs.
-///
-/// Example:
-///   root = "/…/docsy-gitlab/content"
-/// This is used only to normalize absolute paths coming from the scanner.
-pub fn set_content_root(root: PathBuf) {
-    let mut w = CONTENT_ROOT.write().expect("CONTENT_ROOT RwLock poisoned");
-    *w = Some(root);
-}
-
-/// Injects:
-/// - Front-matter index directory.
-/// - ContentIndex (Tantivy) instance.
-/// - IndexedJson worker thread.
-pub fn set_fm_index_dir(p: PathBuf) {
-    {
-        let mut w = FM_INDEX_DIR.write().expect("FM_INDEX_DIR RwLock poisoned");
-        *w = Some(p.clone());
+        }
+    } else {
+        Err(FrontMatterIndexError::NoIndex("No Database".into()))
     }
-
-    // Initialize Tantivy content index.
-    let index =
-        ContentIndex::open_or_create(&p, 15_000_000).expect("Failed to open/create Tantivy index");
-    {
-        let mut w = CONTENT_INDEX
-            .write()
-            .expect("CONTENT_INDEX RwLock poisoned");
-        *w = Some(Arc::new(index));
-    }
-
-    // Ensure the IndexedJson worker is running.
-    ensure_index_worker();
-}
-
-/// Injects:
-/// - Document FS stream functions (domain::doc::*).
-/// - CAS stream functions (domain::stream::*).
-pub fn inject_stream_handlers() {
-    // Inject filesystem-based Document streams.
-    inject_open_bytes_fn(open_bytes);
-    inject_open_utf8_fn(open_utf8);
-
-    // Inject CAS-based stream handle readers.
-    inject_open_bytes_from_handle_fn(cas_bytes_from_handle);
-    inject_open_utf8_from_handle_fn(cas_utf8_from_handle);
 }
 
 // ======================================================================
@@ -489,98 +221,126 @@ pub fn start_scan(
 // ======================================================================
 
 #[tracing::instrument(skip_all)]
-pub fn index_front_matter(served_path: &Path, fm: &Json) -> Result<(), FrontMatterIndexError> {
-    ensure_index_worker();
-
-    debug!("Indexing front matter for {}", served_path.display());
-
-    let sender = INDEX_WORKER_SENDER
-        .read()
-        .expect("INDEX_WORKER_SENDER RwLock poisoned")
-        .clone()
-        .expect("Index worker not started");
-
-    let (tx, rx) = std_mpsc::channel();
-
-    sender
-        .send(IndexJob::FrontMatter {
-            served_path: served_path.to_path_buf(),
-            fm: fm.clone(),
-            resp: tx,
-        })
-        .expect("failed to send IndexJob::FrontMatter");
-
-    rx.recv().expect("Index worker dropped response channel") // propagate result
+pub async fn index_front_matter(
+    root: PathBuf,
+    served_path: &Path,
+    fm: &Json,
+) -> Result<(), FrontMatterIndexError> {
+    handle_fm_index(root, served_path.to_path_buf(), fm.clone()).await
 }
 
 /// Public helper used by the resolver to load front matter by served path.
 ///
 /// `served_path` here is already HTTP-style (e.g. `/index.html`).
 /// Returns Ok(None) if the id is not present in the index.
-pub fn lookup_front_matter_by_path(
+pub async fn lookup_front_matter_by_path(
     served_path: &Path,
 ) -> Result<Option<Json>, FrontMatterIndexError> {
-    ensure_index_worker();
-
-    let sender = INDEX_WORKER_SENDER
-        .read()
-        .expect("INDEX_WORKER_SENDER RwLock poisoned")
-        .clone()
-        .expect("Index worker not started");
-
-    let (tx, rx) = std_mpsc::channel();
-
-    sender
-        .send(IndexJob::GetFrontMatterByPath {
-            served_path: served_path.to_path_buf(),
-            resp: tx,
-        })
-        .expect("failed to send IndexJob::GetFrontMatterByPath");
-
-    rx.recv().expect("Index worker dropped response channel") // propagate result
+    handle_get_front_matter_by_path(served_path).await
 }
 
 /// Public helper used by the resolver to load front matter by **slug**.
 ///
 /// This scans the IndexedJson archive for a record whose `slug` field
 /// matches the provided slug. Returns Ok(None) if not found.
-pub fn lookup_front_matter_by_slug(slug: &str) -> Result<Option<Json>, FrontMatterIndexError> {
-    ensure_index_worker();
+pub async fn lookup_front_matter_by_slug(
+    slug: &str,
+) -> Result<Option<Json>, FrontMatterIndexError> {
+    handle_get_front_matter_by_slug(slug).await
+}
 
-    let sender = INDEX_WORKER_SENDER
-        .read()
-        .expect("INDEX_WORKER_SENDER RwLock poisoned")
-        .clone()
-        .expect("Index worker not started");
-
-    let slug = slug.to_string();
-    let (tx, rx) = std_mpsc::channel();
-
-    sender
-        .send(IndexJob::GetFrontMatterBySlug { slug, resp: tx })
-        .expect("failed to send IndexJob::GetFrontMatterBySlug");
-
-    rx.recv().expect("Index worker dropped response channel") // propagate result
+pub async fn lookup_body(key: &str) -> Result<Option<Arc<String>>, ContentBodyIndexError> {
+    if let Some(cas) = CAS.write().await.as_mut() {
+        let cursor = cas.get(Path::new(key))?;
+        let bytes = cursor.into_inner(); // take ownership of the Vec<u8>
+        Ok(Some(Arc::new(String::from_utf8(bytes)?)))
+    } else {
+        Err(ContentBodyIndexError::NoCas("No Database".into()))
+    }
 }
 
 // ======================================================================
 // 3. BODY → TANTIVY INDEXER (sync) — matches IndexBodyFn
 // ======================================================================
 
-pub fn index_body(
+pub async fn index_body(
+    root: &Path,
     served_path: &Path,
     html: &str,
     _kind: BodyKind,
 ) -> Result<(), ContentBodyIndexError> {
-    let index_arc = CONTENT_INDEX
-        .read()
-        .expect("CONTENT_INDEX RwLock poisoned")
-        .clone()
-        .expect("CONTENT_INDEX not set");
+    if let Some(cas) = CAS.write().await.as_mut() {
+        // Canonicalize to served ID so CAS lookups by HTTP path work.
+        let id = canonical_id_from_source(root, served_path);
+        let mut cursor = Cursor::new(html.as_bytes().to_vec());
+        cas.add(Path::new(&id), &mut cursor)?;
+        Ok(())
+    } else {
+        Err(ContentBodyIndexError::NoCas("No Cas".into()))
+    }
+}
 
-    // Canonicalize to served ID so CAS lookups by HTTP path work.
-    let id = canonical_id_from_source(served_path);
-    let mut cursor = Cursor::new(html.as_bytes().to_vec());
-    index_arc.add(Path::new(&id), &mut cursor)?;
-    Ok(())
+#[derive(Debug, Clone)]
+pub struct ContentMgr {
+    root: PathBuf,
+}
+
+impl ContentMgr {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+}
+#[async_trait]
+impl ContentManager for ContentMgr {
+    async fn scan_file(&self, path: &Path) -> Result<String, DocContextError> {
+        let bytes = fs::read(path)?;
+        Ok(String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn scan_folder(
+        &self,
+        root: &Path,
+        cfg: &FolderScanConfig,
+    ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), DocContextError> {
+        start_scan(root, cfg).map_err(|e| DocContextError::Scan(e.to_string()))
+    }
+
+    async fn index_front_matter(
+        &self,
+        served_path: &Path,
+        fm: &Json,
+    ) -> Result<(), DocContextError> {
+        index_front_matter(self.root.clone(), served_path, fm)
+            .await
+            .map_err(|e| DocContextError::FrontMatterIndex(e.to_string()))
+    }
+
+    async fn index_body(
+        &self,
+        served_path: &Path,
+        html: &str,
+        kind: BodyKind,
+    ) -> Result<(), DocContextError> {
+        index_body(self.root.as_path(), served_path, html, kind)
+            .await
+            .map_err(|e| DocContextError::ContentIndex(e.to_string()))
+    }
+
+    async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, ResolverError> {
+        lookup_front_matter_by_slug(slug)
+            .await
+            .map_err(|e| ResolverError::Backend(e.to_string()))
+    }
+
+    async fn lookup_served(&self, served: &str) -> Result<Option<Json>, ResolverError> {
+        lookup_front_matter_by_path(Path::new(served))
+            .await
+            .map_err(|e| ResolverError::Backend(e.to_string()))
+    }
+
+    async fn lookup_body(&self, key: &str) -> Result<Option<Arc<String>>, ResolverError> {
+        lookup_body(key)
+            .await
+            .map_err(|e| ResolverError::Backend(e.to_string()))
+    }
 }

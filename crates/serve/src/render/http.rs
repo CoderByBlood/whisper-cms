@@ -5,11 +5,12 @@ use crate::render::pipeline::{render_html_string_to, render_html_template_to, re
 use crate::render::recommendation::BodyPatch;
 use crate::render::recommendation::Recommendations;
 use crate::render::template::TemplateRegistry;
-use domain::stream::StreamHandle;
+use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as Json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 use tracing::debug;
 use uuid::Uuid;
@@ -303,10 +304,10 @@ pub struct RequestContext {
     pub plugin_configs: HashMap<String, Json>,
 
     #[serde(skip)]
-    pub req_body: Option<StreamHandle>, // opaque HTTP request stream
+    pub req_body: Option<Bytes>, // opaque HTTP request stream
 
     #[serde(skip)]
-    pub content_body: Option<StreamHandle>, // opaque FS / CAS stream
+    pub content_body: Option<Arc<String>>, // opaque FS / CAS stream
 
     pub recommendations: Recommendations,
     pub response_spec: ResponseSpec,
@@ -326,8 +327,8 @@ impl RequestContext {
         content_meta: Json,
         theme_config: Json,
         plugin_configs: HashMap<String, Json>,
-        req_body: Option<StreamHandle>,
-        content_body: Option<StreamHandle>,
+        req_body: Option<Bytes>,
+        content_body: Option<Arc<String>>,
     ) -> Self {
         RequestContext::builder()
             .path(req_path)
@@ -374,8 +375,8 @@ pub struct RequestContextBuilder {
     pub content_meta: Json,
     pub theme_config: Json,
     pub plugin_configs: HashMap<String, Json>,
-    pub req_body: Option<StreamHandle>,
-    pub content_body: Option<StreamHandle>,
+    pub req_body: Option<Bytes>,
+    pub content_body: Option<Arc<String>>,
 }
 
 impl RequestContextBuilder {
@@ -428,22 +429,22 @@ impl RequestContextBuilder {
         self
     }
 
-    pub fn req_body(mut self, s: StreamHandle) -> Self {
+    pub fn req_body(mut self, s: Bytes) -> Self {
         self.req_body = Some(s);
         self
     }
 
-    pub fn req_body_opt(mut self, s: Option<StreamHandle>) -> Self {
+    pub fn req_body_opt(mut self, s: Option<Bytes>) -> Self {
         self.req_body = s;
         self
     }
 
-    pub fn content_body(mut self, s: StreamHandle) -> Self {
+    pub fn content_body(mut self, s: Arc<String>) -> Self {
         self.content_body = Some(s);
         self
     }
 
-    pub fn content_body_opt(mut self, s: Option<StreamHandle>) -> Self {
+    pub fn content_body_opt(mut self, s: Option<Arc<String>>) -> Self {
         self.content_body = s;
         self
     }

@@ -13,15 +13,18 @@
 //! After indexing, the runtime resolvers (in edge + serve/resolver.rs) will search these
 //! stores using additional functions injected separately.
 
+use async_trait::async_trait;
 use domain::doc::{BodyKind, Document, FmKind};
-use futures::StreamExt;
 use regex::Regex;
 use serde_json::Value as Json;
 use thiserror::Error;
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc;
+
+use crate::resolver::ResolverError;
 
 // ---------------------------------------------------------------------------
 // Folder Scan Configuration
@@ -97,6 +100,9 @@ pub enum DocContextError {
 
     #[error("Org-mode conversion error: {0}")]
     Org(String),
+
+    #[error("Edge scan error: {0}")]
+    Scan(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -105,15 +111,33 @@ pub enum DocContextError {
 
 pub type ScanStopFn = Box<dyn FnOnce() + Send + 'static>;
 
-pub type StartFolderScanFn<ScanErr> = fn(
-    root: &Path,
-    cfg: &FolderScanConfig,
-) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), ScanErr>;
+#[async_trait]
+pub trait ContentManager {
+    async fn scan_file(&self, path: &Path) -> Result<String, DocContextError>;
 
-pub type IndexFrontMatterFn<FmErr> = fn(served_path: &Path, fm: &Json) -> Result<(), FmErr>;
+    async fn scan_folder(
+        &self,
+        root: &Path,
+        cfg: &FolderScanConfig,
+    ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), DocContextError>;
 
-pub type IndexBodyFn<BodyErr> =
-    fn(served_path: &Path, html: &str, kind: BodyKind) -> Result<(), BodyErr>;
+    async fn index_front_matter(
+        &self,
+        served_path: &Path,
+        fm: &Json,
+    ) -> Result<(), DocContextError>;
+
+    async fn index_body(
+        &self,
+        served_path: &Path,
+        html: &str,
+        kind: BodyKind,
+    ) -> Result<(), DocContextError>;
+
+    async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, ResolverError>;
+    async fn lookup_served(&self, served: &str) -> Result<Option<Json>, ResolverError>;
+    async fn lookup_body(&self, body: &str) -> Result<Option<Arc<String>>, ResolverError>;
+}
 
 // ---------------------------------------------------------------------------
 // Markdown + Body conversion helpers
@@ -161,34 +185,28 @@ fn served_path_for_source(path: &Path) -> PathBuf {
 // Stage 1 — Front Matter Upsert
 // ---------------------------------------------------------------------------
 
-async fn read_document_utf8(mut ctx: DocContext) -> Result<DocContext, DocContextError> {
+async fn read_document_utf8(
+    mut ctx: DocContext,
+    scan_indexer: &impl ContentManager,
+) -> Result<DocContext, DocContextError> {
     if ctx.document.cache.is_some() {
         return Ok(ctx);
     }
 
-    let mut text = String::new();
-    let mut stream = ctx.document.utf8_stream();
-
-    while let Some(chunk) = stream.next().await {
-        text.push_str(&chunk?);
-    }
+    let text = scan_indexer.scan_file(&ctx.document.path).await?;
 
     ctx.document = ctx.document.with_cache(text);
     Ok(ctx)
 }
 
-pub async fn upsert_front_matter_db<FmErr, FmIndexFn>(
+pub async fn upsert_front_matter_db(
     ctx: DocContext,
-    index_front_matter: FmIndexFn,
-) -> Result<DocContext, DocContextError>
-where
-    FmErr: std::fmt::Display,
-    FmIndexFn: Fn(&Path, &Json) -> Result<(), FmErr>,
-{
+    scan_indexer: &impl ContentManager,
+) -> Result<DocContext, DocContextError> {
     use gray_matter::engine::YAML;
     use gray_matter::Matter;
 
-    let mut ctx = read_document_utf8(ctx).await?;
+    let mut ctx = read_document_utf8(ctx, scan_indexer).await?;
     let full = ctx
         .document
         .cache
@@ -256,7 +274,9 @@ where
 
     if let Some(data) = fm_json {
         let served = served_path_for_source(&ctx.document.path);
-        index_front_matter(&served, &data)
+        scan_indexer
+            .index_front_matter(&served, &data)
+            .await
             .map_err(|e| DocContextError::FrontMatterIndex(e.to_string()))?;
     }
 
@@ -310,15 +330,11 @@ fn render_org(src: &str) -> Result<String, DocContextError> {
     Ok(String::from_utf8(buf).map_err(|e| DocContextError::Org(e.to_string()))?)
 }
 
-pub async fn upsert_body_db<BodyErr, BodyIndexFn>(
+pub async fn upsert_body_db(
     ctx: DocContext,
-    index_body: BodyIndexFn,
-) -> Result<DocContext, DocContextError>
-where
-    BodyErr: std::fmt::Display,
-    BodyIndexFn: Fn(&Path, &str, BodyKind) -> Result<(), BodyErr>,
-{
-    let mut ctx = read_document_utf8(ctx).await?;
+    scan_indexer: &impl ContentManager,
+) -> Result<DocContext, DocContextError> {
+    let mut ctx = read_document_utf8(ctx, scan_indexer).await?;
 
     let ext = ctx.document.path.extension().and_then(|s| s.to_str());
     let kind = infer_body_kind(ext);
@@ -343,7 +359,10 @@ where
 
     let served = served_path_for_source(&ctx.document.path);
 
-    index_body(&served, &html, kind).map_err(|e| DocContextError::ContentIndex(e.to_string()))?;
+    scan_indexer
+        .index_body(&served, &html, kind)
+        .await
+        .map_err(|e| DocContextError::ContentIndex(e.to_string()))?;
 
     ctx.document = ctx.document.with_body_kind(kind);
     Ok(ctx)
@@ -353,19 +372,12 @@ where
 // High-Level Pipeline
 // ---------------------------------------------------------------------------
 
-pub async fn scan_and_process_docs<ScanErr, FmErr, BodyErr>(
+pub async fn scan_and_process_docs(
     root: &Path,
     scan_cfg: FolderScanConfig,
-    start_scan: StartFolderScanFn<ScanErr>,
-    index_front_matter: IndexFrontMatterFn<FmErr>,
-    index_body: IndexBodyFn<BodyErr>,
-) -> Result<(Vec<Document>, Vec<(PathBuf, DocContextError)>), ScanErr>
-where
-    ScanErr: std::fmt::Display,
-    FmErr: std::fmt::Display,
-    BodyErr: std::fmt::Display,
-{
-    let (mut rx, stop) = start_scan(root, &scan_cfg)?;
+    scan_indexer: impl ContentManager,
+) -> Result<(Vec<Document>, Vec<(PathBuf, DocContextError)>), DocContextError> {
+    let (mut rx, stop) = scan_indexer.scan_folder(root, &scan_cfg).await?;
 
     let mut docs = Vec::new();
     let mut errors = Vec::new();
@@ -375,8 +387,8 @@ where
         let ctx = DocContext { document };
 
         let processed = async {
-            let ctx = upsert_front_matter_db::<FmErr, _>(ctx, index_front_matter).await?;
-            let ctx = upsert_body_db::<BodyErr, _>(ctx, index_body).await?;
+            let ctx = upsert_front_matter_db(ctx, &scan_indexer).await?;
+            let ctx = upsert_body_db(ctx, &scan_indexer).await?;
             Ok::<_, DocContextError>(ctx)
         }
         .await;

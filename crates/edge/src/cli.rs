@@ -1,12 +1,10 @@
 // crates/edge/src/cli.rs
 
-use crate::db::resolver::{lookup_body_handle, lookup_fm_by_served, lookup_fm_by_slug};
-use crate::fs::index::inject_stream_handlers;
+use crate::fs::index::{set_cas_index, ContentMgr};
 use crate::{
     fs::{
         ext::{self, DiscoveredPlugin, DiscoveredTheme, ThemeBinding},
         filter::{self, DEFAULT_CONTENT_EXTS},
-        index::{index_body, index_front_matter, set_content_root, set_fm_index_dir, start_scan},
     },
     proxy::{EdgeError, EdgeRuntime},
 };
@@ -18,7 +16,6 @@ use domain::{
     setting::{ContentSettings, ExtensionSettings, Settings},
 };
 use serve::indexer::scan_and_process_docs;
-use serve::resolver::set_resolver_deps;
 use serve::{indexer::FolderScanConfig, render::http::RequestContext};
 use std::{path::PathBuf, process::ExitCode};
 use tokio::task::LocalSet;
@@ -68,7 +65,7 @@ async fn do_start(start: StartCmd) -> Result<()> {
 
     // inject dependencies -> adapt, serve, and domain have dependencies so inject
     let then = Utc::now();
-    let process = process.inject_dependencies()?;
+    let process = process.inject_dependencies().await?;
     info!(
         "Dependencies injected in {} milliseconds",
         Utc::now().timestamp_millis() - then.timestamp_millis()
@@ -288,20 +285,13 @@ impl StartProcess<SettingsLoaded> {
     }
 
     #[tracing::instrument(skip_all)]
-    fn inject_dependencies(self) -> Result<Self> {
-        // Wire up the core resolver's storage backends (front matter + body).
-        set_resolver_deps(lookup_fm_by_slug, lookup_fm_by_served, lookup_body_handle);
-
+    async fn inject_dependencies(self) -> Result<Self> {
         let dir = self.state.command.dir.clone();
 
         let index_dir = match self.state.content_settings.index_dir.clone() {
             Some(d) => dir.join(d),
             None => dir.join("./content_index/"),
         };
-
-        let root = dir.join(&self.state.content_settings.dir);
-        // NEW: tell the index layer what the content root is
-        set_content_root(root.clone());
 
         let index_dir = index_dir.join(
             regex::Regex::new(r"[^A-Za-z0-9]")
@@ -311,10 +301,19 @@ impl StartProcess<SettingsLoaded> {
         );
 
         // inject the dependencies
-        set_fm_index_dir(index_dir.clone());
-        inject_stream_handlers();
+        set_cas_index(index_dir.clone()).await?;
 
-        Ok(self)
+        Ok(Self {
+            state: SettingsLoaded {
+                command: self.state.command,
+                settings: self.state.settings,
+                content_settings: ContentSettings {
+                    dir: self.state.content_settings.dir,
+                    extensions: self.state.content_settings.extensions,
+                    index_dir: Some(index_dir),
+                },
+            },
+        })
     }
 
     #[tracing::instrument(skip_all)]
@@ -335,14 +334,7 @@ impl StartProcess<SettingsLoaded> {
 
         // This now calls the serve-level pipeline
         let root = dir.join(&content_settings.dir);
-        let (docs, errs) = scan_and_process_docs(
-            &root,
-            cfg,                // capacity
-            start_scan,         // scan starter
-            index_front_matter, // FM → IndexedJSON
-            index_body,         // Body → Tantivy
-        )
-        .await?;
+        let (docs, errs) = scan_and_process_docs(&root, cfg, ContentMgr::new(root.clone())).await?;
 
         debug!(
             "Document and Error Counts: ({}, {})",

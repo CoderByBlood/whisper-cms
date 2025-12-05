@@ -1,50 +1,7 @@
 // crates/domain/src/doc.rs
 
-use bytes::Bytes;
-use futures::stream::BoxStream;
-use std::io;
 use std::path::PathBuf;
-use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Injection points (GLOBAL function pointers) for filesystem documents
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Stream of raw bytes from a filesystem document.
-pub type OpenBytesFn = fn(&PathBuf) -> BoxStream<'static, io::Result<Bytes>>;
-
-/// Stream of UTF-8 text from a filesystem document.
-pub type OpenUtf8Fn = fn(&PathBuf) -> BoxStream<'static, io::Result<String>>;
-
-/// Default panic implementations (force early detect if not injected).
-fn missing_open_bytes(_path: &PathBuf) -> BoxStream<'static, io::Result<Bytes>> {
-    panic!("Document::open_bytes_fn not injected");
-}
-
-fn missing_open_utf8(_path: &PathBuf) -> BoxStream<'static, io::Result<String>> {
-    panic!("Document::open_utf8_fn not injected");
-}
-
-/// GLOBAL injection targets (set once at startup).
-pub static OPEN_BYTES_FN: LazyLock<RwLock<Option<OpenBytesFn>>> =
-    LazyLock::new(|| RwLock::new(Some(missing_open_bytes)));
-
-pub static OPEN_UTF8_FN: LazyLock<RwLock<Option<OpenUtf8Fn>>> =
-    LazyLock::new(|| RwLock::new(Some(missing_open_utf8)));
-
-/// API the edge crate calls *once* during initialization.
-pub fn inject_open_bytes_fn(f: OpenBytesFn) {
-    let mut open_bytes_fn = OPEN_BYTES_FN
-        .write()
-        .expect("OPEN_BYTES_FN RwLock poisoned");
-    *open_bytes_fn = Some(f);
-}
-
-pub fn inject_open_utf8_fn(f: OpenUtf8Fn) {
-    let mut open_utf8_fn = OPEN_UTF8_FN.write().expect("OPEN_UTF8_FN RwLock poisoned");
-    *open_utf8_fn = Some(f);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Document data types
@@ -137,25 +94,5 @@ impl Document {
     pub fn with_body_kind(mut self, kind: BodyKind) -> Self {
         self.body_kind = Some(kind);
         self
-    }
-
-    // ───────────────────────────────
-    // Stream accessors (filesystem-backed)
-    // ───────────────────────────────
-
-    pub fn bytes_stream(&self) -> BoxStream<'static, io::Result<Bytes>> {
-        let f = OPEN_BYTES_FN
-            .read()
-            .expect("OPEN_BYTES_FN RwLock poisoned")
-            .expect("Document::open_bytes_fn not injected");
-        f(&self.path)
-    }
-
-    pub fn utf8_stream(&self) -> BoxStream<'static, io::Result<String>> {
-        let f = OPEN_UTF8_FN
-            .read()
-            .expect("OPEN_UTF8_FN RwLock poisoned")
-            .expect("Document::open_utf8_fn not injected");
-        f(&self.path)
     }
 }
