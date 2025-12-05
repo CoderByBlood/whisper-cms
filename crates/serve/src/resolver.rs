@@ -15,14 +15,12 @@
 //! is performed via injected closures.
 
 use domain::content::{ContentKind, ResolvedContent};
-use domain::stream::StreamHandle;
 use http::{HeaderMap, Method};
 use serde_json::{json, Map as JsonMap, Value as Json};
-use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
+use std::{collections::HashMap, string::FromUtf8Error};
 use thiserror::Error;
 
-use crate::render::http::RequestContext;
+use crate::{indexer::ContentManager, render::http::RequestContext};
 
 // -----------------------------------------------------------------------------
 // Error Type
@@ -33,46 +31,11 @@ pub enum ResolverError {
     #[error("Io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("FromUTF8 error: {0}")]
+    FromUTF8(#[from] FromUtf8Error),
+
     #[error("Backend error: {0}")]
     Backend(String),
-}
-
-// -----------------------------------------------------------------------------
-// Injection Types
-// -----------------------------------------------------------------------------
-
-/// Lookup front matter via slug (primary key)
-pub type LookupFmBySlugFn = fn(slug: &str) -> Result<Option<Json>, ResolverError>;
-
-/// Lookup served-path → FM
-pub type LookupFmByServedPathFn = fn(served: &str) -> Result<Option<Json>, ResolverError>;
-
-/// Lookup served-path → CAS stream handle
-pub type LookupBodyHandleFn = fn(served: &str) -> Result<Option<StreamHandle>, ResolverError>;
-
-// -----------------------------------------------------------------------------
-// GLOBAL injected dependencies
-// -----------------------------------------------------------------------------
-
-static LOOKUP_FM_BY_SLUG: LazyLock<RwLock<Option<LookupFmBySlugFn>>> =
-    LazyLock::new(|| RwLock::new(None));
-
-static LOOKUP_FM_BY_SERVED: LazyLock<RwLock<Option<LookupFmByServedPathFn>>> =
-    LazyLock::new(|| RwLock::new(None));
-
-static LOOKUP_BODY_HANDLE: LazyLock<RwLock<Option<LookupBodyHandleFn>>> =
-    LazyLock::new(|| RwLock::new(None));
-
-// Called by edge at startup.
-#[tracing::instrument(skip_all)]
-pub fn set_resolver_deps(
-    slug_fn: LookupFmBySlugFn,
-    served_fn: LookupFmByServedPathFn,
-    body_fn: LookupBodyHandleFn,
-) {
-    *LOOKUP_FM_BY_SLUG.write().unwrap() = Some(slug_fn);
-    *LOOKUP_FM_BY_SERVED.write().unwrap() = Some(served_fn);
-    *LOOKUP_BODY_HANDLE.write().unwrap() = Some(body_fn);
 }
 
 // -----------------------------------------------------------------------------
@@ -101,44 +64,31 @@ fn infer_kind_from_ext(path: &str) -> ContentKind {
 // -----------------------------------------------------------------------------
 
 #[tracing::instrument(skip_all)]
-pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, ResolverError> {
+pub async fn resolve(
+    resolver: &impl ContentManager,
+    path: &str,
+    _method: &Method,
+) -> Result<ResolvedContent, ResolverError> {
     let path = normalize(path);
-
-    // Load injected functions.
-    let lookup_slug = LOOKUP_FM_BY_SLUG
-        .read()
-        .unwrap()
-        .expect("missing slug lookup injection");
-    let lookup_served = LOOKUP_FM_BY_SERVED
-        .read()
-        .unwrap()
-        .expect("missing served lookup injection");
-    let lookup_body = LOOKUP_BODY_HANDLE
-        .read()
-        .unwrap()
-        .expect("missing body lookup injection");
 
     // -------------------------------------------
     // Step 1: Does the path match a slug exactly?
     // -------------------------------------------
     let slug = path.strip_prefix('/').unwrap_or(path.as_str());
-    if let Some(fm) = lookup_slug(slug)? {
+    if let Some(fm) = resolver.lookup_slug(slug).await? {
         // Try to find a served-path for the body.
 
         // 1) Prefer an explicit served_path in front matter, if present.
-        let body_handle: Option<StreamHandle> = fm
-            .get("id") // <-- adjust this key name if needed
-            .and_then(|v| v.as_str())
-            .and_then(|served| lookup_body(served).ok())
-            .flatten();
-
-        // Only short-circuit here if we got a body as well as front matter.
-        if let Some(h) = body_handle {
-            return Ok(ResolvedContent {
-                content_kind: infer_kind_from_ext(&path),
-                front_matter: fm,
-                body: Some(h),
-            });
+        let handle: Option<&str> = fm.get("id").and_then(|v| v.as_str());
+        if let Some(h) = handle {
+            if let Some(body) = resolver.lookup_body(h).await? {
+                // Only short-circuit here if we got a body as well as front matter.
+                return Ok(ResolvedContent {
+                    content_kind: infer_kind_from_ext(&path),
+                    front_matter: fm,
+                    body: Some(body),
+                });
+            }
         }
 
         // If we found FM but not body, we *deliberately* fall through to the served-path
@@ -148,8 +98,8 @@ pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, Resolver
     // ------------------------------------------------------------
     // Step 2: Does the path match served-path exactly?
     // ------------------------------------------------------------
-    if let Some(fm) = lookup_served(&path)? {
-        if let Some(h) = lookup_body(&path)? {
+    if let Some(fm) = resolver.lookup_served(&path).await? {
+        if let Some(h) = resolver.lookup_body(&path).await? {
             return Ok(ResolvedContent {
                 content_kind: infer_kind_from_ext(&path),
                 front_matter: fm,
@@ -163,8 +113,8 @@ pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, Resolver
     // ------------------------------------------------------------
     if !path.ends_with(".html") {
         let html = format!("{}.html", path.trim_end_matches('/'));
-        if let Some(fm) = lookup_served(&html)? {
-            if let Some(h) = lookup_body(&html)? {
+        if let Some(fm) = resolver.lookup_served(&html).await? {
+            if let Some(h) = resolver.lookup_body(&html).await? {
                 return Ok(ResolvedContent {
                     content_kind: ContentKind::Html,
                     front_matter: fm,
@@ -179,8 +129,8 @@ pub fn resolve(path: &str, _method: &Method) -> Result<ResolvedContent, Resolver
     // ------------------------------------------------------------
     if path.ends_with('/') {
         let index = format!("{}index.html", path);
-        if let Some(fm) = lookup_served(&index)? {
-            if let Some(h) = lookup_body(&index)? {
+        if let Some(fm) = resolver.lookup_served(&index).await? {
+            if let Some(h) = resolver.lookup_body(&index).await? {
                 return Ok(ResolvedContent {
                     content_kind: ContentKind::Html,
                     front_matter: fm,

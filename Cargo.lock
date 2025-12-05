@@ -4544,6 +4544,7 @@ name = "serve"
 version = "0.1.0"
 dependencies = [
  "asciidocr",
+ "async-trait",
  "bytes",
  "comrak",
  "domain",

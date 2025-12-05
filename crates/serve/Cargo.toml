@@ -27,7 +27,7 @@ orgize = { workspace = true }
 minijinja = { workspace = true }
 tera = { workspace = true }
 handlebars_misc_helpers = { workspace = true }
-
+async-trait = { workspace = true }
 domain = { path = "../domain" }
 
 [dev-dependencies]

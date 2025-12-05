@@ -14,6 +14,7 @@ use pingora::proxy::{http_proxy_service, ProxyHttp, Session as ProxySession};
 use pingora::server::Server;
 use pingora::services::listening::Service as ListeningService;
 use pingora::upstreams::peer::HttpPeer;
+use serve::indexer::DocContextError;
 
 use std::{
     fs,
@@ -28,6 +29,7 @@ use domain::setting::Settings;
 
 use crate::db::tantivy::ContentIndexError;
 use crate::fs::ext::ThemeBinding;
+use crate::fs::index::FrontMatterIndexError;
 use crate::router::build_app_router;
 
 /// Shared state: which loopback port is currently "active" for the WebServer.
@@ -75,11 +77,17 @@ pub enum EdgeError {
     #[error("Content Index Error {0}")]
     ContentIndex(#[from] ContentIndexError),
 
+    #[error("FrontMatter Index Error {0}")]
+    FrontMatterIndexError(#[from] FrontMatterIndexError),
+
     #[error("Regex error: {0}")]
     Regex(#[from] regex::Error),
 
     #[error("Runtime error: {0}")]
     Runtime(#[from] RuntimeError),
+
+    #[error("DocContextError error: {0}")]
+    DocContextError(#[from] DocContextError),
 
     #[error("Other: {0}")]
     Other(String),
@@ -323,6 +331,7 @@ impl EdgeRuntime {
 
         let server = HttpServer::new(move || {
             App::new().service(build_app_router(
+                root.clone(),
                 handles_for_server.clone(),
                 bindings_for_server.clone(),
             ))

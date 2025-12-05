@@ -1,5 +1,6 @@
 // crates/edge/src/router.rs
 
+use crate::fs::{ext::ThemeBinding, index::ContentMgr};
 use actix_web::{
     dev::HttpServiceFactory, http::Method as ActixMethod, web, HttpMessage, HttpRequest,
     HttpResponse,
@@ -20,8 +21,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, error};
 
-use crate::fs::ext::ThemeBinding;
-
 /// Per-theme state carried on the scope.
 #[derive(Clone)]
 struct ThemeAppState {
@@ -34,6 +33,7 @@ struct ThemeAppState {
     ///
     /// Typically `<theme-dir>/templates`.
     template_root: PathBuf,
+    content_mgr: ContentMgr,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@ struct ThemeAppState {
 /// `HttpServer::new(move || build_app_router(handles.clone(), bindings.clone()))`.
 #[tracing::instrument(skip_all)]
 pub fn build_app_router(
+    root_dir: PathBuf,
     handles: RuntimeHandles,
     bindings: Vec<ThemeBinding>,
 ) -> impl HttpServiceFactory {
@@ -73,6 +74,7 @@ pub fn build_app_router(
             plugin_ids: plugin_ids.clone(),
             theme_id,
             template_root,
+            content_mgr: ContentMgr::new(root_dir.clone()),
         };
 
         // Normalize root theme mount: treat "/" as "" so that both "/"
@@ -158,6 +160,7 @@ async fn theme_route_handler(state: web::Data<ThemeAppState>, req: HttpRequest) 
         plugin_ids,
         theme_id,
         template_root,
+        content_mgr,
     } = state.get_ref().clone();
 
     let path_for_log = req.uri().path().to_string();
@@ -178,7 +181,7 @@ async fn theme_route_handler(state: web::Data<ThemeAppState>, req: HttpRequest) 
         let method = to_http_method(&actix_method);
         let headers = to_http_headers(&headers_actix);
 
-        let resolved = match resolve(&path, &method) {
+        let resolved = match resolve(&content_mgr, &path, &method).await {
             Ok(r) => r,
             Err(_e) => ResolvedContent::empty(),
         };

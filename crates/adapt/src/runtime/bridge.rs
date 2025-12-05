@@ -156,11 +156,7 @@ fn ctx_to_js(ctx: &RequestContext, config: Option<&serde_json::Value>) -> JsValu
 
     match ctx.content_body.clone() {
         Some(body) => {
-            content_obj.insert(
-                "body".to_string(),
-                body.get_utf8()
-                    .map_or_else(|_| Json::Null, |b| Json::String(b)),
-            );
+            content_obj.insert("body".to_string(), Json::String(body.as_ref().clone()));
         }
         None => {
             content_obj.insert("body".to_string(), Json::Null);

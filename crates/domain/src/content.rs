@@ -1,8 +1,8 @@
 // crates/domain/src/content.rs
 
-use crate::stream::{BytesStream, StreamHandle, Utf8Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as Json};
+use std::sync::Arc;
 
 /// Content classification for a given request path.
 ///
@@ -41,7 +41,7 @@ pub struct ResolvedContent {
     pub front_matter: Json,
 
     /// Optional body stream handle (FS or CAS).
-    pub body: Option<StreamHandle>,
+    pub body: Option<Arc<String>>,
 }
 
 impl ResolvedContent {
@@ -59,22 +59,8 @@ impl ResolvedContent {
     }
 
     /// Builder-style helper to attach a body stream handle.
-    pub fn with_body(mut self, body: Option<StreamHandle>) -> Self {
-        self.body = body;
+    pub fn with_body(mut self, body: Arc<String>) -> Self {
+        self.body = Some(body);
         self
-    }
-
-    /// Materialize the body as a byte stream.
-    ///
-    /// Returns `None` if no body handle is present.
-    pub fn bytes_stream(&self) -> Option<BytesStream> {
-        self.body.as_ref().map(|h| h.open_bytes())
-    }
-
-    /// Materialize the body as a UTF-8 stream.
-    ///
-    /// Returns `None` if no body handle is present.
-    pub fn utf8_stream(&self) -> Option<Utf8Stream> {
-        self.body.as_ref().map(|h| h.open_utf8())
     }
 }
