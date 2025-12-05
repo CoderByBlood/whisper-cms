@@ -17,8 +17,8 @@ use serve::{
     },
     resolver::{build_request_context, resolve},
 };
-use std::collections::HashMap;
 use std::path::PathBuf;
+use std::{collections::HashMap, path::Path};
 use tracing::{debug, error};
 
 /// Per-theme state carried on the scope.
@@ -48,7 +48,7 @@ struct ThemeAppState {
 /// `HttpServer::new(move || build_app_router(handles.clone(), bindings.clone()))`.
 #[tracing::instrument(skip_all)]
 pub fn build_app_router(
-    root_dir: PathBuf,
+    root_dir: &Path,
     handles: RuntimeHandles,
     bindings: Vec<ThemeBinding>,
 ) -> impl HttpServiceFactory {
@@ -74,7 +74,7 @@ pub fn build_app_router(
             plugin_ids: plugin_ids.clone(),
             theme_id,
             template_root,
-            content_mgr: ContentMgr::new(root_dir.clone()),
+            content_mgr: ContentMgr::new(root_dir.to_path_buf()),
         };
 
         // Normalize root theme mount: treat "/" as "" so that both "/"

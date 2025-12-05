@@ -89,9 +89,9 @@ pub fn start_scan(
 // ======================================================================
 
 #[tracing::instrument(skip_all)]
-pub async fn index_front_matter(root: PathBuf, served_path: &Path, fm: &Json) -> Result<(), Error> {
+pub async fn index_front_matter(root: &Path, served_path: &Path, fm: &Json) -> Result<(), Error> {
     // IMPORTANT: use canonical *served* ID, not absolute FS path.
-    let id = canonical_id_from_source(&root, &served_path);
+    let id = canonical_id_from_source(root, served_path);
     let mut record = IndexRecord::from_json_with_id(id, &fm);
 
     // Optionally hydrate slug from FM if not already set.
@@ -235,7 +235,7 @@ impl ContentManager for ContentMgr {
     }
 
     async fn index_front_matter(&self, served_path: &Path, fm: &Json) -> Result<(), serve::Error> {
-        index_front_matter(self.root.clone(), served_path, fm)
+        index_front_matter(self.root.as_path(), served_path, fm)
             .await
             .map_err(|e| serve::Error::FrontMatterIndex(e.to_string()))
     }

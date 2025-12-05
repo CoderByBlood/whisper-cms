@@ -450,8 +450,13 @@ impl StartProcess<RouterCreated> {
         let settings = self.state.settings.clone();
         let root = self.state.command.dir.clone();
 
-        let runtime =
-            EdgeRuntime::start(root, settings, handles.clone(), theme_bindings.clone()).await?;
+        let runtime = EdgeRuntime::start(
+            root.as_path(),
+            settings,
+            handles.clone(),
+            theme_bindings.clone(),
+        )
+        .await?;
 
         Ok(self.done(runtime))
     }

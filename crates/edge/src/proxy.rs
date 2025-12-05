@@ -249,7 +249,7 @@ impl EdgeRuntime {
     ///   - **Still start the WebServer** (on loopback) so you can configure/fix certs.
     #[tracing::instrument(skip_all)]
     pub async fn start(
-        root: PathBuf,
+        root: &Path,
         settings: Settings,
         handles: RuntimeHandles,
         bindings: Vec<ThemeBinding>,
@@ -281,12 +281,13 @@ impl EdgeRuntime {
 
         let handles_for_server = handles.clone();
         let bindings_for_server = bindings.clone();
+        let root_dir = root.to_path_buf();
 
         tracing::info!("Actix WebServer started on {}", initial_addr);
 
         let server = HttpServer::new(move || {
             App::new().service(build_app_router(
-                root.clone(),
+                root_dir.as_ref(),
                 handles_for_server.clone(),
                 bindings_for_server.clone(),
             ))

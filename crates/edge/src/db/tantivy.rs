@@ -43,9 +43,8 @@ impl ContentIndex {
     /// Create or open an index at `index_dir`.
     ///
     /// `writer_heap_bytes` is the Tantivy writer memory budget.
-    pub fn open_or_create<P: AsRef<Path>>(index_dir: P, writer_heap_bytes: usize) -> Result<Self> {
-        let index_dir = index_dir.as_ref();
-        fs::create_dir_all(index_dir)?;
+    pub fn open_or_create(index_dir: impl AsRef<Path>, writer_heap_bytes: usize) -> Result<Self> {
+        fs::create_dir_all(index_dir.as_ref())?;
 
         // Define schema: path + content.
         let mut schema_builder = Schema::builder();
@@ -54,7 +53,7 @@ impl ContentIndex {
         let schema = schema_builder.build();
 
         // open_or_create wants a Directory, not a Path.
-        let directory = MmapDirectory::open(index_dir)?;
+        let directory = MmapDirectory::open(index_dir.as_ref())?;
         let index = Index::open_or_create(directory, schema.clone())?;
 
         let writer: IndexWriter = index.writer(writer_heap_bytes)?;
