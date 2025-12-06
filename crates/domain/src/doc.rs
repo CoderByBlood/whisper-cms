@@ -1,6 +1,7 @@
 // crates/domain/src/doc.rs
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,9 +39,9 @@ pub struct Document {
     pub mtime: Option<SystemTime>,
 
     /// Cached full UTF-8 contents of the file (optional).
-    pub cache: Option<String>,
+    pub cache: Option<Arc<str>>,
     /// Cached body-only text (after front matter), if extracted.
-    pub cached_body: Option<String>,
+    pub cached_body: Option<Arc<str>>,
 
     /// Detected front-matter kind.
     pub fm_kind: Option<FmKind>,
@@ -76,12 +77,12 @@ impl Document {
         self
     }
 
-    pub fn with_cache(mut self, cache: String) -> Self {
+    pub fn with_cache(mut self, cache: Arc<str>) -> Self {
         self.cache = Some(cache);
         self
     }
 
-    pub fn with_body(mut self, cached_body: String) -> Self {
+    pub fn with_body(mut self, cached_body: Arc<str>) -> Self {
         self.cached_body = Some(cached_body);
         self
     }

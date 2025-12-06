@@ -284,7 +284,7 @@ pub struct RequestContext {
     pub req_body: Option<Bytes>, // opaque HTTP request stream
 
     #[serde(skip)]
-    pub content_body: Option<Arc<String>>, // opaque FS / CAS stream
+    pub content_body: Option<Arc<str>>, // opaque FS / CAS stream
 
     pub recommendations: Recommendations,
     pub response_spec: ResponseSpec,
@@ -305,7 +305,7 @@ impl RequestContext {
         theme_config: Json,
         plugin_configs: HashMap<String, Json>,
         req_body: Option<Bytes>,
-        content_body: Option<Arc<String>>,
+        content_body: Option<Arc<str>>,
     ) -> Self {
         RequestContext::builder()
             .path(req_path)
@@ -353,7 +353,7 @@ pub struct RequestContextBuilder {
     pub theme_config: Json,
     pub plugin_configs: HashMap<String, Json>,
     pub req_body: Option<Bytes>,
-    pub content_body: Option<Arc<String>>,
+    pub content_body: Option<Arc<str>>,
 }
 
 impl RequestContextBuilder {
@@ -416,12 +416,12 @@ impl RequestContextBuilder {
         self
     }
 
-    pub fn content_body(mut self, s: Arc<String>) -> Self {
+    pub fn content_body(mut self, s: Arc<str>) -> Self {
         self.content_body = Some(s);
         self
     }
 
-    pub fn content_body_opt(mut self, s: Option<Arc<String>>) -> Self {
+    pub fn content_body_opt(mut self, s: Option<Arc<str>>) -> Self {
         self.content_body = s;
         self
     }

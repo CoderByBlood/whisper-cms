@@ -41,7 +41,7 @@ pub struct Content {
     pub front_matter: Json,
 
     /// Optional body stream handle (FS or CAS).
-    pub body: Option<Arc<String>>,
+    pub body: Option<Arc<str>>,
 }
 
 impl Content {
@@ -59,7 +59,7 @@ impl Content {
     }
 
     /// Builder-style helper to attach a body stream handle.
-    pub fn with_body(mut self, body: Arc<String>) -> Self {
+    pub fn with_body(mut self, body: Arc<str>) -> Self {
         self.body = Some(body);
         self
     }

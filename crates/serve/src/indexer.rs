@@ -75,7 +75,7 @@ pub type ScanStopFn = Box<dyn FnOnce() + Send + 'static>;
 
 #[async_trait]
 pub trait ContentManager {
-    async fn scan_file(&self, path: &Path) -> Result<String, Error>;
+    async fn scan_file(&self, path: &Path) -> Result<Arc<str>, Error>;
 
     async fn scan_folder(
         &self,
@@ -90,7 +90,7 @@ pub trait ContentManager {
 
     async fn lookup_slug(&self, slug: &str) -> Result<Option<Json>, Error>;
     async fn lookup_served(&self, served: &str) -> Result<Option<Json>, Error>;
-    async fn lookup_body(&self, body: &str) -> Result<Option<Arc<String>>, Error>;
+    async fn lookup_body(&self, key: &str) -> Result<Option<Arc<str>>, Error>;
 }
 
 // ---------------------------------------------------------------------------
@@ -161,12 +161,7 @@ pub async fn upsert_front_matter_db(
     use gray_matter::Matter;
 
     let mut ctx = read_document_utf8(ctx, scan_indexer).await?;
-    let full = ctx
-        .document
-        .cache
-        .as_ref()
-        .map(String::as_str)
-        .unwrap_or("");
+    let full = ctx.document.cache.clone().unwrap_or(Arc::from(""));
 
     let mut fm_json = None;
     let mut fm_kind = None;
@@ -175,11 +170,11 @@ pub async fn upsert_front_matter_db(
     // YAML FM
     if fm_json.is_none() {
         let matter: Matter<YAML> = Matter::new();
-        if let Ok(parsed) = matter.parse::<Json>(full) {
+        if let Ok(parsed) = matter.parse::<Json>(&full) {
             if let Some(data) = parsed.data {
                 fm_json = Some(data);
                 fm_kind = Some(FmKind::Yaml);
-                body = Some(parsed.content);
+                body = Some(Arc::from(parsed.content.as_str()));
             }
         }
     }
@@ -198,7 +193,7 @@ pub async fn upsert_front_matter_db(
                                 .map_err(|e| Error::FrontMatter(e.to_string()))?,
                         );
                         fm_kind = Some(FmKind::Toml);
-                        body = Some(after[end_idx + 4..].trim_start().to_owned());
+                        body = Some(Arc::from(after[end_idx + 4..].trim_start()));
                     }
                     Err(e) => return Err(Error::FrontMatter(e.to_string())),
                 }
@@ -214,7 +209,7 @@ pub async fn upsert_front_matter_db(
                 Ok(v) => {
                     fm_json = Some(v);
                     fm_kind = Some(FmKind::Json);
-                    body = Some(String::new());
+                    body = Some(Arc::from(""));
                 }
                 Err(e) => return Err(Error::FrontMatter(e.to_string())),
             }

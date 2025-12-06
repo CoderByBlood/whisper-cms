@@ -178,11 +178,11 @@ pub async fn lookup_front_matter_by_slug(slug: &str) -> Result<Option<Json>, Err
     }
 }
 
-pub async fn lookup_body(key: &str) -> Result<Option<Arc<String>>, Error> {
+pub async fn lookup_body(key: &str) -> Result<Option<Arc<str>>, Error> {
     if let Some(cas) = CAS.write().await.as_mut() {
         let cursor = cas.get(Path::new(key))?;
         let bytes = cursor.into_inner(); // take ownership of the Vec<u8>
-        Ok(Some(Arc::new(String::from_utf8(bytes)?)))
+        Ok(Some(Arc::from(String::from_utf8_lossy(&bytes))))
     } else {
         Err(Error::NoCas("No Database".into()))
     }
@@ -221,9 +221,9 @@ impl ContentMgr {
 }
 #[async_trait]
 impl ContentManager for ContentMgr {
-    async fn scan_file(&self, path: &Path) -> Result<String, serve::Error> {
+    async fn scan_file(&self, path: &Path) -> Result<Arc<str>, serve::Error> {
         let bytes = fs::read(path)?;
-        Ok(String::from_utf8_lossy(&bytes).to_string())
+        Ok(Arc::from(String::from_utf8_lossy(&bytes)))
     }
 
     async fn scan_folder(
@@ -263,7 +263,7 @@ impl ContentManager for ContentMgr {
             .map_err(|e| serve::Error::Backend(e.to_string()))
     }
 
-    async fn lookup_body(&self, key: &str) -> Result<Option<Arc<String>>, serve::Error> {
+    async fn lookup_body(&self, key: &str) -> Result<Option<Arc<str>>, serve::Error> {
         lookup_body(key)
             .await
             .map_err(|e| serve::Error::Backend(e.to_string()))
