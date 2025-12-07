@@ -1,6 +1,7 @@
 // crates/adapt/src/runtime/plugin.rs
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::bridge::{ctx_to_js_for_plugins, merge_recommendations_from_js, CTX_SHIM_SRC};
 use crate::js::{JsEngine, JsValue};
@@ -14,17 +15,17 @@ use uuid::Uuid;
 /// Host-facing plugin spec. Configured ID never leaves Rust.
 #[derive(Debug, Clone)]
 pub struct PluginSpec {
-    pub id: String,
-    pub name: String,
-    pub source: String,
+    pub id: Arc<str>,
+    pub name: Arc<str>,
+    pub source: Arc<str>,
 }
 
 /// Metadata for runtime bookkeeping
 #[derive(Clone, Debug)]
 pub struct PluginMeta {
-    pub internal_id: String,   // opaque runtime ID, used to call hooks
-    pub configured_id: String, // used ONLY for ctx.config lookup
-    pub name: String,
+    pub internal_id: Arc<str>,   // opaque runtime ID, used to call hooks
+    pub configured_id: Arc<str>, // used ONLY for ctx.config lookup
+    pub name: Arc<str>,
 }
 
 /// PluginRuntime: manages a single Boa engine and multiple plugins inside it
@@ -32,7 +33,7 @@ pub struct PluginMeta {
 pub struct PluginRuntime<E: JsEngine> {
     engine: E,
     /// Keyed by internal (opaque) ID.
-    plugins: HashMap<String, PluginMeta>,
+    plugins: HashMap<Arc<str>, PluginMeta>,
 }
 
 #[tracing::instrument(skip_all)]
@@ -78,7 +79,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     pub fn load_plugins(&mut self, specs: &[PluginSpec]) -> Result<(), Error> {
         for spec in specs {
             let configured_id = spec.id.clone();
-            let internal_id = format!("plugin_{}", Uuid::new_v4().simple());
+            let internal_id = Arc::from(format!("plugin_{}", Uuid::new_v4().simple()));
 
             // Prelude: defines registerPlugin()
             let prelude = build_plugin_prelude(&internal_id);
@@ -174,7 +175,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     #[tracing::instrument(skip_all)]
     pub fn before_plugin(
         &mut self,
-        configured_id: &str,
+        configured_id: Arc<str>,
         ctx: &mut RequestContext,
     ) -> Result<(), Error> {
         let meta_opt = {
@@ -197,7 +198,7 @@ impl<E: JsEngine> PluginRuntime<E> {
     #[tracing::instrument(skip_all)]
     pub fn after_plugin(
         &mut self,
-        configured_id: &str,
+        configured_id: Arc<str>,
         ctx: &mut RequestContext,
     ) -> Result<(), Error> {
         let meta_opt = {

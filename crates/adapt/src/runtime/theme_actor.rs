@@ -4,6 +4,7 @@ use crate::runtime::bootstrap::BoundTheme;
 use crate::{js::engine::BoaEngine, Error};
 use serve::render::http::{RequestContext, ResponseBodySpec};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands handled by the theme actor.
@@ -16,7 +17,7 @@ enum ThemeCommand {
 
     /// Render using a specific theme id.
     Render {
-        theme_id: String,
+        theme_id: Arc<str>,
         ctx: RequestContext,
         reply: oneshot::Sender<Result<ResponseBodySpec, Error>>,
     },
@@ -67,14 +68,14 @@ impl ThemeRuntimeClient {
     /// Render using a specific theme id.
     pub async fn render(
         &self,
-        theme_id: &str,
+        theme_id: Arc<str>,
         ctx: RequestContext,
     ) -> Result<ResponseBodySpec, Error> {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.tx
             .send(ThemeCommand::Render {
-                theme_id: theme_id.to_string(),
+                theme_id: theme_id,
                 ctx,
                 reply: reply_tx,
             })
@@ -103,10 +104,10 @@ async fn theme_actor_loop(
     //
     // We keep themes mutable because `BoundTheme::render` takes `&mut self`
     // (engine is mutated while executing JS).
-    let mut themes_by_id: HashMap<String, BoundTheme<BoaEngine>> = themes
+    let mut themes_by_id: HashMap<Arc<str>, BoundTheme<BoaEngine>> = themes
         .into_iter()
         .map(|t| {
-            let id = t.id().to_string();
+            let id = t.id();
             (id, t)
         })
         .collect();
@@ -249,7 +250,7 @@ mod tests {
 
         let client = ThemeRuntimeClient { tx };
 
-        let res = client.render("default", dummy_ctx()).await;
+        let res = client.render(Arc::from("default"), dummy_ctx()).await;
         match res {
             Err(Error::ThemeBootstrap(msg)) => {
                 assert!(
@@ -275,7 +276,7 @@ mod tests {
                 // Actor with no themes available
                 tokio::task::spawn_local(theme_actor_loop(Vec::new(), rx));
 
-                let res = client.render("missing-theme", dummy_ctx()).await;
+                let res = client.render(Arc::from("missing-theme"), dummy_ctx()).await;
                 match res {
                     Err(Error::ThemeBootstrap(msg)) => {
                         assert!(
@@ -315,7 +316,7 @@ mod tests {
                 );
 
                 // render with unknown theme id should give ThemeBootstrap error.
-                let render_res = client.render("nonexistent", dummy_ctx()).await;
+                let render_res = client.render(Arc::from("nonexistent"), dummy_ctx()).await;
                 match render_res {
                     Err(Error::ThemeBootstrap(msg)) => {
                         assert!(

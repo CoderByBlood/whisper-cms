@@ -17,8 +17,8 @@ use serve::{
     },
     resolver::{build_request_context, resolve},
 };
-use std::path::PathBuf;
 use std::{collections::HashMap, path::Path};
+use std::{path::PathBuf, sync::Arc};
 use tracing::{debug, error};
 
 /// Per-theme state carried on the scope.
@@ -26,9 +26,9 @@ use tracing::{debug, error};
 struct ThemeAppState {
     theme_client: ThemeRuntimeClient,
     plugin_client: PluginRuntimeClient,
-    plugin_ids: Vec<String>,
+    plugin_ids: Vec<Arc<str>>,
     /// Theme identifier (as known to the JS runtime).
-    theme_id: String,
+    theme_id: Arc<str>,
     /// Filesystem root for this theme's templates directory.
     ///
     /// Typically `<theme-dir>/templates`.
@@ -54,7 +54,7 @@ pub fn build_app_router(
 ) -> impl HttpServiceFactory {
     let theme_client = handles.theme_client.clone();
     let plugin_client = handles.plugin_client.clone();
-    let plugin_ids: Vec<String> = handles
+    let plugin_ids: Vec<Arc<str>> = handles
         .plugin_configs
         .iter()
         .map(|cfg| cfg.id.clone())
@@ -79,7 +79,11 @@ pub fn build_app_router(
 
         // Normalize root theme mount: treat "/" as "" so that both "/"
         // and "/index.html" (and everything else) route correctly.
-        let scope_path = if mount_path == "/" { "" } else { &mount_path };
+        let scope_path = if mount_path.as_ref() == "/" {
+            ""
+        } else {
+            &mount_path
+        };
 
         let scope = web::scope(scope_path)
             .app_data(web::Data::new(state))
@@ -219,7 +223,7 @@ async fn theme_route_handler(state: web::Data<ThemeAppState>, req: HttpRequest) 
 
     // Ask the theme actor to render a ResponseBodySpec from the (possibly
     // plugin-mutated) RequestContext.
-    let result = theme_client.render(&theme_id, ctx).await;
+    let result = theme_client.render(theme_id.clone(), ctx).await;
     debug!("The ResponseBodySpec: {:?}", result);
 
     // NOTE: body patches (from plugins/themes) are not yet wired here.

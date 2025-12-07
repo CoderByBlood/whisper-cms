@@ -6,6 +6,7 @@ use adapt::Error;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A mapping from a mount path (URL prefix) to a theme id,
 /// plus the template root directory for that theme.
@@ -14,16 +15,16 @@ use std::path::{Path, PathBuf};
 /// (or `<assets_dir>/templates` if you decide that later).
 #[derive(Debug, Clone)]
 pub struct ThemeBinding {
-    pub mount_path: String,
-    pub theme_id: String,
+    pub mount_path: Arc<str>,
+    pub theme_id: Arc<str>,
     pub template_root: PathBuf,
 }
 
 impl ThemeBinding {
-    pub fn new(mount: impl Into<String>, theme: impl Into<String>, template_root: PathBuf) -> Self {
+    pub fn new(mount: Arc<str>, theme: Arc<str>, template_root: PathBuf) -> Self {
         Self {
-            mount_path: mount.into(),
-            theme_id: theme.into(),
+            mount_path: mount,
+            theme_id: theme,
             template_root,
         }
     }
@@ -44,7 +45,7 @@ pub struct DiscoveredPlugin {
 /// - `spec` is the runtime ThemeSpec (id, name, mount_path, source)
 #[derive(Debug, Clone)]
 pub struct DiscoveredTheme {
-    pub mount_path: String,
+    pub mount_path: Arc<str>,
     pub dir: PathBuf,
     pub assets_dir: Option<PathBuf>,
     pub spec: ThemeSpec,
@@ -129,9 +130,9 @@ pub fn discover_plugins(root: impl AsRef<Path>) -> Result<Vec<DiscoveredPlugin>,
         })?;
 
         let spec = PluginSpec {
-            id,
-            name,
-            source: js_src,
+            id: Arc::from(id),
+            name: Arc::from(name),
+            source: Arc::from(js_src),
         };
 
         out.push(DiscoveredPlugin { dir: path, spec });
@@ -204,14 +205,14 @@ pub fn discover_themes(root: impl AsRef<Path>) -> Result<Vec<DiscoveredTheme>, E
         };
 
         let spec = ThemeSpec {
-            id,
-            name,
-            mount_path: manifest.mount.clone(),
-            source: js_src,
+            id: Arc::from(id),
+            name: Arc::from(name),
+            mount_path: Arc::from(manifest.mount.clone()),
+            source: Arc::from(js_src),
         };
 
         out.push(DiscoveredTheme {
-            mount_path: manifest.mount,
+            mount_path: Arc::from(manifest.mount),
             dir: path,
             assets_dir,
             spec,

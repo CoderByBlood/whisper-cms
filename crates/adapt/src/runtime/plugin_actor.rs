@@ -3,6 +3,7 @@
 use crate::runtime::plugin::PluginRuntime;
 use crate::{js::engine::BoaEngine, Error};
 use serve::render::http::RequestContext;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands handled by the plugin actor.
@@ -18,14 +19,14 @@ enum PluginCommand {
 
     /// Call `before_plugin(configured_id, &mut ctx)` for a single plugin.
     BeforePlugin {
-        plugin_id: String,
+        plugin_id: Arc<str>,
         ctx: RequestContext,
         reply: oneshot::Sender<Result<RequestContext, Error>>,
     },
 
     /// Call `after_plugin(configured_id, &mut ctx)` for a single plugin.
     AfterPlugin {
-        plugin_id: String,
+        plugin_id: Arc<str>,
         ctx: RequestContext,
         reply: oneshot::Sender<Result<RequestContext, Error>>,
     },
@@ -84,7 +85,7 @@ impl PluginRuntimeClient {
     #[tracing::instrument(skip_all)]
     pub async fn before_plugin(
         &self,
-        plugin_id: impl Into<String>,
+        plugin_id: Arc<str>,
         ctx: RequestContext,
     ) -> Result<RequestContext, Error> {
         let plugin_id = plugin_id.into();
@@ -108,7 +109,7 @@ impl PluginRuntimeClient {
     #[tracing::instrument(skip_all)]
     pub async fn after_plugin(
         &self,
-        plugin_id: impl Into<String>,
+        plugin_id: Arc<str>,
         ctx: RequestContext,
     ) -> Result<RequestContext, Error> {
         let plugin_id = plugin_id.into();
@@ -164,7 +165,7 @@ async fn plugin_actor_loop(
                 reply,
             } => {
                 let res = (|| {
-                    runtime.before_plugin(&plugin_id, &mut ctx)?;
+                    runtime.before_plugin(plugin_id, &mut ctx)?;
                     Ok::<_, Error>(ctx)
                 })();
 
@@ -177,7 +178,7 @@ async fn plugin_actor_loop(
                 reply,
             } => {
                 let res = (|| {
-                    runtime.after_plugin(&plugin_id, &mut ctx)?;
+                    runtime.after_plugin(plugin_id, &mut ctx)?;
                     Ok::<_, Error>(ctx)
                 })();
 

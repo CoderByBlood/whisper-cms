@@ -20,6 +20,7 @@ use std::{
     future::Future,
     pin::Pin,
     rc::Rc,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -36,13 +37,13 @@ use crate::runtime::PluginRuntimeClient;
 #[derive(Clone)]
 pub struct PluginMiddleware {
     plugin_client: PluginRuntimeClient,
-    plugin_ids: Vec<String>,
+    plugin_ids: Vec<Arc<str>>,
 }
 
 impl PluginMiddleware {
     /// Create a new PluginMiddleware with a plugin runtime client and an
     /// ordered list of plugin IDs.
-    pub fn new(plugin_client: PluginRuntimeClient, plugin_ids: Vec<String>) -> Self {
+    pub fn new(plugin_client: PluginRuntimeClient, plugin_ids: Vec<Arc<str>>) -> Self {
         Self {
             plugin_client,
             plugin_ids,
@@ -79,7 +80,7 @@ where
 pub struct PluginMiddlewareService<S> {
     inner: Rc<RefCell<S>>,
     plugin_client: PluginRuntimeClient,
-    plugin_ids: Vec<String>,
+    plugin_ids: Vec<Arc<str>>,
 }
 
 impl<S, B> Service<ServiceRequest> for PluginMiddlewareService<S>

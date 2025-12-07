@@ -1,5 +1,7 @@
 // crates/adapt/src/runtime/bootstrap.rs
 
+use std::sync::Arc;
+
 use crate::js::engine::BoaEngine;
 use crate::js::JsEngine;
 use crate::runtime::plugin::{PluginRuntime, PluginSpec};
@@ -16,11 +18,11 @@ use serve::render::http::{RequestContext, ResponseBodySpec};
 #[derive(Clone, Debug)]
 pub struct PluginConfig {
     /// Host-facing plugin identifier (e.g., folder name, slug, etc.).
-    pub id: String,
+    pub id: Arc<str>,
     /// Human-readable name.
-    pub name: String,
+    pub name: Arc<str>,
     /// JavaScript source of the plugin (already loaded from disk).
-    pub source: String,
+    pub source: Arc<str>,
 }
 
 impl From<&PluginConfig> for PluginSpec {
@@ -50,18 +52,23 @@ impl From<&PluginSpec> for PluginConfig {
 #[derive(Clone, Debug)]
 pub struct ThemeConfig {
     /// Host-facing theme identifier (e.g., folder name, slug).
-    pub id: String,
+    pub id: Arc<str>,
     /// Human-readable display name.
-    pub name: String,
+    pub name: Arc<str>,
     /// Human-readable display name.
-    pub mount_path: String,
+    pub mount_path: Arc<str>,
     /// JavaScript source of the theme (already loaded from disk).
-    pub source: String,
+    pub source: Arc<str>,
 }
 
 impl From<&ThemeConfig> for ThemeSpec {
     fn from(cfg: &ThemeConfig) -> Self {
-        ThemeSpec::new(&cfg.id, &cfg.name, &cfg.mount_path, &cfg.source)
+        ThemeSpec::new(
+            cfg.id.clone(),
+            cfg.name.clone(),
+            cfg.mount_path.clone(),
+            cfg.source.clone(),
+        )
     }
 }
 
@@ -89,13 +96,13 @@ pub struct RuntimeHandles {
 
 /// A single bound theme: host id + JS runtime for that theme.
 pub struct BoundTheme<E: JsEngine> {
-    id: String,
+    id: Arc<str>,
     runtime: ThemeRuntime<E>,
 }
 
 impl<E: JsEngine> BoundTheme<E> {
-    pub fn id(&self) -> &str {
-        &self.id
+    pub fn id(&self) -> Arc<str> {
+        self.id.clone()
     }
 }
 

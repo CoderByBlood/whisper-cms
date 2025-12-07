@@ -1,5 +1,7 @@
 // crates/adapt/src/runtime/theme.rs
 
+use std::sync::Arc;
+
 use super::bridge::{ctx_to_js_for_theme, merge_theme_ctx_from_js, CTX_SHIM_SRC};
 use crate::{
     js::{JsEngine, JsValue},
@@ -37,19 +39,14 @@ fn build_theme_prelude(internal_id: &str, configured_id: &str) -> String {
 /// Theme specification for loading a JS theme.
 #[derive(Debug, Clone)]
 pub struct ThemeSpec {
-    pub id: String, // configured id, e.g. "demo-theme"
-    pub name: String,
-    pub mount_path: String,
-    pub source: String,
+    pub id: Arc<str>, // configured id, e.g. "demo-theme"
+    pub name: Arc<str>,
+    pub mount_path: Arc<str>,
+    pub source: Arc<str>,
 }
 
 impl ThemeSpec {
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        mount_path: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Self {
+    pub fn new(id: Arc<str>, name: Arc<str>, mount_path: Arc<str>, source: Arc<str>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -64,20 +61,20 @@ pub struct ThemeRuntime<E: JsEngine> {
     engine: E,
 
     /// Opaque internal id used in JS to look up hooks.
-    internal_id: String,
+    internal_id: Arc<str>,
 
     /// Configured theme id (from TOML / discovery).
-    configured_id: String,
+    configured_id: Arc<str>,
 
     /// Display name (not used internally).
-    _name: String,
+    _name: Arc<str>,
 }
 
 impl<E: JsEngine> ThemeRuntime<E> {
     #[tracing::instrument(skip_all)]
     pub fn new(mut engine: E, spec: ThemeSpec) -> Result<Self, Error> {
         let configured_id = spec.id;
-        let internal_id = format!("theme_{}", Uuid::new_v4().simple());
+        let internal_id = Arc::from(format!("theme_{}", Uuid::new_v4().simple()));
 
         // 1) host prelude: defines registerTheme(...)
         let prelude = build_theme_prelude(&internal_id, &configured_id);
