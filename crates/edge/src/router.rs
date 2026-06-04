@@ -168,9 +168,11 @@ async fn theme_route_handler(state: web::Data<ThemeAppState>, req: HttpRequest) 
 
     // Prefer a RequestContext injected by some earlier layer (if any),
     // otherwise build it directly here from the resolver.
-    let base_ctx: RequestContext = if let Some(existing) = req.extensions().get::<RequestContext>()
-    {
-        existing.clone()
+    let base_ctx: RequestContext = if let Some(existing) = {
+        let extensions = req.extensions();
+        extensions.get::<RequestContext>().cloned()
+    } {
+        existing
     } else {
         let path = req.uri().path().to_string();
         let actix_method = req.method().clone();
