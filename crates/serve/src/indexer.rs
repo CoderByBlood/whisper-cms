@@ -207,10 +207,7 @@ pub async fn upsert_front_matter_db(
     use gray_matter::Matter;
 
     let mut ctx = read_document_utf8(ctx, scan_indexer).await?;
-    let full = ctx
-        .document
-        .cache.as_deref()
-        .unwrap_or("");
+    let full = ctx.document.cache.as_deref().unwrap_or("");
 
     let mut fm_json = None;
     let mut fm_kind = None;

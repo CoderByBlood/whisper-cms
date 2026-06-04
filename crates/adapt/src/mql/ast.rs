@@ -59,8 +59,7 @@ pub enum Filter {
 ///   }
 ///
 /// That is parsed into this internal representation by `parse_find_options`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FindOptions {
     pub sort: Vec<(String, i8)>,
     pub limit: Option<usize>,

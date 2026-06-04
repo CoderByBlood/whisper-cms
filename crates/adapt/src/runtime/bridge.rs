@@ -351,11 +351,11 @@ fn parse_header_patch(v: &Json) -> Option<HeaderPatch> {
     };
 
     source_plugin.map(|source_plugin| HeaderPatch {
-            name,
-            value,
-            kind,
-            source_plugin,
-        })
+        name,
+        value,
+        kind,
+        source_plugin,
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -368,9 +368,9 @@ fn parse_model_patch(v: &Json) -> Option<ModelPatch> {
         .map(|s| s.to_string());
 
     source_plugin.map(|source_plugin| ModelPatch {
-            patch,
-            source_plugin,
-        })
+        patch,
+        source_plugin,
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -419,9 +419,9 @@ fn parse_body_patch(v: &Json) -> Option<BodyPatch> {
     };
 
     source_plugin.map(|source_plugin| BodyPatch {
-            kind,
-            source_plugin,
-        })
+        kind,
+        source_plugin,
+    })
 }
 
 #[tracing::instrument(skip_all)]

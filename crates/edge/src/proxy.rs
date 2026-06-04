@@ -209,9 +209,7 @@ impl EdgeProxy {
 impl ProxyHttp for EdgeProxy {
     type CTX = ();
 
-    fn new_ctx(&self) -> Self::CTX {
-        
-    }
+    fn new_ctx(&self) -> Self::CTX {}
 
     async fn upstream_peer(
         &self,
