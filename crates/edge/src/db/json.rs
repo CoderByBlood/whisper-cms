@@ -269,26 +269,15 @@ mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
     use tokio;
 
     // ─────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────
 
-    fn unique_temp_dir() -> std::path::PathBuf {
-        let mut base = std::env::temp_dir();
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        base.push(format!("indexed_json_tests_{}", nanos));
-        std::fs::create_dir_all(&base).unwrap();
-        base
-    }
-
     async fn new_db_with_records(records: Vec<IndexRecord>) -> SharedIndexedJson {
-        let base = unique_temp_dir();
+        let base = tempdir().expect("able to create temporary directory");
         let mut db = IndexedJson::<IndexRecord>::open(&base).await.unwrap();
         for rec in &records {
             db.append(rec).await.unwrap();
@@ -534,8 +523,8 @@ mod tests {
     // ─────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn indexedjsonstore_all_ids_and_get_on_empty_db() {
-        let base = unique_temp_dir();
+    async fn indexedjsonstore_all_ids_and_get_on_empty_db() -> std::io::Result<()> {
+        let base = tempdir()?;
         let db = IndexedJson::<IndexRecord>::open(&base).await.unwrap();
         let shared = Arc::new(Mutex::new(db));
         let store = IndexedJsonStore::new(shared);
@@ -550,6 +539,7 @@ mod tests {
             }))
             .await
             .is_none());
+        Ok(())
     }
 
     #[tokio::test]
@@ -583,8 +573,8 @@ mod tests {
     // ─────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn make_field_handles_string_i64_and_bool_and_unknown_field() {
-        let base = unique_temp_dir();
+    async fn make_field_handles_string_i64_and_bool_and_unknown_field() -> std::io::Result<()> {
+        let base = tempdir()?;
         let db = IndexedJson::<IndexRecord>::open(&base).await.unwrap();
         let shared = Arc::new(Mutex::new(db));
 
@@ -616,6 +606,7 @@ mod tests {
 
         // Unknown field => None
         assert!(backend.make_field("unknown.field", &json!("x")).is_none());
+        Ok(())
     }
 
     #[tokio::test]
