@@ -32,6 +32,12 @@ pub struct BoaEngine {
     context: Context,
 }
 
+impl Default for BoaEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BoaEngine {
     pub fn new() -> Self {
         Self {

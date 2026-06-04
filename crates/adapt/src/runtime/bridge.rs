@@ -350,16 +350,12 @@ fn parse_header_patch(v: &Json) -> Option<HeaderPatch> {
         _ => return None,
     };
 
-    if let Some(source_plugin) = source_plugin {
-        Some(HeaderPatch {
+    source_plugin.map(|source_plugin| HeaderPatch {
             name,
             value,
             kind,
             source_plugin,
         })
-    } else {
-        None
-    }
 }
 
 #[tracing::instrument(skip_all)]
@@ -371,14 +367,10 @@ fn parse_model_patch(v: &Json) -> Option<ModelPatch> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    if let Some(source_plugin) = source_plugin {
-        Some(ModelPatch {
+    source_plugin.map(|source_plugin| ModelPatch {
             patch,
             source_plugin,
         })
-    } else {
-        None
-    }
 }
 
 #[tracing::instrument(skip_all)]
@@ -426,14 +418,10 @@ fn parse_body_patch(v: &Json) -> Option<BodyPatch> {
         _ => return None,
     };
 
-    if let Some(source_plugin) = source_plugin {
-        Some(BodyPatch {
+    source_plugin.map(|source_plugin| BodyPatch {
             kind,
             source_plugin,
         })
-    } else {
-        None
-    }
 }
 
 #[tracing::instrument(skip_all)]
