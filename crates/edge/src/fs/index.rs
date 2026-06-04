@@ -164,7 +164,7 @@ async fn handle_get_front_matter_by_path(
                     current = next;
                 }
                 Ok(None) => return Ok(None),
-                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
+                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e)),
             }
         }
     } else {
@@ -185,7 +185,7 @@ async fn handle_get_front_matter_by_slug(
             match db.get(current).await {
                 Ok(Some((next, rec))) => {
                     if let Some(s) = &rec.slug {
-                        if s == &slug {
+                        if s == slug {
                             let json = serde_json::to_value(rec)
                                 .map_err(|e| FrontMatterIndexError::IndexedJson(e.into()))?;
                             return Ok(Some(json));
@@ -194,7 +194,7 @@ async fn handle_get_front_matter_by_slug(
                     current = next;
                 }
                 Ok(None) => return Ok(None),
-                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e.into())),
+                Err(e) => return Err(FrontMatterIndexError::IndexedJson(e)),
             }
         }
     } else {
@@ -212,7 +212,7 @@ pub fn start_scan(
 ) -> Result<(mpsc::Receiver<PathBuf>, ScanStopFn), EdgeError> {
     let (tx, rx) = mpsc::channel(cfg.channel_capacity);
     let stop = start_folder_scan(root, cfg.clone(), tx)?;
-    let stop_fn: ScanStopFn = Box::new(move || stop());
+    let stop_fn: ScanStopFn = Box::new(stop);
     Ok((rx, stop_fn))
 }
 

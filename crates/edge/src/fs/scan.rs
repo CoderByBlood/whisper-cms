@@ -43,8 +43,7 @@ pub fn start_folder_scan(
     // Pre-check root existence and type (fail fast with a regular io::Error).
     let meta = fs::metadata(root).map_err(|e| io::Error::new(e.kind(), format!("root: {e}")))?;
     if !meta.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             "root is not a directory",
         ));
     }
