@@ -209,9 +209,7 @@ pub async fn upsert_front_matter_db(
     let mut ctx = read_document_utf8(ctx, scan_indexer).await?;
     let full = ctx
         .document
-        .cache
-        .as_ref()
-        .map(String::as_str)
+        .cache.as_deref()
         .unwrap_or("");
 
     let mut fm_json = None;
@@ -305,7 +303,7 @@ fn render_asciidoc(src: &str, origin: &Path) -> Result<String, DocContextError> 
     let graph = parser
         .parse(scanner)
         .map_err(|e| DocContextError::AsciiDoc(e.to_string()))?;
-    Ok(render_htmlbook(&graph).map_err(|e| DocContextError::AsciiDoc(e.to_string()))?)
+    render_htmlbook(&graph).map_err(|e| DocContextError::AsciiDoc(e.to_string()))
 }
 
 fn render_rst(src: &str) -> Result<String, DocContextError> {
@@ -327,7 +325,7 @@ fn render_org(src: &str) -> Result<String, DocContextError> {
     let mut buf = Vec::new();
     org.write_html(&mut buf)
         .map_err(|e| DocContextError::Org(e.to_string()))?;
-    Ok(String::from_utf8(buf).map_err(|e| DocContextError::Org(e.to_string()))?)
+    String::from_utf8(buf).map_err(|e| DocContextError::Org(e.to_string()))
 }
 
 pub async fn upsert_body_db(
@@ -343,7 +341,7 @@ pub async fn upsert_body_db(
         .document
         .cached_body
         .as_deref()
-        .or_else(|| ctx.document.cache.as_deref())
+        .or(ctx.document.cache.as_deref())
         .unwrap_or("");
 
     let html = match kind {

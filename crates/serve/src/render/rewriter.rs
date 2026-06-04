@@ -27,7 +27,7 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                             let _ = el.set_attribute(name, value);
                         }
                         DomOp::RemoveAttr { name } => {
-                            let _ = el.remove_attribute(name);
+                            el.remove_attribute(name);
                         }
 
                         DomOp::AddClass(cls) => {
@@ -49,53 +49,53 @@ pub fn build_lol_settings_from_body_patches<'h, 's>(patches: &'h [BodyPatch]) ->
                         }
 
                         DomOp::SetInnerHtml(html) => {
-                            let _ = el.set_inner_content(html, ContentType::Html);
+                            el.set_inner_content(html, ContentType::Html);
                         }
 
                         DomOp::SetInnerText(text) => {
                             // Let lol_html escape text; no manual escaping.
-                            let _ = el.set_inner_content(text, ContentType::Text);
+                            el.set_inner_content(text, ContentType::Text);
                         }
 
                         DomOp::AppendHtml(html) => {
-                            let _ = el.append(html, ContentType::Html);
+                            el.append(html, ContentType::Html);
                         }
 
                         DomOp::PrependHtml(html) => {
-                            let _ = el.prepend(html, ContentType::Html);
+                            el.prepend(html, ContentType::Html);
                         }
 
                         DomOp::ReplaceWithHtml(html) => {
-                            let _ = el.replace(html, ContentType::Html);
+                            el.replace(html, ContentType::Html);
                         }
 
                         DomOp::ReplaceWithText(text) => {
                             // Let lol_html escape text; no manual escaping.
-                            let _ = el.replace(text, ContentType::Text);
+                            el.replace(text, ContentType::Text);
                         }
 
                         DomOp::InsertBeforeHtml(html) => {
-                            let _ = el.before(html, ContentType::Html);
+                            el.before(html, ContentType::Html);
                         }
 
                         DomOp::InsertBeforeText(text) => {
-                            let _ = el.before(text, ContentType::Text);
+                            el.before(text, ContentType::Text);
                         }
 
                         DomOp::InsertAfterHtml(html) => {
-                            let _ = el.after(html, ContentType::Html);
+                            el.after(html, ContentType::Html);
                         }
 
                         DomOp::InsertAfterText(text) => {
-                            let _ = el.after(text, ContentType::Text);
+                            el.after(text, ContentType::Text);
                         }
 
                         DomOp::Remove => {
-                            let _ = el.remove();
+                            el.remove();
                         }
 
                         DomOp::Unwrap => {
-                            let _ = el.remove_and_keep_content();
+                            el.remove_and_keep_content();
                         }
                     }
                 }
@@ -149,9 +149,7 @@ where
 
     /// Finalize the output.
     pub fn end(self) -> io::Result<()> {
-        self.rewriter
-            .end()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.rewriter.end().map_err(|e| io::Error::other(e))
     }
 }
 
