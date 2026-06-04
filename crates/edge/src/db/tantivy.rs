@@ -154,7 +154,7 @@ impl ContentIndex {
             .0
             .get(field_name)
             .and_then(|v| v.first())
-            .ok_or_else(|| missing_factory())?;
+            .ok_or_else(&missing_factory)?;
 
         match value {
             OwnedValue::Str(s) => Ok(s.clone()),

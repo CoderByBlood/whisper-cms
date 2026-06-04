@@ -109,7 +109,8 @@ where
         Box::pin(async move {
             // If we don't have a RequestContext, just pass through.
             let Some(mut ctx) = ctx_opt else {
-                return inner.borrow_mut().call(req).await;
+                let fut = inner.borrow_mut().call(req);
+                return fut.await;
             };
 
             // ─────────────────────────────────────────────────────────────
@@ -142,7 +143,10 @@ where
             }
 
             // Call the inner service (theme handler, etc).
-            let resp = inner.borrow_mut().call(req).await?;
+            let resp = {
+                let fut = inner.borrow_mut().call(req);
+                fut.await?
+            };
 
             // ─────────────────────────────────────────────────────────────
             // AFTER: run plugins in reverse order.

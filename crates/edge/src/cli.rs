@@ -231,7 +231,7 @@ impl StartProcess<CommandIssued> {
         }
 
         // Construct full path to file
-        let mut path = PathBuf::from(dir);
+        let mut path = dir;
         path.push("settings.toml");
 
         // Ensure file exists
@@ -476,6 +476,7 @@ impl StartProcess<RouterCreated> {
 impl StartProcess<ServerStarted> {
     #[tracing::instrument(skip_all)]
     async fn is_running(&self) -> Result<()> {
-        Ok(futures::future::pending::<()>().await)
+        let _: () = futures::future::pending::<()>().await;
+        Ok(())
     }
 }

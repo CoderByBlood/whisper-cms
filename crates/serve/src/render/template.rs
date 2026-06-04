@@ -40,6 +40,12 @@ pub struct HbsEngine {
     handlebars: Handlebars<'static>,
 }
 
+impl Default for HbsEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HbsEngine {
     pub fn new() -> Self {
         Self {
@@ -144,7 +150,7 @@ impl TemplateRegistry {
 
     /// Helper for creating an `io::Error` from a display-able value.
     fn io_other(msg: impl Into<String>) -> io::Error {
-        io::Error::new(io::ErrorKind::Other, msg.into())
+        io::Error::other(msg.into())
     }
 
     /// Resolve a logical template name like `"home.hbs"` against the root.

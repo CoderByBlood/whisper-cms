@@ -32,6 +32,12 @@ pub struct BoaEngine {
     context: Context,
 }
 
+impl Default for BoaEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BoaEngine {
     pub fn new() -> Self {
         Self {
@@ -79,13 +85,12 @@ impl BoaEngine {
         }
     }
 
-    fn to_boajs_value(&mut self, value: &JsValue) -> Result<BoaJsValue, JsError> {
+    fn js_to_boajs(&self, value: &JsValue) -> Result<BoaJsValue, JsError> {
         let json = Self::host_to_json(value);
-        BoaJsValue::from_json(&json, &mut self.context)
-            .map_err(|e| JsError::Conversion(e.to_string()))
+        BoaJsValue::from_json(&json, &self.context).map_err(|e| JsError::Conversion(e.to_string()))
     }
 
-    fn from_boajs_value(&mut self, value: &BoaJsValue) -> Result<JsValue, JsError> {
+    fn boajs_to_js(&mut self, value: &BoaJsValue) -> Result<JsValue, JsError> {
         let json = value
             .to_json(&mut self.context)
             .map_err(|e| JsError::Conversion(e.to_string()))?;
@@ -128,7 +133,7 @@ impl BoaEngine {
 impl JsEngine for BoaEngine {
     fn eval(&mut self, code: &str) -> Result<JsValue, JsError> {
         match self.context.eval(Source::from_bytes(code)) {
-            Ok(v) => self.from_boajs_value(&v),
+            Ok(v) => self.boajs_to_js(&v),
             Err(e) => Err(JsError::Eval(e.to_string())),
         }
     }
@@ -154,7 +159,7 @@ impl JsEngine for BoaEngine {
         // Convert args.
         let mut js_args = Vec::with_capacity(args.len());
         for a in args {
-            js_args.push(self.to_boajs_value(a)?);
+            js_args.push(self.js_to_boajs(a)?);
         }
 
         // Use global object as `this`.
@@ -162,7 +167,7 @@ impl JsEngine for BoaEngine {
         let res = func_obj.call(&this, &js_args, &mut self.context);
 
         match res {
-            Ok(v) => self.from_boajs_value(&v),
+            Ok(v) => self.boajs_to_js(&v),
             Err(e) => Err(JsError::Call(e.to_string())),
         }
     }
