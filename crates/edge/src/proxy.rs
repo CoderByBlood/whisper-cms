@@ -169,7 +169,10 @@ impl WebServerHandle {
         self.current_backend.set(new_addr);
 
         // Stop the old Actix server (gracefully).
-        if let Some(old) = self.server_handle.write().take() {
+        if let Some(old) = {
+            let mut write_lock = self.server_handle.write();
+            write_lock.take()
+        } {
             old.stop(true).await;
         }
 
@@ -182,7 +185,10 @@ impl WebServerHandle {
     /// Gracefully stop the current WebServer.
     #[tracing::instrument(skip_all)]
     pub async fn shutdown(&self) {
-        if let Some(handle) = self.server_handle.write().take() {
+        if let Some(handle) = {
+            let mut write_lock = self.server_handle.write();
+            write_lock.take()
+        } {
             handle.stop(true).await;
         }
     }
