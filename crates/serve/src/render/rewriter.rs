@@ -144,12 +144,12 @@ where
     pub fn write(&mut self, text: &str) -> io::Result<()> {
         self.rewriter
             .write(text.as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            .map_err(io::Error::other)
     }
 
     /// Finalize the output.
     pub fn end(self) -> io::Result<()> {
-        self.rewriter.end().map_err(|e| io::Error::other(e))
+        self.rewriter.end().map_err(io::Error::other)
     }
 }
 
