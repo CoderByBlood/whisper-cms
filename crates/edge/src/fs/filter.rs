@@ -98,7 +98,7 @@ pub fn is_textish_extension(ext: &str) -> bool {
 /// ```
 /// use std::path::Path;
 /// // Import from this crate so the doctest can resolve the symbol.
-/// use serve::filter::analyze_textish_file;
+/// use edge::fs::filter::analyze_textish_file;
 ///
 /// assert_eq!(
 ///     analyze_textish_file(Path::new("/tmp/readme.md")),
